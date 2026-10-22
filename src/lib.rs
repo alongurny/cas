@@ -7,13 +7,17 @@
 
 pub mod algo;
 pub mod backend;
+pub mod cache;
+pub mod client;
 pub mod disk;
 pub mod gate;
 pub mod key;
 pub mod mem;
 pub mod policy;
+pub mod server;
 pub mod store;
 pub mod types;
+pub mod wire;
 
 #[cfg(feature = "conformance")]
 pub mod conformance;

@@ -39,16 +39,16 @@ enum Kind {
 
 pub struct CoreStore {
     backend: Box<dyn Backend>,
-    gate: Box<dyn Gate>,
+    gate: Arc<dyn Gate>,
     policy: Policy,
 }
 
 impl CoreStore {
     pub fn new(backend: impl Backend + 'static, gate: impl Gate + 'static, policy: Policy) -> Arc<CoreStore> {
-        CoreStore::with_gate(backend, Box::new(gate), policy)
+        CoreStore::with_gate(backend, Arc::new(gate), policy)
     }
 
-    pub fn with_gate(backend: impl Backend + 'static, gate: Box<dyn Gate>, policy: Policy) -> Arc<CoreStore> {
+    pub fn with_gate(backend: impl Backend + 'static, gate: Arc<dyn Gate>, policy: Policy) -> Arc<CoreStore> {
         Arc::new(CoreStore { backend: Box::new(backend), gate, policy })
     }
 
