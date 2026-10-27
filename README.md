@@ -1,6 +1,11 @@
-# cas-core
+# cas
 
-Stages 2 and 3 of the CAS project: the core store from the Stage 1 spec, and the wire protocol in [spec/wire.md](spec/wire.md).
+The CAS project's Rust workspace.
+
+- `cas-core` (this directory), Stages 2 and 3: the core store from the Stage 1 spec, and the wire protocol in [spec/wire.md](spec/wire.md).
+- `cas-version` ([version/](version)), Stage 4: the version format in [spec/version.md](spec/version.md). It is a tooling layer of ordinary blobs that the core does not know about. The tree shape is tagged in every node, and `path/1` (one node per directory) is the first shape. It provides build, update, lookup, prefix walk (sparse checkout), diff, and import/checkout of a local directory.
+
+## cas-core
 
 - `CoreStore` runs every op in spec order: gate, key syntax, store policy, content checks, state.
 - Backends: `mem::MemBackend` (volatile, for tests and caches) and `disk::DiskBackend` (durable; temp file + fsync + rename, a lock file around tag CAS).
@@ -13,5 +18,7 @@ Stages 2 and 3 of the CAS project: the core store from the Stage 1 spec, and the
 `conformance` (feature `conformance`) holds one check per spec 9.x assertion. `conformance_tests!(harness)` turns them into tests for any harness that builds a fresh store from a policy and a gate; `tests/conformance.rs` runs it against five harnesses: the memory and disk backends directly, over HTTP, through a cache, and through a cache over HTTP.
 
 ```
-cargo test --features conformance
+cargo test --workspace --all-features
 ```
+
+That runs both crates. The shape suite is `version/tests/conformance.rs`, and every shape in `cas_version::SHAPES` must pass it.

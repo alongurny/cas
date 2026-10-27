@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e38e64d511ce449ad96c56e63d49a6ea2bc285ec6b829eaeb09125dea4663c2b # shrinks to m = {}, edits = {Path("a/a"): Remove}
+cc 0f36a1a5687c08f3d58ee49edf2fffb243d12a1ac5d3f40823272a8ca0e9090b # shrinks to m = {}, extra = {Path("a/a"): Entry { key: "blake3:2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213", mode: File }}, order = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3726921747992046, 15291550676521394497, 6969941355371728020, 9998552294763673436, 7757654189346485890, 4538076007510639619, 4908205184216052342, 3262607124087291480, 5723666322358900159, 16387787026788671544, 15552947344681207670, 15981160817970514403]

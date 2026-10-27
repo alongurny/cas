@@ -26,3 +26,6 @@ conformance = ["dep:proptest"]
 [[test]]
 name = "conformance"
 required-features = ["conformance"]
+
+[workspace]
+members = [".", "version"]
