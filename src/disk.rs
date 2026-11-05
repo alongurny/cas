@@ -38,7 +38,7 @@ impl DiskBackend {
             Some(Parsed::Blob { alg, digest_hex }) => {
                 self.root.join("blobs").join(alg).join(&digest_hex[..2.min(digest_hex.len())]).join(digest_hex)
             }
-            _ => self.root.join("tags").join(hex::encode(key)),
+            _ => tag_path(&self.root.join("tags"), key),
         }
     }
 
@@ -70,11 +70,7 @@ impl DiskBackend {
 
     fn all_keys(&self) -> io::Result<Vec<String>> {
         let mut keys = Vec::new();
-        for entry in fs::read_dir(self.root.join("tags"))? {
-            let name = entry?.file_name();
-            let bytes = hex::decode(name.to_string_lossy().as_bytes()).map_err(io::Error::other)?;
-            keys.push(String::from_utf8(bytes).map_err(io::Error::other)?);
-        }
+        tag_names(&self.root.join("tags"), String::new(), &mut keys)?;
         for alg in fs::read_dir(self.root.join("blobs"))? {
             let alg = alg?;
             let alg_name = alg.file_name().to_string_lossy().into_owned();
@@ -86,6 +82,39 @@ impl DiskBackend {
         }
         Ok(keys)
     }
+}
+
+/// File names are limited (often to 255 bytes), so a tag's hex name is cut
+/// into pieces of at most `TAG_PIECE` characters. Every piece but the last
+/// is a directory, marked with a trailing `-` so it never collides with a
+/// file of the same hex. Tags up to 127 bytes are a single file, as before.
+const TAG_PIECE: usize = 254;
+
+fn tag_path(tags: &Path, name: &str) -> PathBuf {
+    let hex = hex::encode(name);
+    let mut path = tags.to_path_buf();
+    let mut rest = hex.as_str();
+    while rest.len() > TAG_PIECE {
+        path.push(format!("{}-", &rest[..TAG_PIECE]));
+        rest = &rest[TAG_PIECE..];
+    }
+    path.push(rest);
+    path
+}
+
+fn tag_names(dir: &Path, prefix: String, keys: &mut Vec<String>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        match name.strip_suffix('-') {
+            Some(piece) if entry.file_type()?.is_dir() => tag_names(&entry.path(), prefix.clone() + piece, keys)?,
+            _ => {
+                let bytes = hex::decode(prefix.clone() + &name).map_err(io::Error::other)?;
+                keys.push(String::from_utf8(bytes).map_err(io::Error::other)?);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn sync_dir(dir: &Path) -> io::Result<()> {
@@ -142,5 +171,27 @@ impl Backend for DiskBackend {
         keys.sort_unstable();
         keys.truncate(limit);
         Ok(keys)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_tag_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = DiskBackend::open(dir.path()).unwrap();
+        let names = ["t".repeat(127), "u".repeat(128), "v".repeat(1000), format!("derived/{}/x", "a".repeat(200))];
+        for n in &names {
+            assert!(b.cas_tag(n, &Expect::Absent, Some(n.as_bytes())).unwrap());
+            assert_eq!(b.get(n).unwrap().as_deref(), Some(n.as_bytes()));
+        }
+        let mut want: Vec<String> = names.to_vec();
+        want.sort();
+        assert_eq!(b.list(&Span::all(), 100).unwrap(), want);
+        assert!(b.cas_tag(&names[2], &Expect::Value(names[2].clone().into_bytes()), None).unwrap());
+        assert_eq!(b.get(&names[2]).unwrap(), None);
+        assert_eq!(b.list(&Span::all(), 100).unwrap().len(), 3);
     }
 }
