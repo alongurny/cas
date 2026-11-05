@@ -4,6 +4,7 @@ The CAS project's Rust workspace.
 
 - `cas-core` (this directory), Stages 2 and 3: the core store from the Stage 1 spec, and the wire protocol in [spec/wire.md](spec/wire.md).
 - `cas-version` ([version/](version)), Stage 4: the version format in [spec/version.md](spec/version.md). It is a tooling layer of ordinary blobs that the core does not know about. Every reference is `<format> <key>`, and a format's id is the key of its format object in the single metaformat ([spec/metaformat.md](spec/metaformat.md)). Formats nest: directory formats hold references. The formats so far are `dir`, `raw`, `exec`, `symlink` and `git-blob` ([spec/formats/](spec/formats)). It provides build, update, lookup, prefix walk (sparse checkout), diff, and import/checkout of a local directory, and it keeps empty directories.
+- Stage 5, history records ([spec/history.md](spec/history.md)), also in `cas-version`. `uni` is a general data format of strings and maps, stored as a canonical binary serialization. `record` holds a version, its parents and metadata. The `history` module provides commit (moving a branch tag by compare-and-swap), log, and merge bases.
 
 ## cas-core
 

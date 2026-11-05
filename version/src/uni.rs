@@ -1,0 +1,274 @@
+//! The `uni` format (spec/formats/uni.md): strings and maps. Blobs hold the
+//! binary serialization; the text notation is for people.
+
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
+use std::fmt;
+
+/// A string, or a map from values to values.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Value {
+    Str(String),
+    Map(BTreeMap<Value, Value>),
+}
+
+/// Bytewise order of serializations, which is the order of map entries.
+impl Ord for Value {
+    fn cmp(&self, other: &Value) -> Ordering {
+        self.serialize().cmp(&other.serialize())
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Value) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Value {
+    pub fn str(s: impl Into<String>) -> Value {
+        Value::Str(s.into())
+    }
+
+    pub fn empty() -> Value {
+        Value::Map(BTreeMap::new())
+    }
+
+    pub fn map<K: Into<Value>, V: Into<Value>>(entries: impl IntoIterator<Item = (K, V)>) -> Value {
+        Value::Map(entries.into_iter().map(|(k, v)| (k.into(), v.into())).collect())
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            Value::Str(s) => Some(s),
+            Value::Map(_) => None,
+        }
+    }
+
+    pub fn as_map(&self) -> Option<&BTreeMap<Value, Value>> {
+        match self {
+            Value::Map(m) => Some(m),
+            Value::Str(_) => None,
+        }
+    }
+
+    /// The serialization: what is stored and hashed.
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.ser(&mut out);
+        out
+    }
+
+    fn ser(&self, out: &mut Vec<u8>) {
+        match self {
+            Value::Str(s) => {
+                out.push(0);
+                leb128(out, s.len());
+                out.extend_from_slice(s.as_bytes());
+            }
+            Value::Map(m) => {
+                out.push(1);
+                leb128(out, m.len());
+                for (k, v) in m {
+                    k.ser(out);
+                    v.ser(out);
+                }
+            }
+        }
+    }
+
+    /// Parse a serialization; anything that is not exactly one is an error.
+    pub fn deserialize(bytes: &[u8]) -> Result<Value, String> {
+        let mut at = 0;
+        let v = de(bytes, &mut at)?;
+        if at != bytes.len() {
+            return Err(format!("trailing bytes at {at}"));
+        }
+        Ok(v)
+    }
+
+    /// The text notation.
+    pub fn to_text(&self) -> String {
+        let mut out = String::new();
+        self.write(&mut out);
+        out
+    }
+
+    fn write(&self, out: &mut String) {
+        match self {
+            Value::Str(s) => {
+                out.push('\'');
+                for c in s.chars() {
+                    if c == '\\' || c == '\'' {
+                        out.push('\\');
+                    }
+                    out.push(c);
+                }
+                out.push('\'');
+            }
+            Value::Map(m) => {
+                out.push('{');
+                for (i, (k, v)) in m.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    k.write(out);
+                    out.push_str(": ");
+                    v.write(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+
+    /// Parse the text notation, in its one canonical spelling.
+    pub fn from_text(text: &str) -> Result<Value, String> {
+        let mut p = Parser { s: text, at: 0 };
+        let v = p.value()?;
+        if p.at != text.len() {
+            return Err(format!("trailing bytes at {}", p.at));
+        }
+        // Parsing accepts entries in any order; the notation has them sorted.
+        if v.to_text() != text {
+            return Err("not in canonical form".into());
+        }
+        Ok(v)
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Value {
+        Value::str(s)
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Value {
+        Value::Str(s)
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_text())
+    }
+}
+
+fn leb128(out: &mut Vec<u8>, mut n: usize) {
+    loop {
+        let b = (n & 0x7f) as u8;
+        n >>= 7;
+        if n == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+fn read_leb128(b: &[u8], at: &mut usize) -> Result<usize, String> {
+    let (mut n, mut shift) = (0usize, 0u32);
+    loop {
+        let byte = *b.get(*at).ok_or("truncated length")?;
+        *at += 1;
+        let part = ((byte & 0x7f) as usize).checked_shl(shift).filter(|p| p >> shift == (byte & 0x7f) as usize);
+        n |= part.ok_or("length overflows")?;
+        if byte & 0x80 == 0 {
+            // Shortest form: no final zero byte after the first.
+            if byte == 0 && shift > 0 {
+                return Err("length not in shortest form".into());
+            }
+            return Ok(n);
+        }
+        shift += 7;
+    }
+}
+
+fn de(b: &[u8], at: &mut usize) -> Result<Value, String> {
+    let tag = *b.get(*at).ok_or("truncated value")?;
+    *at += 1;
+    let len = read_leb128(b, at)?;
+    match tag {
+        0 => {
+            let end = at.checked_add(len).filter(|&e| e <= b.len()).ok_or("truncated string")?;
+            let s = std::str::from_utf8(&b[*at..end]).map_err(|_| "string is not UTF-8")?;
+            *at = end;
+            Ok(Value::Str(s.to_string()))
+        }
+        1 => {
+            let mut m = BTreeMap::new();
+            let mut prev: Option<&[u8]> = None;
+            for _ in 0..len {
+                let start = *at;
+                let k = de(b, at)?;
+                let kb = &b[start..*at];
+                if prev.is_some_and(|p| p >= kb) {
+                    return Err(format!("map key at {start} out of order"));
+                }
+                prev = Some(kb);
+                let v = de(b, at)?;
+                m.insert(k, v);
+            }
+            Ok(Value::Map(m))
+        }
+        t => Err(format!("unknown tag {t}")),
+    }
+}
+
+struct Parser<'a> {
+    s: &'a str,
+    at: usize,
+}
+
+impl Parser<'_> {
+    fn eat(&mut self, lit: &str) -> bool {
+        if self.s[self.at..].starts_with(lit) {
+            self.at += lit.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect(&mut self, lit: &str) -> Result<(), String> {
+        if self.eat(lit) { Ok(()) } else { Err(format!("expected {lit:?} at {}", self.at)) }
+    }
+
+    fn value(&mut self) -> Result<Value, String> {
+        if self.eat("'") {
+            let mut s = String::new();
+            let mut chars = self.s[self.at..].char_indices();
+            loop {
+                let Some((i, c)) = chars.next() else { return Err("unterminated string".into()) };
+                match c {
+                    '\'' => {
+                        self.at += i + 1;
+                        return Ok(Value::Str(s));
+                    }
+                    '\\' => match chars.next() {
+                        Some((_, e @ ('\\' | '\''))) => s.push(e),
+                        _ => return Err(format!("bad escape at {}", self.at + i)),
+                    },
+                    c => s.push(c),
+                }
+            }
+        }
+        self.expect("{")?;
+        let mut m = BTreeMap::new();
+        if self.eat("}") {
+            return Ok(Value::Map(m));
+        }
+        loop {
+            let k = self.value()?;
+            self.expect(": ")?;
+            let v = self.value()?;
+            if m.insert(k, v).is_some() {
+                return Err(format!("duplicate key before {}", self.at));
+            }
+            if self.eat("}") {
+                return Ok(Value::Map(m));
+            }
+            self.expect(", ")?;
+        }
+    }
+}

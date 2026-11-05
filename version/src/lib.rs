@@ -10,7 +10,9 @@
 pub mod dir;
 pub mod formats;
 pub mod fs;
+pub mod history;
 mod tree;
+pub mod uni;
 
 pub use formats::{Format, Kind, by_alias, by_id, publish};
 pub use tree::{Walk, build, diff, lookup, merge_diff, update, walk};

@@ -87,6 +87,10 @@ fn git(b: &[u8]) -> std::result::Result<(), String> {
     git_blob_contents(b).map(|_| ()).ok_or_else(|| "not blob <n>\\0<contents>".into())
 }
 
+fn uni(b: &[u8]) -> std::result::Result<(), String> {
+    crate::uni::Value::deserialize(b).map(|_| ())
+}
+
 static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
     vec![
         format("dir", include_str!("../../spec/formats/dir.md"), Kind::Dir(&dir::DIR)),
@@ -94,6 +98,8 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("exec", include_str!("../../spec/formats/exec.md"), Kind::Leaf(any)),
         format("symlink", include_str!("../../spec/formats/symlink.md"), Kind::Leaf(symlink)),
         format("git-blob", include_str!("../../spec/formats/git-blob.md"), Kind::Leaf(git)),
+        format("uni", include_str!("../../spec/formats/uni.md"), Kind::Leaf(uni)),
+        format("record", include_str!("../../spec/formats/record.md"), Kind::Leaf(crate::history::check)),
     ]
 });
 
