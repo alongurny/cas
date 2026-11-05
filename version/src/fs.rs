@@ -1,7 +1,8 @@
 //! Moving versions to and from a local directory (Unix): import a directory
 //! as a version, and check out a version, or only the part under a prefix.
 
-use crate::{Entry, Error, Mode, Path, Result, Shape, read_blob, walk, write_blob};
+use crate::formats::{Format, git_blob_contents};
+use crate::{Error, Node, Path, Ref, Result, build, put, read_blob, walk};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
 use std::collections::BTreeMap;
@@ -11,12 +12,13 @@ use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path as FsPath;
 
-/// Write every file under `dir` as a blob and build a version of them.
-/// Empty directories are dropped; names must be valid UTF-8 path names.
-pub fn import(store: &dyn Store, alg: &'static Algorithm, shape: &dyn Shape, dir: &FsPath) -> Result<String> {
+/// Write every file under `dir` as a blob (`raw`, `exec` or `symlink`) and
+/// build a version of them, keeping empty directories. Directories are in
+/// `format`. Names must be valid UTF-8 path names.
+pub fn import(store: &dyn Store, alg: &'static Algorithm, format: &'static Format, dir: &FsPath) -> Result<Ref> {
     let mut entries = BTreeMap::new();
     scan(store, alg, dir, None, &mut entries)?;
-    shape.build(store, alg, &entries)
+    build(store, alg, format, &entries)
 }
 
 fn scan(
@@ -24,7 +26,7 @@ fn scan(
     alg: &'static Algorithm,
     dir: &FsPath,
     at: Option<&Path>,
-    entries: &mut BTreeMap<Path, Entry>,
+    entries: &mut BTreeMap<Path, Node>,
 ) -> Result<()> {
     for item in fs::read_dir(dir)? {
         let item = item?;
@@ -34,42 +36,53 @@ fn scan(
             None => name,
         })?;
         let meta = fs::symlink_metadata(item.path())?;
-        let (bytes, mode) = if meta.file_type().is_symlink() {
-            (fs::read_link(item.path())?.into_os_string().into_encoded_bytes(), Mode::Link)
+        let r = if meta.file_type().is_symlink() {
+            put(store, alg, "symlink", &fs::read_link(item.path())?.into_os_string().into_vec())?
         } else if meta.is_dir() {
             scan(store, alg, &item.path(), Some(&path), entries)?;
+            entries.insert(path, Node::Dir);
             continue;
         } else if meta.permissions().mode() & 0o111 != 0 {
-            (fs::read(item.path())?, Mode::Exec)
+            put(store, alg, "exec", &fs::read(item.path())?)?
         } else {
-            (fs::read(item.path())?, Mode::File)
+            put(store, alg, "raw", &fs::read(item.path())?)?
         };
-        let key = write_blob(store, alg, &bytes)?;
-        entries.insert(path, Entry { key, mode });
+        entries.insert(path, Node::File(r));
     }
     Ok(())
 }
 
-/// Write the entries at or under `prefix` (all for `None`) into `dest`,
-/// which should be empty. Returns how many entries were written.
-pub fn checkout(store: &dyn Store, root: &str, prefix: Option<&Path>, dest: &FsPath) -> Result<usize> {
+/// Write what is at or under `prefix` (all for `None`) into `dest`, which
+/// should be empty. Files must be in `raw`, `exec`, `symlink` or
+/// `git-blob`. Returns how many paths were written.
+pub fn checkout(store: &dyn Store, root: &Ref, prefix: Option<&Path>, dest: &FsPath) -> Result<usize> {
     let mut n = 0;
-    for r in walk(store, root, prefix)? {
-        let (path, entry) = r?;
+    for item in walk(store, root, prefix) {
+        let (path, node) = item?;
         let target = dest.join(path.as_str());
+        let r = match node {
+            Node::Dir => {
+                fs::create_dir_all(&target)?;
+                n += 1;
+                continue;
+            }
+            Node::File(r) => r,
+        };
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bytes = read_blob(store, entry.key())?;
-        match entry.mode {
-            Mode::Link => {
-                symlink(OsString::from_vec(bytes), &target)?;
-            }
-            Mode::File | Mode::Exec => {
-                fs::write(&target, bytes)?;
-                let mode = if entry.mode == Mode::Exec { 0o755 } else { 0o644 };
+        let format = r.known_format().ok_or_else(|| Error::UnknownFormat(r.format().to_string()))?;
+        let bytes = read_blob(store, r.key())?;
+        format.check(r.key(), &bytes)?;
+        match format.alias {
+            "symlink" => symlink(OsString::from_vec(bytes), &target)?,
+            "raw" | "exec" | "git-blob" => {
+                let contents = if format.alias == "git-blob" { git_blob_contents(&bytes).unwrap() } else { &bytes };
+                fs::write(&target, contents)?;
+                let mode = if format.alias == "exec" { 0o755 } else { 0o644 };
                 fs::set_permissions(&target, fs::Permissions::from_mode(mode))?;
             }
+            other => return Err(Error::UnknownFormat(format!("cannot check out {other}"))),
         }
         n += 1;
     }

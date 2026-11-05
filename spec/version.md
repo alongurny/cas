@@ -1,117 +1,112 @@
 # Version format (Stage 4)
 
-A version is a canonical Merkle encoding of a map from paths to entries, stored as ordinary core
-blobs whose bytes contain other blob keys. The core knows nothing of it: to the core these are
-opaque blobs, and this format is tooling (crate `cas-version`).
+A version is a tree of directories and files stored as ordinary core blobs. The core knows nothing
+of it: this is tooling (crate `cas-version`).
 
-## 1. Paths and entries
+## 1. References and formats
+
+Blobs carry no headers saying what they are. Whoever points at a blob also says how to read it. A
+**reference** is a pair
+
+    <format> <key>
+
+of two blob keys: `<key>` holds the bytes, and `<format>` is the id of the format they are in.
+
+A **format** is an object in the single metaformat ([metaformat.md](metaformat.md)). It holds a
+name for people, the media type of its spec, and the blob key of the spec document. A format's id
+is the key of its format object, so formats are content addressed like everything else. Changing a
+spec gives a new format with a new id. Any store can serve and verify a format's description, and
+`formats::publish` writes the metaformat, the specs and the format objects. Names like `dir` are
+local aliases in tooling; references always carry ids.
+
+A format may have a header and a body inside its own bytes (`git-blob` does). That is the
+format's business and not part of this layer.
+
+Formats nest: a directory format holds references, each naming its child's format. This crate
+knows these formats, each specified in [formats/](formats):
+
+| alias      | kind      | bytes                                                       |
+|------------|-----------|-------------------------------------------------------------|
+| `dir`      | directory | lines of `<format> <key> <name>`, names strictly ascending   |
+| `raw`      | file      | the contents                                                |
+| `exec`     | file      | the contents of an executable                               |
+| `symlink`  | file      | the link target, non-empty, no NUL                          |
+| `git-blob` | file      | `blob <n>\0<contents>`, so its sha1 key is git's object id  |
+
+More formats are just more entries. A reference in a format this crate does not know is an
+opaque file: it is walked, diffed and stored, but not opened or checked out.
+
+## 2. Versions
+
+A **version** is a reference to its root directory, written as `<format> <key>`, as tags and
+history records will hold it. It maps paths to nodes. A node is a directory or a file (a reference
+in a non-directory format). Every parent of a path is a directory, and **empty directories are
+kept**.
 
 A **name** is a non-empty UTF-8 string that is not `.` or `..` and contains no `/` and no control
-character. A **path** is one or more names joined by `/`.
+character. A **path** is one or more names joined by `/`. **Canonical order** compares paths name
+by name, each name bytewise. So `a/z` sorts before `a-b`, and a directory is followed directly by
+what is under it.
 
-**Canonical order** compares paths name by name, each name bytewise. So `a/z` sorts before `a-b`,
-even though `-` is below `/` bytewise. A directory's contents follow right after the directory's
-own path and come before its next sibling, so any prefix selects one contiguous run.
+Rules every directory format must meet:
 
-An **entry** is a pair (content key, mode). The content key is a blob key of a registered algorithm
-with a digest of the right length. Its blob holds the file's bytes. The mode is one of:
+- **History independence.** The same tree, written with the same hash algorithm and the same
+  directory formats, gives the same root, whatever edits produced it.
+- **Canonical decoding.** Each directory has exactly one valid encoding; readers reject any other.
+- **Cost follows the change.** Lookup, update, prefix walk and diff touch only the directories on
+  the paths involved, never the whole tree.
 
-| mode   | meaning                                    |
-|--------|--------------------------------------------|
-| `file` | regular file                               |
-| `exec` | executable file                            |
-| `link` | symbolic link; the blob holds the target   |
+Directories in one version may use different directory formats, such as a prolly-tree format for
+a huge directory. Each operation reads a directory through its own format.
 
-A version maps paths to entries. No path in it lies under another path in it (nothing is both a
-file and a directory). Directories exist only as prefixes, so a version cannot hold an empty one.
+## 3. Operations
 
-## 2. Shapes
+- **build(format, map)** writes a version holding `map`, with every directory in `format`.
+  Missing parent directories are created.
+- **update(root, edits)** applies a batch: all removes, then all sets in canonical order.
+  - `remove p` removes `p` and everything under it; an absent path is fine.
+  - `set p <file>` replaces whatever is at `p`, including a whole directory.
+  - `set p dir` keeps a directory already at `p`, and otherwise puts an empty one there.
+  - Missing parents are created as directories. A set below a file is a **path conflict**, and the
+    version is left unchanged.
+  - Removing a directory's last child leaves the directory. New directories take their parent's
+    format. A directory that comes out unchanged is not rewritten.
+- **lookup(root, p)** returns the node at `p`, or absent.
+- **walk(root, prefix)** yields the nodes at and under `prefix` (all of them when there is no
+  prefix) in canonical order. It reads only the directories it returns. This is sparse checkout.
+- **diff(a, b, prefix)** yields every path at or under `prefix` whose node differs, as (path, old,
+  new) in canonical order. It descends only into directories whose references differ. A path
+  that changes between file and directory comes first, followed by everything under the
+  directory side.
+- **import / checkout** move a version to and from a local directory. Import writes `raw`, `exec`
+  and `symlink`, and keeps empty directories. Checkout also reads `git-blob`.
 
-How the map is split into blobs is the version's **shape**. Every node blob of every shape begins
-with the header line
+Errors: a referenced blob that is absent is `missing(key)`. Bytes that are invalid in their format
+are `malformed(key, reason)`. A root, or a file being checked out, in an unknown format is
+`unknown-format`. None of them is skipped silently.
 
-```
-cas-tree <shape>\n
-```
-
-where `<shape>` names the shape and its format revision, such as `path/1`. A reader picks the
-shape from the root's header and rejects a shape it does not know. A version's identity is its root
-key, so the same map has different roots in different shapes. Comparing versions across shapes
-means walking them (section 5).
-
-Every shape must satisfy these rules:
-
-- **History independence.** The same map, written with the same hash algorithm, gives the same root
-  key, whatever sequence of edits produced it.
-- **Canonical decoding.** Each node has exactly one valid encoding. Readers reject every other
-  encoding as malformed, so an invalid node can never alias a valid one.
-- **Cost follows the change.** Looking up a path, updating a few paths, walking a prefix, and
-  diffing versions that differ in a few paths each read and write blobs in proportion to the
-  paths involved (times depth), not the size of the version.
-
-The writer chooses the hash algorithm for the nodes it writes. Child references are full keys, so
-nodes written with different algorithms mix freely. History independence holds per algorithm.
-
-## 3. Shape `path/1`
-
-One node per directory, like git's trees. A node is UTF-8 text:
-
-```
-cas-tree path/1\n
-<type> <key> <name>\n        (zero or more lines)
-```
-
-- `<type>` is a mode (`file`, `exec`, `link`), or `tree` for a subdirectory, whose `<key>` is the
-  key of that directory's `path/1` node.
-- Exactly one space separates the fields. `<name>` is the rest of the line. It may contain spaces,
-  but newlines are excluded because names have no control characters.
-- Lines are in strictly ascending bytewise order of `<name>`, which makes them unique too.
-- Every line, including the last, ends in `\n`. Nothing follows the last line.
-- Only the root may have no lines. A `tree` line pointing to an empty node is malformed.
-
-Example: a root holding `a/x` and the executable `b c`:
-
-```
-cas-tree path/1
-tree blake3:5d1c… a
-exec blake3:8e4c… b c
-```
-
-(Keys are shortened here.)
-
-## 4. Operations
-
-- **build(map)** writes a version holding exactly `map` and returns its root.
-- **update(root, edits)** applies a batch of edits. `set p e` maps `p` to `e`, replacing whatever
-  was at `p`, including a whole directory. `remove p` removes `p` and everything under it; an
-  absent path is fine. A batch acts as all its removes followed by all its sets in canonical
-  order. A set below a path that is a file at that point, or below another set in the same batch,
-  is a **path conflict**, and the version is left unchanged. Directories left empty disappear.
-  Only nodes on the paths of the edits are read or written. A node that would come out unchanged
-  is not rewritten.
-- **lookup(root, p)** returns the entry at `p`, or absent (directories are not entries).
-- **walk(root, prefix)** yields the entries at or under `prefix` (all of them when there is no
-  prefix) in canonical order. It reads only the nodes on the way to the prefix and below it. This
-  is what a sparse checkout uses.
-- **diff(a, b, prefix)** yields every path at or under `prefix` whose entry differs, as (path, old,
-  new) in canonical order. Within one shape, it descends only into subtrees whose keys differ.
-  Across shapes, it merges the two walks.
-
-Errors: a referenced blob that is absent is `missing(key)`. A node that is not a canonical
-encoding is `malformed(key, reason)`. Neither is ever silently skipped.
-
-## 5. Not in this format
+## 4. Not in this format
 
 Parents, authors, messages and times belong to history records (Stage 5). Ownership, timestamps
-and other metadata are left out on purpose, and would be a separate format (principle 4).
+and ACLs are left out, and would be formats of their own.
 
-## 6. Conformance
+## 5. Conformance
 
-`version/tests/conformance.rs` runs against every shape in `SHAPES`, comparing each against a
-plain in-memory map. Property tests cover round trips, history independence (scrambled insertion
-order, plus paths added and removed again), update semantics including conflicts, prefix walks,
-and diffs: the shape's diff, the generic merge diff and the model must all agree. Counting tests
-bound the blobs read and written when one file changes in a 2,000-file version. A filesystem test
-imports a directory with a nested executable and a symlink, checks out a prefix, and checks that a
-full checkout imports back to the same root. Shape-specific unit tests reject each kind of
-non-canonical `path/1` node.
+`version/tests/conformance.rs` compares every operation with a plain in-memory map, as property
+tests:
+
+- round trips through build, walk and lookup;
+- history independence: scrambled insertion order, plus paths added and removed again;
+- update semantics, including conflicts, against a model of removes-then-sets;
+- prefix walks;
+- both diffs (subtree-skipping and merge) against the model.
+
+Counting tests bound the blobs touched when one file changes in a 2,000-file version. Other tests
+cover:
+
+- empty directories;
+- canonical `dir` decoding;
+- format objects matching the metaformat;
+- unknown formats acting as opaque files;
+- `git-blob` keys equalling git's object ids;
+- import, sparse checkout, and a checkout importing back to the same root.

@@ -1,22 +1,76 @@
-//! The version format (Stage 4): a canonical Merkle encoding of a
-//! path -> (content key, mode) map as ordinary core blobs.
+//! The version format (Stage 4): a tree of directories and files stored as
+//! ordinary core blobs. The core knows nothing of it.
 //!
-//! The core knows nothing of this. Every node blob starts with a shape tag,
-//! so several tree shapes can coexist; [`SHAPES`] lists the ones this crate
-//! reads and writes. Whatever the shape, the same entry set written with the
-//! same algorithm gives the same root key. See `spec/version.md`.
+//! Blobs carry no headers. Whoever points at a blob also names how to read
+//! it: a [`Ref`] is a pair (format, key), and a format's id is itself a blob
+//! key, that of `format\n` followed by the format's spec text. Directory
+//! formats hold references to their children, so formats nest. A version is
+//! a reference to its root directory. See `spec/version.md`.
 
+pub mod dir;
+pub mod formats;
 pub mod fs;
-pub mod path_tree;
+mod tree;
+
+pub use formats::{Format, Kind, by_alias, by_id, publish};
+pub use tree::{Walk, build, diff, lookup, merge_diff, update, walk};
 
 use cas_core::algo::Algorithm;
 use cas_core::key::{Parsed, classify};
 use cas_core::{Expect, Store};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
 use std::fmt;
 
-/// A file path: non-empty `/`-separated names, each a valid [`valid_name`].
+/// How to read a blob: the id of its format, and its key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Ref {
+    format: String,
+    key: String,
+}
+
+impl Ref {
+    /// Both parts must be valid blob keys.
+    pub fn new(format: impl Into<String>, key: impl Into<String>) -> Result<Ref> {
+        let (format, key) = (format.into(), key.into());
+        for k in [&format, &key] {
+            if !is_blob_key(k) {
+                return Err(Error::BadKey(k.clone()));
+            }
+        }
+        Ok(Ref { format, key })
+    }
+
+    /// Parse `<format> <key>`.
+    pub fn parse(s: &str) -> Result<Ref> {
+        let (f, k) = s.split_once(' ').ok_or_else(|| Error::BadKey(s.to_string()))?;
+        Ref::new(f, k)
+    }
+
+    pub fn format(&self) -> &str {
+        &self.format
+    }
+
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The format, when this crate knows it.
+    pub fn known_format(&self) -> Option<&'static Format> {
+        by_id(&self.format)
+    }
+
+    pub(crate) fn is_dir(&self) -> bool {
+        self.known_format().is_some_and(|f| matches!(f.kind, Kind::Dir(_)))
+    }
+}
+
+impl fmt::Display for Ref {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.format, self.key)
+    }
+}
+
+/// A file path: non-empty `/`-separated names, each a [`valid_name`].
 /// Ordered name by name (canonical order), so a directory's contents sort
 /// right after it and before its next sibling.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -47,6 +101,10 @@ impl Path {
         self.0 == prefix.0 || (self.0.starts_with(&prefix.0) && self.0.as_bytes()[prefix.0.len()] == b'/')
     }
 
+    pub fn parent(&self) -> Option<Path> {
+        self.0.rsplit_once('/').map(|(p, _)| Path(p.to_string()))
+    }
+
     /// `dir/name`, or just `name` at the root. `name` must be valid.
     pub(crate) fn child(dir: Option<&Path>, name: &str) -> Path {
         match dir {
@@ -74,68 +132,23 @@ impl fmt::Display for Path {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Mode {
-    File,
-    Exec,
-    /// The content blob holds the link target.
-    Link,
-}
-
-impl Mode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Mode::File => "file",
-            Mode::Exec => "exec",
-            Mode::Link => "link",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Mode> {
-        match s {
-            "file" => Some(Mode::File),
-            "exec" => Some(Mode::Exec),
-            "link" => Some(Mode::Link),
-            _ => None,
-        }
-    }
-}
-
-/// What a version maps a path to.
+/// What a version holds at a path. A directory's contents are separate
+/// paths, so `Dir` carries nothing; any reference whose format is not a
+/// known directory format is a `File`, read with that format.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Entry {
-    key: String,
-    pub mode: Mode,
-}
-
-impl Entry {
-    /// `key` must be a syntactically valid blob key.
-    pub fn new(key: impl Into<String>, mode: Mode) -> Result<Entry> {
-        let key = key.into();
-        if is_blob_key(&key) { Ok(Entry { key, mode }) } else { Err(Error::BadKey(key)) }
-    }
-
-    pub fn key(&self) -> &str {
-        &self.key
-    }
-}
-
-/// A blob key of a registered algorithm, with a digest of its length.
-pub(crate) fn is_blob_key(key: &str) -> bool {
-    match classify(key) {
-        Some(Parsed::Blob { alg, digest_hex }) => {
-            cas_core::algo::lookup(alg).is_some_and(|a| digest_hex.len() == a.digest_len * 2)
-        }
-        _ => false,
-    }
+pub enum Node {
+    Dir,
+    File(Ref),
 }
 
 /// One change to apply with [`update`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Edit {
-    /// Map the path to this entry, replacing whatever is there, including a
-    /// whole directory.
-    Set(Entry),
+    /// `Set(Dir)` keeps a directory that is already there and otherwise
+    /// replaces the path with an empty one. `Set(File)` replaces whatever
+    /// is at the path, including a whole directory. Missing parent
+    /// directories are created.
+    Set(Node),
     /// Remove the path and everything under it. Absent paths are fine.
     Remove,
 }
@@ -144,8 +157,8 @@ pub enum Edit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Change {
     pub path: Path,
-    pub old: Option<Entry>,
-    pub new: Option<Entry>,
+    pub old: Option<Node>,
+    pub new: Option<Node>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -153,15 +166,16 @@ pub enum Error {
     Store(cas_core::Error),
     /// A blob the version refers to is absent from the store.
     Missing(String),
-    /// A node that is not the canonical encoding of any tree.
+    /// A blob that is not valid in the format it was read with.
     Malformed {
         key: String,
         reason: String,
     },
-    UnknownShape(String),
+    /// A format this crate cannot read, where it has to.
+    UnknownFormat(String),
     BadPath(String),
     BadKey(String),
-    /// The edits would make this path both a file and a directory.
+    /// The edits would put something under a file.
     PathConflict(Path),
     Io(String),
 }
@@ -171,11 +185,11 @@ impl fmt::Display for Error {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
             Error::Missing(k) => write!(f, "missing blob {k}"),
-            Error::Malformed { key, reason } => write!(f, "malformed node {key}: {reason}"),
-            Error::UnknownShape(s) => write!(f, "unknown tree shape {s:?}"),
+            Error::Malformed { key, reason } => write!(f, "malformed blob {key}: {reason}"),
+            Error::UnknownFormat(s) => write!(f, "unknown format {s}"),
             Error::BadPath(p) => write!(f, "bad path {p:?}"),
             Error::BadKey(k) => write!(f, "not a blob key: {k:?}"),
-            Error::PathConflict(p) => write!(f, "{p} would be both a file and a directory"),
+            Error::PathConflict(p) => write!(f, "{p} is a file, so nothing can go under it"),
             Error::Io(e) => write!(f, "io: {e}"),
         }
     }
@@ -197,119 +211,17 @@ impl From<std::io::Error> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Entries in canonical path order.
-pub type Walk<'s> = Box<dyn Iterator<Item = Result<(Path, Entry)>> + 's>;
-
-/// One tree shape. Implementations must be canonical: equal entry sets
-/// written with the same algorithm give equal roots, whatever the order of
-/// edits that produced them.
-pub trait Shape: Sync {
-    /// The tag in every node's header, such as `path/1`.
-    fn name(&self) -> &'static str;
-
-    /// Write a version holding exactly `entries`; returns its root key.
-    fn build(&self, store: &dyn Store, alg: &'static Algorithm, entries: &BTreeMap<Path, Entry>) -> Result<String>;
-
-    /// Apply `edits` to the version at `root`. Cost should scale with the
-    /// edits, not the version.
-    fn update(
-        &self,
-        store: &dyn Store,
-        alg: &'static Algorithm,
-        root: &str,
-        edits: &BTreeMap<Path, Edit>,
-    ) -> Result<String>;
-
-    fn lookup(&self, store: &dyn Store, root: &str, path: &Path) -> Result<Option<Entry>>;
-
-    /// Entries at or under `prefix` (all of them for `None`), in canonical
-    /// order, reading only the nodes it needs.
-    fn walk<'s>(&self, store: &'s dyn Store, root: &str, prefix: Option<&Path>) -> Walk<'s>;
-
-    /// Differences at or under `prefix`, in canonical path order.
-    fn diff(&self, store: &dyn Store, a: &str, b: &str, prefix: Option<&Path>) -> Result<Vec<Change>> {
-        merge_diff(self.walk(store, a, prefix), self.walk(store, b, prefix))
-    }
-}
-
-pub static SHAPES: &[&dyn Shape] = &[&path_tree::PathTree];
-
-pub fn shape(name: &str) -> Result<&'static dyn Shape> {
-    SHAPES.iter().copied().find(|s| s.name() == name).ok_or_else(|| Error::UnknownShape(name.to_string()))
-}
-
-/// Every node starts with this, then the shape name and a newline.
-pub const MAGIC: &str = "cas-tree ";
-
-/// The shape of the version at `root`, from its header.
-pub fn shape_of(store: &dyn Store, root: &str) -> Result<&'static dyn Shape> {
-    let bytes = read_blob(store, root)?;
-    let name = bytes
-        .iter()
-        .position(|&b| b == b'\n')
-        .and_then(|n| bytes[..n].strip_prefix(MAGIC.as_bytes()))
-        .and_then(|n| std::str::from_utf8(n).ok())
-        .ok_or_else(|| malformed(root, "no cas-tree header"))?;
-    shape(name)
-}
-
-pub fn lookup(store: &dyn Store, root: &str, path: &Path) -> Result<Option<Entry>> {
-    shape_of(store, root)?.lookup(store, root, path)
-}
-
-pub fn walk<'s>(store: &'s dyn Store, root: &str, prefix: Option<&Path>) -> Result<Walk<'s>> {
-    Ok(shape_of(store, root)?.walk(store, root, prefix))
-}
-
-pub fn update(store: &dyn Store, alg: &'static Algorithm, root: &str, edits: &BTreeMap<Path, Edit>) -> Result<String> {
-    shape_of(store, root)?.update(store, alg, root, edits)
-}
-
-/// Same shape: the shape's own diff, which skips equal subtrees. Different
-/// shapes: compare both walks.
-pub fn diff(store: &dyn Store, a: &str, b: &str, prefix: Option<&Path>) -> Result<Vec<Change>> {
-    let (sa, sb) = (shape_of(store, a)?, shape_of(store, b)?);
-    if sa.name() == sb.name() {
-        sa.diff(store, a, b, prefix)
-    } else {
-        merge_diff(sa.walk(store, a, prefix), sb.walk(store, b, prefix))
-    }
-}
-
-/// Diff two canonical-order walks by merging them.
-pub fn merge_diff(a: Walk<'_>, b: Walk<'_>) -> Result<Vec<Change>> {
-    let mut out = Vec::new();
-    let (mut a, mut b) = (a.peekable(), b.peekable());
-    loop {
-        let order = match (a.peek(), b.peek()) {
-            (None, None) => return Ok(out),
-            (Some(Err(_)), _) => return Err(a.next().unwrap().unwrap_err()),
-            (_, Some(Err(_))) => return Err(b.next().unwrap().unwrap_err()),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (Some(Ok((pa, _))), Some(Ok((pb, _)))) => pa.cmp(pb),
-        };
-        match order {
-            Ordering::Less => {
-                let (path, old) = a.next().unwrap()?;
-                out.push(Change { path, old: Some(old), new: None });
-            }
-            Ordering::Greater => {
-                let (path, new) = b.next().unwrap()?;
-                out.push(Change { path, old: None, new: Some(new) });
-            }
-            Ordering::Equal => {
-                let (path, old) = a.next().unwrap()?;
-                let (_, new) = b.next().unwrap()?;
-                if old != new {
-                    out.push(Change { path, old: Some(old), new: Some(new) });
-                }
-            }
+/// A blob key of a registered algorithm, with a digest of its length.
+pub(crate) fn is_blob_key(key: &str) -> bool {
+    match classify(key) {
+        Some(Parsed::Blob { alg, digest_hex }) => {
+            cas_core::algo::lookup(alg).is_some_and(|a| digest_hex.len() == a.digest_len * 2)
         }
+        _ => false,
     }
 }
 
-pub(crate) fn read_blob(store: &dyn Store, key: &str) -> Result<Vec<u8>> {
+pub fn read_blob(store: &dyn Store, key: &str) -> Result<Vec<u8>> {
     if !is_blob_key(key) {
         return Err(Error::BadKey(key.to_string()));
     }
@@ -317,10 +229,20 @@ pub(crate) fn read_blob(store: &dyn Store, key: &str) -> Result<Vec<u8>> {
 }
 
 /// Write `bytes` as a blob and return its key.
-pub(crate) fn write_blob(store: &dyn Store, alg: &'static Algorithm, bytes: &[u8]) -> Result<String> {
+pub fn write_blob(store: &dyn Store, alg: &'static Algorithm, bytes: &[u8]) -> Result<String> {
     let key = alg.key(bytes);
     store.write(&key, bytes, &Expect::Absent)?;
     Ok(key)
+}
+
+/// Write `bytes` and return a reference to them in format `alias`, which
+/// must be a format this crate knows.
+pub fn put(store: &dyn Store, alg: &'static Algorithm, alias: &str, bytes: &[u8]) -> Result<Ref> {
+    let f = by_alias(alias).ok_or_else(|| Error::UnknownFormat(alias.to_string()))?;
+    let key = alg.key(bytes);
+    f.check(&key, bytes)?;
+    store.write(&key, bytes, &Expect::Absent)?;
+    Ok(Ref { format: f.id().to_string(), key })
 }
 
 pub(crate) fn malformed(key: &str, reason: impl Into<String>) -> Error {

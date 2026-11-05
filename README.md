@@ -3,7 +3,7 @@
 The CAS project's Rust workspace.
 
 - `cas-core` (this directory), Stages 2 and 3: the core store from the Stage 1 spec, and the wire protocol in [spec/wire.md](spec/wire.md).
-- `cas-version` ([version/](version)), Stage 4: the version format in [spec/version.md](spec/version.md). It is a tooling layer of ordinary blobs that the core does not know about. The tree shape is tagged in every node, and `path/1` (one node per directory) is the first shape. It provides build, update, lookup, prefix walk (sparse checkout), diff, and import/checkout of a local directory.
+- `cas-version` ([version/](version)), Stage 4: the version format in [spec/version.md](spec/version.md). It is a tooling layer of ordinary blobs that the core does not know about. Every reference is `<format> <key>`, and a format's id is the key of its format object in the single metaformat ([spec/metaformat.md](spec/metaformat.md)). Formats nest: directory formats hold references. The formats so far are `dir`, `raw`, `exec`, `symlink` and `git-blob` ([spec/formats/](spec/formats)). It provides build, update, lookup, prefix walk (sparse checkout), diff, and import/checkout of a local directory, and it keeps empty directories.
 
 ## cas-core
 
@@ -21,4 +21,4 @@ The CAS project's Rust workspace.
 cargo test --workspace --all-features
 ```
 
-That runs both crates. The shape suite is `version/tests/conformance.rs`, and every shape in `cas_version::SHAPES` must pass it.
+That runs both crates. The version format's suite is `version/tests/conformance.rs`.

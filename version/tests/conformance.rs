@@ -1,18 +1,23 @@
-//! Checks every shape in `SHAPES` must pass (spec/version.md, section 6).
-//! Each property runs against a plain in-memory model of a path map.
+//! Checks for the version format (spec/version.md, section 6), comparing
+//! every operation with a plain in-memory model of a path map.
 
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Session, Span, Store, Who};
-use cas_version::{Change, Edit, Entry, Error, Mode, Path, SHAPES, Shape, diff, fs, lookup, merge_diff, update, walk};
+use cas_version::formats::{self, Format, METAFORMAT, git_blob};
+use cas_version::{Change, Edit, Error, Node, Path, Ref, build, diff, fs, lookup, merge_diff, put, update, walk};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-type Map = BTreeMap<Path, Entry>;
+type Map = BTreeMap<Path, Node>;
 
 fn b3() -> &'static Algorithm {
     algo::lookup("blake3").unwrap()
+}
+
+fn dir() -> &'static Format {
+    formats::by_alias("dir").unwrap()
 }
 
 fn store() -> Session {
@@ -57,33 +62,46 @@ fn path_strategy() -> impl Strategy<Value = Path> {
     prop::collection::vec(prop::sample::select(NAMES), 1..4).prop_map(|n| Path::new(n.join("/")).unwrap())
 }
 
-fn entry_strategy() -> impl Strategy<Value = Entry> {
-    (0u8..4, prop::sample::select(&[Mode::File, Mode::Exec, Mode::Link][..]))
-        .prop_map(|(c, m)| Entry::new(b3().key(&[c]), m).unwrap())
+/// A file reference in one of the leaf formats (contents are not read).
+fn file(c: u8, alias: &str) -> Node {
+    let f = formats::by_alias(alias).unwrap();
+    Node::File(Ref::new(f.id(), b3().key(&[c])).unwrap())
 }
 
-/// Drop paths under another path in the map, so it is a valid version.
-fn consistent(raw: Vec<(Path, Entry)>) -> Map {
-    let mut m = Map::new();
-    for (p, e) in raw {
-        m.insert(p, e);
-    }
+fn node_strategy() -> impl Strategy<Value = Node> {
+    prop_oneof![
+        1 => Just(Node::Dir),
+        4 => (0u8..4, prop::sample::select(&["raw", "exec", "symlink"][..])).prop_map(|(c, a)| file(c, a)),
+    ]
+}
+
+/// Every parent of a path is a directory: drop what lies under a file, and
+/// add the missing directories.
+fn closed(raw: Vec<(Path, Node)>) -> Map {
+    let mut m: Map = raw.into_iter().collect();
+    let files: Vec<Path> = m.iter().filter(|(_, n)| matches!(n, Node::File(_))).map(|(p, _)| p.clone()).collect();
+    m.retain(|p, _| !files.iter().any(|f| f != p && p.starts_with(f)));
     let paths: Vec<Path> = m.keys().cloned().collect();
-    m.retain(|p, _| !paths.iter().any(|q| q != p && p.starts_with(q)));
+    for p in paths {
+        let mut q = p.parent();
+        while let Some(d) = q {
+            q = d.parent();
+            m.insert(d, Node::Dir);
+        }
+    }
     m
 }
 
 fn map_strategy() -> impl Strategy<Value = Map> {
-    prop::collection::vec((path_strategy(), entry_strategy()), 0..24).prop_map(consistent)
+    prop::collection::vec((path_strategy(), node_strategy()), 0..24).prop_map(closed)
 }
 
 fn edits_strategy() -> impl Strategy<Value = BTreeMap<Path, Edit>> {
-    let edit = prop_oneof![entry_strategy().prop_map(Edit::Set), Just(Edit::Remove)];
+    let edit = prop_oneof![3 => node_strategy().prop_map(Edit::Set), 1 => Just(Edit::Remove)];
     prop::collection::btree_map(path_strategy(), edit, 0..8)
 }
 
-/// The model of `update`: removes first, then sets in canonical order; a
-/// set under a file, or under another set in the batch, is a conflict.
+/// The model of `update`: removes first, then sets in canonical order.
 fn model_update(m: &Map, edits: &BTreeMap<Path, Edit>) -> Option<Map> {
     let mut out = m.clone();
     for (p, e) in edits {
@@ -92,12 +110,24 @@ fn model_update(m: &Map, edits: &BTreeMap<Path, Edit>) -> Option<Map> {
         }
     }
     for (p, e) in edits {
-        if let Edit::Set(entry) = e {
-            if out.keys().any(|q| q != p && p.starts_with(q)) {
-                return None;
+        let Edit::Set(node) = e else { continue };
+        let mut q = p.parent();
+        while let Some(d) = q {
+            match out.get(&d) {
+                Some(Node::File(_)) => return None,
+                Some(Node::Dir) => {}
+                None => {
+                    out.insert(d.clone(), Node::Dir);
+                }
             }
-            out.retain(|q, _| !q.starts_with(p));
-            out.insert(p.clone(), entry.clone());
+            q = d.parent();
+        }
+        match node {
+            Node::Dir if out.get(p) == Some(&Node::Dir) => {}
+            _ => {
+                out.retain(|q, _| !q.starts_with(p));
+                out.insert(p.clone(), node.clone());
+            }
         }
     }
     Some(out)
@@ -115,186 +145,230 @@ fn model_diff(a: &Map, b: &Map, prefix: Option<&Path>) -> Vec<Change> {
         .collect()
 }
 
-fn walked(s: &dyn Store, root: &str, prefix: Option<&Path>) -> Map {
-    walk(s, root, prefix).unwrap().map(|r| r.unwrap()).collect()
+fn walked(s: &dyn Store, root: &Ref, prefix: Option<&Path>) -> Vec<(Path, Node)> {
+    walk(s, root, prefix).map(|r| r.unwrap()).collect()
 }
 
-fn check_roundtrip(shape: &dyn Shape, m: &Map) {
-    let s = store();
-    let root = shape.build(&s, b3(), m).unwrap();
-    let got: Vec<(Path, Entry)> = walk(&s, &root, None).unwrap().map(|r| r.unwrap()).collect();
-    let want: Vec<(Path, Entry)> = m.clone().into_iter().collect();
-    assert_eq!(got, want, "walk order and contents");
-    for p in NAMES
-        .iter()
-        .flat_map(|a| NAMES.iter().map(move |b| format!("{a}/{b}")))
-        .chain(NAMES.iter().map(|n| n.to_string()))
-    {
-        let p = Path::new(p).unwrap();
-        assert_eq!(lookup(&s, &root, &p).unwrap(), m.get(&p).cloned(), "lookup {p}");
-    }
-}
-
-fn check_history_independence(shape: &dyn Shape, m: &Map, extra: &Map, order: &[usize]) {
-    let s = store();
-    let direct = shape.build(&s, b3(), m).unwrap();
-    // Insert the entries one by one in a scrambled order, with extra paths
-    // that are then removed again.
-    let mut root = shape.build(&s, b3(), &Map::new()).unwrap();
-    let entries: Vec<(&Path, &Entry)> = m.iter().collect();
-    let mut idx: Vec<usize> = (0..entries.len()).collect();
-    for (i, &o) in order.iter().enumerate().take(idx.len()) {
-        let j = i + o % (idx.len() - i);
-        idx.swap(i, j);
-    }
-    let extra: Map = extra
-        .iter()
-        .filter(|(p, _)| m.keys().all(|q| !p.starts_with(q) && !q.starts_with(p)))
-        .map(|(p, e)| (p.clone(), e.clone()))
-        .collect();
-    let extra = consistent(extra.into_iter().collect());
-    for (p, e) in &extra {
-        root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(e.clone()))])).unwrap();
-    }
-    for i in idx {
-        let (p, e) = entries[i];
-        root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(e.clone()))])).unwrap();
-    }
-    for p in extra.keys() {
-        root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Remove)])).unwrap();
-    }
-    assert_eq!(root, direct);
-}
-
-fn check_update(shape: &dyn Shape, m: &Map, edits: &BTreeMap<Path, Edit>) {
-    let s = store();
-    let root = shape.build(&s, b3(), m).unwrap();
-    match (update(&s, b3(), &root, edits), model_update(m, edits)) {
-        (Ok(new), Some(want)) => {
-            assert_eq!(walked(&s, &new, None), want);
-            assert_eq!(new, shape.build(&s, b3(), &want).unwrap(), "canonical after update");
-        }
-        (Err(Error::PathConflict(_)), None) => {}
-        (got, want) => panic!("update gave {got:?}, model {want:?}"),
-    }
-}
-
-fn check_prefix_and_diff(shape: &dyn Shape, a: &Map, b: &Map, prefix: &Path) {
-    let s = store();
-    let (ra, rb) = (shape.build(&s, b3(), a).unwrap(), shape.build(&s, b3(), b).unwrap());
-    let want: Map = a.iter().filter(|(p, _)| p.starts_with(prefix)).map(|(p, e)| (p.clone(), e.clone())).collect();
-    assert_eq!(walked(&s, &ra, Some(prefix)), want, "walk under {prefix}");
-    // A prefix that is a file walks to that file alone.
-    for p in a.keys() {
-        assert_eq!(walked(&s, &ra, Some(p)), BTreeMap::from([(p.clone(), a[p].clone())]));
-    }
-    for pre in [None, Some(prefix)] {
-        let want = model_diff(a, b, pre);
-        assert_eq!(diff(&s, &ra, &rb, pre).unwrap(), want, "diff under {pre:?}");
-        assert_eq!(shape.diff(&s, &ra, &rb, pre).unwrap(), want);
-        let naive = merge_diff(walk(&s, &ra, pre).unwrap(), walk(&s, &rb, pre).unwrap()).unwrap();
-        assert_eq!(naive, want);
-    }
+fn as_vec(m: &Map) -> Vec<(Path, Node)> {
+    m.clone().into_iter().collect()
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(200))]
+    #![proptest_config(ProptestConfig::with_cases(300))]
 
     #[test]
     fn roundtrip(m in map_strategy()) {
-        for shape in SHAPES { check_roundtrip(*shape, &m); }
+        let s = store();
+        let root = build(&s, b3(), dir(), &m).unwrap();
+        prop_assert_eq!(walked(&s, &root, None), as_vec(&m));
+        for a in NAMES {
+            for p in std::iter::once(a.to_string()).chain(NAMES.iter().map(|b| format!("{a}/{b}"))) {
+                let p = Path::new(p).unwrap();
+                prop_assert_eq!(lookup(&s, &root, &p).unwrap(), m.get(&p).cloned());
+            }
+        }
     }
 
     #[test]
-    fn history_independent(m in map_strategy(), extra in map_strategy(), order in prop::collection::vec(any::<usize>(), 24)) {
-        for shape in SHAPES { check_history_independence(*shape, &m, &extra, &order); }
+    fn history_independent(m in map_strategy(), extra in map_strategy(), order in prop::collection::vec(any::<usize>(), 48)) {
+        let s = store();
+        let direct = build(&s, b3(), dir(), &m).unwrap();
+        // Set the entries one at a time in a scrambled order, after paths
+        // outside `m` that are removed again at the end.
+        let mut root = build(&s, b3(), dir(), &Map::new()).unwrap();
+        let extra: Vec<Path> = extra.keys().filter(|p| m.keys().all(|q| !p.starts_with(q) && !q.starts_with(p))).cloned().collect();
+        for p in &extra {
+            root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(Node::Dir))])).unwrap();
+        }
+        let mut entries: Vec<(&Path, &Node)> = m.iter().collect();
+        for (i, o) in (0..entries.len()).zip(order.iter().cycle()) {
+            let j = i + o % (entries.len() - i);
+            entries.swap(i, j);
+        }
+        for (p, n) in entries {
+            root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(n.clone()))])).unwrap();
+        }
+        for p in &extra {
+            root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Remove)])).unwrap();
+        }
+        prop_assert_eq!(root, direct);
     }
 
     #[test]
     fn update_matches_model(m in map_strategy(), edits in edits_strategy()) {
-        for shape in SHAPES { check_update(*shape, &m, &edits); }
+        let s = store();
+        let root = build(&s, b3(), dir(), &m).unwrap();
+        match (update(&s, b3(), &root, &edits), model_update(&m, &edits)) {
+            (Ok(new), Some(want)) => {
+                prop_assert_eq!(walked(&s, &new, None), as_vec(&want));
+                prop_assert_eq!(new, build(&s, b3(), dir(), &want).unwrap());
+            }
+            (Err(Error::PathConflict(_)), None) => {}
+            (got, want) => panic!("update gave {got:?}, model {want:?}"),
+        }
     }
 
     #[test]
     fn prefix_walk_and_diff(a in map_strategy(), edits in edits_strategy(), prefix in path_strategy()) {
+        let s = store();
         let b = model_update(&a, &edits).unwrap_or_else(|| a.clone());
-        for shape in SHAPES { check_prefix_and_diff(*shape, &a, &b, &prefix); }
+        let (ra, rb) = (build(&s, b3(), dir(), &a).unwrap(), build(&s, b3(), dir(), &b).unwrap());
+        let want: Vec<(Path, Node)> = a.iter().filter(|(p, _)| p.starts_with(&prefix)).map(|(p, n)| (p.clone(), n.clone())).collect();
+        prop_assert_eq!(walked(&s, &ra, Some(&prefix)), want);
+        for pre in [None, Some(&prefix)] {
+            let want = model_diff(&a, &b, pre);
+            prop_assert_eq!(&diff(&s, &ra, &rb, pre).unwrap(), &want);
+            prop_assert_eq!(&merge_diff(walk(&s, &ra, pre), walk(&s, &rb, pre)).unwrap(), &want);
+        }
     }
 }
 
-/// A wide, deep version: one file changed, a handful of nodes touched.
+/// A wide, deep version: one file changed, a handful of blobs touched.
 fn big() -> Map {
-    let mut m = Map::new();
+    let mut m = Vec::new();
     for i in 0..20 {
         for j in 0..20 {
-            for k in 0..5 {
-                let p = Path::new(format!("d{i}/e{j}/f{k}")).unwrap();
-                m.insert(p, Entry::new(b3().key(format!("{i} {j} {k}").as_bytes()), Mode::File).unwrap());
+            for k in 0..5u8 {
+                m.push((Path::new(format!("d{i}/e{j}/f{k}")).unwrap(), file(k, "raw")));
             }
         }
     }
-    m
+    closed(m)
 }
 
 #[test]
 fn cost_scales_with_the_change() {
-    for shape in SHAPES {
-        let s = store();
-        let m = big();
-        let root = shape.build(&s, b3(), &m).unwrap();
-        let p = Path::new("d7/e3/f2").unwrap();
-        let e = Entry::new(b3().key(b"changed"), Mode::File).unwrap();
-
-        let c = Counting::new(&s);
-        let new = shape.update(&c, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(e.clone()))])).unwrap();
-        let (reads, writes) = (c.reads.load(Ordering::SeqCst), c.writes.load(Ordering::SeqCst));
-        assert!(reads <= 8 && writes <= 8, "{}: update read {reads}, wrote {writes} blobs", shape.name());
-
-        let c = Counting::new(&s);
-        let d = shape.diff(&c, &root, &new, None).unwrap();
-        assert_eq!(d, vec![Change { path: p.clone(), old: m.get(&p).cloned(), new: Some(e.clone()) }]);
-        let reads = c.reads.load(Ordering::SeqCst);
-        assert!(reads <= 16, "{}: diff read {reads} blobs", shape.name());
-
-        let c = Counting::new(&s);
-        assert_eq!(shape.lookup(&c, &new, &p).unwrap(), Some(e));
-        assert!(c.reads.load(Ordering::SeqCst) <= 8);
-
-        // A sparse walk reads only the part it returns.
-        let c = Counting::new(&s);
-        let n = shape.walk(&c, &new, Some(&Path::new("d7/e3").unwrap())).count();
-        assert_eq!(n, 5);
-        assert!(c.reads.load(Ordering::SeqCst) <= 8);
-    }
-}
-
-#[test]
-fn algorithm_is_the_writers_choice() {
-    for shape in SHAPES {
-        let s = store();
-        let m = big();
-        let sha = algo::lookup("sha256").unwrap();
-        let (a, b) = (shape.build(&s, b3(), &m).unwrap(), shape.build(&s, sha, &m).unwrap());
-        assert!(a.starts_with("blake3:") && b.starts_with("sha256:"));
-        assert_eq!(walked(&s, &a, None), walked(&s, &b, None));
-        assert_eq!(diff(&s, &a, &b, None).unwrap(), vec![]);
-    }
-}
-
-#[test]
-fn unknown_shape_and_bad_input() {
     let s = store();
-    let text = b"cas-tree nope/1\n";
-    let key = b3().key(text);
-    s.write(&key, text, &Expect::Absent).unwrap();
-    assert_eq!(lookup(&s, &key, &Path::new("a").unwrap()), Err(Error::UnknownShape("nope/1".into())));
-    let missing = b3().key(b"absent");
-    assert_eq!(lookup(&s, &missing, &Path::new("a").unwrap()), Err(Error::Missing(missing)));
-    assert!(matches!(lookup(&s, "main", &Path::new("a").unwrap()), Err(Error::BadKey(_))));
+    let m = big();
+    let root = build(&s, b3(), dir(), &m).unwrap();
+    let p = Path::new("d7/e3/f2").unwrap();
+    let n = file(9, "exec");
+
+    let c = Counting::new(&s);
+    let new = update(&c, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(n.clone()))])).unwrap();
+    let (reads, writes) = (c.reads.load(Ordering::SeqCst), c.writes.load(Ordering::SeqCst));
+    assert!(reads <= 3 && writes <= 3, "update read {reads}, wrote {writes} blobs");
+
+    let c = Counting::new(&s);
+    let d = diff(&c, &root, &new, None).unwrap();
+    assert_eq!(d, vec![Change { path: p.clone(), old: m.get(&p).cloned(), new: Some(n.clone()) }]);
+    assert!(c.reads.load(Ordering::SeqCst) <= 6);
+
+    let c = Counting::new(&s);
+    assert_eq!(lookup(&c, &new, &p).unwrap(), Some(n));
+    assert!(c.reads.load(Ordering::SeqCst) <= 3);
+
+    // A sparse walk reads only the part it returns.
+    let c = Counting::new(&s);
+    assert_eq!(walk(&c, &new, Some(&Path::new("d7/e3").unwrap())).count(), 6);
+    assert!(c.reads.load(Ordering::SeqCst) <= 3);
+}
+
+#[test]
+fn empty_directories_are_kept() {
+    let s = store();
+    let m = closed(vec![(Path::new("a/b/c").unwrap(), Node::Dir), (Path::new("x").unwrap(), Node::Dir)]);
+    let root = build(&s, b3(), dir(), &m).unwrap();
+    assert_eq!(walked(&s, &root, None).len(), 4);
+    // Removing a directory's last file leaves the directory.
+    let p = Path::new("a/b/c/f").unwrap();
+    let with = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(file(1, "raw")))])).unwrap();
+    let without = update(&s, b3(), &with, &BTreeMap::from([(p, Edit::Remove)])).unwrap();
+    assert_eq!(without, root);
+    assert_eq!(s.read(build(&s, b3(), dir(), &Map::new()).unwrap().key()).unwrap().unwrap(), b"");
+}
+
+#[test]
+fn dir_encoding_is_readable_and_canonical() {
+    let s = store();
+    let f = file(1, "raw");
+    let Node::File(fr) = &f else { unreachable!() };
+    let m = closed(vec![(Path::new("b c").unwrap(), f.clone()), (Path::new("a/x").unwrap(), Node::Dir)]);
+    let root = build(&s, b3(), dir(), &m).unwrap();
+    let empty = b3().key(b"");
+    let sub = b3().key(format!("{} {empty} x\n", dir().id()).as_bytes());
+    let text = String::from_utf8(s.read(root.key()).unwrap().unwrap()).unwrap();
+    assert_eq!(text, format!("{} {sub} a\n{fr} b c\n", dir().id()));
+
+    let k = fr.to_string();
+    let bad = [
+        format!("{k} x"),
+        format!("{k} b\n{k} a\n"),
+        format!("{k} a\n{k} a\n"),
+        format!("{} a\n", &k[..k.len() - 2]),
+        format!("raw {} a\n", fr.key()),
+        format!("{k} .\n"),
+        format!("{k} a/b\n"),
+        format!("{k}\n"),
+        format!("\n{k} a\n"),
+    ];
+    for text in bad {
+        let key = b3().key(text.as_bytes());
+        s.write(&key, text.as_bytes(), &Expect::Absent).unwrap();
+        let r = Ref::new(dir().id(), key).unwrap();
+        assert!(matches!(lookup(&s, &r, &Path::new("a").unwrap()), Err(Error::Malformed { .. })), "{text:?}");
+        assert!(dir().check(r.key(), text.as_bytes()).is_err());
+    }
+}
+
+#[test]
+fn format_ids_follow_the_metaformat() {
+    let s = store();
+    formats::publish(&s).unwrap();
+    assert_eq!(formats::metaformat_id(), b3().key(METAFORMAT.as_bytes()));
+    let mut ids = std::collections::BTreeSet::new();
+    for f in formats::all() {
+        let object = String::from_utf8(s.read(f.id()).unwrap().unwrap()).unwrap();
+        let lines: Vec<&str> = object.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], format!("name {}", f.alias));
+        assert_eq!(lines[1], "media text/markdown");
+        let spec = lines[2].strip_prefix("spec ").unwrap();
+        assert_eq!(s.read(spec).unwrap().unwrap(), f.spec.as_bytes());
+        assert_eq!(object, f.object());
+        assert!(ids.insert(f.id().to_string()));
+    }
+}
+
+#[test]
+fn unknown_formats_are_opaque_files() {
+    let s = store();
+    let stranger = Ref::new(b3().key(b"some format object"), b3().key(b"x")).unwrap();
+    let m = closed(vec![(Path::new("doc.pdf").unwrap(), Node::File(stranger.clone()))]);
+    let root = build(&s, b3(), dir(), &m).unwrap();
+    assert_eq!(walked(&s, &root, None), as_vec(&m));
+    assert_eq!(lookup(&s, &root, &Path::new("doc.pdf/inner").unwrap()).unwrap(), None);
+    // A root has to be a directory format this crate knows.
+    assert!(matches!(lookup(&s, &stranger, &Path::new("a").unwrap()), Err(Error::UnknownFormat(_))));
+    let out = tempfile::tempdir().unwrap();
+    assert!(matches!(fs::checkout(&s, &root, None, out.path()), Err(Error::UnknownFormat(_))));
+}
+
+#[test]
+fn bad_input() {
+    let s = store();
+    let missing = Ref::new(dir().id(), b3().key(b"absent")).unwrap();
+    assert_eq!(lookup(&s, &missing, &Path::new("a").unwrap()), Err(Error::Missing(missing.key().into())));
     for bad in ["", "/a", "a/", "a//b", ".", "a/../b", "a\nb"] {
         assert!(Path::new(bad).is_err(), "{bad:?}");
     }
-    assert!(Entry::new("main", Mode::File).is_err());
+    assert!(Ref::new("raw", b3().key(b"x")).is_err());
+    assert!(Ref::parse(&format!("{} {}", dir().id(), b3().key(b""))).is_ok());
+    assert!(matches!(put(&s, b3(), "symlink", b""), Err(Error::Malformed { .. })));
+    assert!(matches!(put(&s, b3(), "git-blob", b"blob 3\0ab"), Err(Error::Malformed { .. })));
+    assert!(matches!(put(&s, b3(), "git-blob", b"blob 02\0ab"), Err(Error::Malformed { .. })));
+}
+
+#[test]
+fn git_blob_keys_are_git_object_ids() {
+    let s = store();
+    let r = put(&s, algo::lookup("sha1").unwrap(), "git-blob", &git_blob(b"hello\n")).unwrap();
+    // `printf 'hello\n' | git hash-object --stdin`
+    assert_eq!(r.key(), "sha1:ce013625030ba8dba906f756967f9e9ca394464a");
+    let root = build(&s, b3(), dir(), &closed(vec![(Path::new("hi").unwrap(), Node::File(r))])).unwrap();
+    let out = tempfile::tempdir().unwrap();
+    fs::checkout(&s, &root, None, out.path()).unwrap();
+    assert_eq!(std::fs::read(out.path().join("hi")).unwrap(), b"hello\n");
 }
 
 #[test]
@@ -303,40 +377,47 @@ fn import_and_sparse_checkout() {
     let src = tempfile::tempdir().unwrap();
     let d = src.path();
     std::fs::create_dir_all(d.join("src/bin")).unwrap();
-    std::fs::create_dir_all(d.join("empty")).unwrap();
+    std::fs::create_dir_all(d.join("src/empty")).unwrap();
     std::fs::write(d.join("README"), "hi\n").unwrap();
     std::fs::write(d.join("src/lib.rs"), "fn x() {}\n").unwrap();
     std::fs::write(d.join("src/bin/run"), "#!/bin/sh\n").unwrap();
     std::fs::set_permissions(d.join("src/bin/run"), std::fs::Permissions::from_mode(0o755)).unwrap();
     symlink("../README", d.join("src/link")).unwrap();
 
-    for shape in SHAPES {
-        let s = store();
-        let root = fs::import(&s, b3(), *shape, d).unwrap();
-        let m = walked(&s, &root, None);
-        let modes: Vec<(&str, Mode)> = m.iter().map(|(p, e)| (p.as_str(), e.mode)).collect();
-        assert_eq!(
-            modes,
-            vec![
-                ("README", Mode::File),
-                ("src/bin/run", Mode::Exec),
-                ("src/lib.rs", Mode::File),
-                ("src/link", Mode::Link)
-            ]
-        );
+    let s = store();
+    let root = fs::import(&s, b3(), dir(), d).unwrap();
+    let kinds: Vec<(String, &str)> = walked(&s, &root, None)
+        .into_iter()
+        .map(|(p, n)| {
+            let alias = match n {
+                Node::Dir => "dir",
+                Node::File(r) => r.known_format().unwrap().alias,
+            };
+            (p.to_string(), alias)
+        })
+        .collect();
+    let want = [
+        ("README", "raw"),
+        ("src", "dir"),
+        ("src/bin", "dir"),
+        ("src/bin/run", "exec"),
+        ("src/empty", "dir"),
+        ("src/lib.rs", "raw"),
+        ("src/link", "symlink"),
+    ];
+    assert_eq!(kinds, want.map(|(p, a)| (p.to_string(), a)));
 
-        let out = tempfile::tempdir().unwrap();
-        let n = fs::checkout(&s, &root, Some(&Path::new("src").unwrap()), out.path()).unwrap();
-        assert_eq!(n, 3);
-        assert!(!out.path().join("README").exists());
-        assert_eq!(std::fs::read_to_string(out.path().join("src/lib.rs")).unwrap(), "fn x() {}\n");
-        let run = std::fs::metadata(out.path().join("src/bin/run")).unwrap();
-        assert_eq!(run.permissions().mode() & 0o777, 0o755);
-        assert_eq!(std::fs::read_link(out.path().join("src/link")).unwrap().to_str(), Some("../README"));
+    let out = tempfile::tempdir().unwrap();
+    assert_eq!(fs::checkout(&s, &root, Some(&Path::new("src").unwrap()), out.path()).unwrap(), 6);
+    assert!(!out.path().join("README").exists());
+    assert!(out.path().join("src/empty").is_dir());
+    assert_eq!(std::fs::read_to_string(out.path().join("src/lib.rs")).unwrap(), "fn x() {}\n");
+    let run = std::fs::metadata(out.path().join("src/bin/run")).unwrap();
+    assert_eq!(run.permissions().mode() & 0o777, 0o755);
+    assert_eq!(std::fs::read_link(out.path().join("src/link")).unwrap().to_str(), Some("../README"));
 
-        // A checkout imports back to the same version (under its prefix).
-        let full = tempfile::tempdir().unwrap();
-        fs::checkout(&s, &root, None, full.path()).unwrap();
-        assert_eq!(fs::import(&s, b3(), *shape, full.path()).unwrap(), root);
-    }
+    // A full checkout imports back to the same version.
+    let full = tempfile::tempdir().unwrap();
+    fs::checkout(&s, &root, None, full.path()).unwrap();
+    assert_eq!(fs::import(&s, b3(), dir(), full.path()).unwrap(), root);
 }
