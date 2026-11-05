@@ -68,5 +68,6 @@ fn commit_log_diff_checkout_and_sync() {
     assert!(pushed.unwrap().starts_with("Created"));
     let remote_log = Command::new(env!("CARGO_BIN_EXE_cas")).args(["--store", &url, "log"]).output().unwrap();
     server.kill().unwrap();
+    server.wait().unwrap();
     assert_eq!(String::from_utf8(remote_log.stdout).unwrap(), log);
 }
