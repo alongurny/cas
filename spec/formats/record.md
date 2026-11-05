@@ -3,7 +3,7 @@
 A history record: one step of history, naming a version and the records it came from. Versions
 never refer to records; records refer to versions and to each other.
 
-The blob is a `uni` value (see the `uni` format): a map with exactly these three keys.
+The blob is a `uni-bin` value (see the `uni-bin` format): a map with exactly these three keys.
 
 - `'meta'`: a map of free metadata. By convention, `'author'`, `'message'` and `'time'` (RFC 3339)
   are strings. It may be empty.

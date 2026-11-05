@@ -1,4 +1,4 @@
-//! The `uni` format (spec/formats/uni.md): strings and maps. Blobs hold the
+//! The `uni-bin` format (spec/formats/uni-bin.md): strings and maps. Blobs hold the
 //! binary serialization; the text notation is for people.
 
 use std::cmp::Ordering;

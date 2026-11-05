@@ -91,6 +91,11 @@ fn uni(b: &[u8]) -> std::result::Result<(), String> {
     crate::uni::Value::deserialize(b).map(|_| ())
 }
 
+fn uni_text(b: &[u8]) -> std::result::Result<(), String> {
+    let text = std::str::from_utf8(b).map_err(|_| "not UTF-8".to_string())?;
+    crate::uni::Value::from_text(text).map(|_| ())
+}
+
 static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
     vec![
         format("dir", include_str!("../../spec/formats/dir.md"), Kind::Dir(&dir::DIR)),
@@ -98,7 +103,8 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("exec", include_str!("../../spec/formats/exec.md"), Kind::Leaf(any)),
         format("symlink", include_str!("../../spec/formats/symlink.md"), Kind::Leaf(symlink)),
         format("git-blob", include_str!("../../spec/formats/git-blob.md"), Kind::Leaf(git)),
-        format("uni", include_str!("../../spec/formats/uni.md"), Kind::Leaf(uni)),
+        format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
+        format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),
         format("record", include_str!("../../spec/formats/record.md"), Kind::Leaf(crate::history::check)),
     ]
 });

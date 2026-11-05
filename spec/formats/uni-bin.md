@@ -1,4 +1,4 @@
-# Format: uni
+# Format: uni-bin
 
 General data, after the primitive values of the Uniform language. A value is a string (UTF-8
 text), or a map from values to values. Nothing else: a list is a map keyed `'0'`, `'1'`, …, and a
@@ -18,13 +18,13 @@ these bytes.
 - A map's entries are in strictly ascending bytewise order of their keys' serializations, so keys
   are unique.
 
-Any byte string that is not the serialization of a value is not a `uni` blob.
+Any byte string that is not the serialization of a value is not a `uni-bin` blob.
 
 ## Text notation
 
-For people only; it is never hashed or stored. A string is `'…'` with `\` written `\\` and `'`
-written `\'`. A map is `{k: v, k: v}`, with entries in serialization order and exactly `, ` and
-`: ` as separators.
+The same values written as text are a different format, `uni-txt`, with their own keys. A string
+is `'…'` with `\` written `\\` and `'` written `\'`. A map is `{k: v, k: v}`, with entries in
+serialization order and exactly `, ` and `: ` as separators.
 
 Example: `{'a': 'x', 'b': {}}` serializes to
 

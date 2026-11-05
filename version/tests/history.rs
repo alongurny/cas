@@ -1,4 +1,4 @@
-//! Checks for the `uni` and `record` formats and the history tooling
+//! Checks for the `uni-bin` and `record` formats and the history tooling
 //! (Stage 5).
 
 use cas_core::algo::{self, Algorithm};
@@ -69,6 +69,13 @@ fn uni_serialization_examples() {
     for b in bad {
         assert!(Value::deserialize(b).is_err(), "{b:?}");
     }
+    // The same value in both formats: different blobs, lossless both ways.
+    let s = store();
+    let (bin, text) =
+        (put(&s, b3(), "uni-bin", &v.serialize()).unwrap(), put(&s, b3(), "uni-txt", v.to_text().as_bytes()).unwrap());
+    assert_ne!(bin.key(), text.key());
+    assert_ne!(bin.format(), text.format());
+    assert!(put(&s, b3(), "uni-txt", b"{'b': {}, 'a': 'x'}").is_err());
     for t in ["{'b': {}, 'a': 'x'}", "{'a':'x'}", "'a' ", "\"a\"", "'a\\n'", "{ }", "{'a': 'x',}"] {
         assert!(Value::from_text(t).is_err(), "{t}");
     }
