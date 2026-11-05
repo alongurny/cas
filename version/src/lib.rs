@@ -12,6 +12,7 @@ pub mod dir;
 pub mod formats;
 pub mod fs;
 pub mod history;
+pub mod sync;
 mod tree;
 pub mod uni;
 
@@ -180,6 +181,8 @@ pub enum Error {
     BadKey(String),
     /// The edits would put something under a file.
     PathConflict(Path),
+    /// A branch moved in a way that would lose history if overwritten.
+    Diverged(String),
     Io(String),
 }
 
@@ -193,6 +196,7 @@ impl fmt::Display for Error {
             Error::BadPath(p) => write!(f, "bad path {p:?}"),
             Error::BadKey(k) => write!(f, "not a blob key: {k:?}"),
             Error::PathConflict(p) => write!(f, "{p} is a file, so nothing can go under it"),
+            Error::Diverged(t) => write!(f, "branch {t} has diverged"),
             Error::Io(e) => write!(f, "io: {e}"),
         }
     }

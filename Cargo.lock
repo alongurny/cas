@@ -133,6 +133,7 @@ dependencies = [
  "cas-core",
  "proptest",
  "tempfile",
+ "tiny_http",
 ]
 
 [[package]]
