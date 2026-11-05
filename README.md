@@ -7,6 +7,12 @@ The CAS project's Rust workspace.
 - Stage 5, history records ([spec/history.md](spec/history.md)), also in `cas-version`. `uni-bin` is a general data format of strings and maps, stored as a canonical binary serialization. `record` holds a version, its parents and metadata. The `history` module provides commit (moving a branch tag by compare-and-swap), log, and merge bases.
 - Stage 6, derived data ([spec/derived.md](spec/derived.md)), module `derived`. `derive(F, X)` caches f(X) under the tag `derived/F/X`, where F is the key of a function object. The first functions are `summary` (computed recursively, so it is incremental) and `changes` (per record), which back `path_log`.
 - Stage 7, sync ([spec/sync.md](spec/sync.md)), module `sync`. `copy` writes what a destination lacks, children before parents, and stops at the first blob already present. `push` creates or fast-forwards a branch, and refuses one that has diverged. Only the four core ops are used, so it works against any store, cache or server.
+- `cas-cli` ([cli/](cli)), a prototype command line, `cas`. It covers commit, log, ls, diff, checkout, summary, path-log, show, push, pull and serve, over a store directory (default `.cas`) or an `http://` server. `cli/tests/cli.rs` runs all of them end to end.
+
+```
+cargo run -p cas-cli -- commit some/dir -m 'first'
+cargo run -p cas-cli -- log
+```
 
 ## cas-core
 
