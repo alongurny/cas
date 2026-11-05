@@ -20,7 +20,7 @@ fn dir_format(r: &Ref) -> Result<&'static Format> {
     }
 }
 
-fn load(store: &dyn Store, r: &Ref) -> Result<Vec<Item>> {
+pub(crate) fn load(store: &dyn Store, r: &Ref) -> Result<Vec<Item>> {
     let Kind::Dir(d) = &dir_format(r)?.kind else { unreachable!() };
     d.decode(r.key(), &read_blob(store, r.key())?)
 }

@@ -16,7 +16,8 @@ these bytes.
 - `len` is an unsigned LEB128 integer in its shortest form: 7 bits per byte, low bits first, the
   high bit set on every byte but the last, and no trailing `0x80`-continued zero bytes.
 - A map's entries are in strictly ascending bytewise order of their keys' serializations, so keys
-  are unique.
+  are unique. Because lengths come first, shorter strings sort before longer ones (`'b'` before
+  `'a/x'`), and strings sort before maps.
 
 Any byte string that is not the serialization of a value is not a `uni-bin` blob.
 

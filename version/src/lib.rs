@@ -7,6 +7,7 @@
 //! formats hold references to their children, so formats nest. A version is
 //! a reference to its root directory. See `spec/version.md`.
 
+pub mod derived;
 pub mod dir;
 pub mod formats;
 pub mod fs;
