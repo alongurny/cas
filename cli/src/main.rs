@@ -2,21 +2,25 @@
 //!
 //! The store is a directory (default `.cas`, or `$CAS_STORE`), or an
 //! `http://` URL of a `cas serve`. Branch options default to `main`.
+//! A served store with access control (spec/access.md) needs
+//! `--token-file FILE`; tokens are never taken from the environment.
 
 use cas_core::algo::{self, Algorithm};
 use cas_core::client::HttpStore;
 use cas_core::disk::DiskBackend;
 use cas_core::server::Server;
 use cas_core::{AllowAll, CoreStore, Policy, Store, Who};
+use cas_version::access::{self, Access, Grant};
 use cas_version::derived::{self, SUMMARY};
+use cas_version::merge::{self, Outcome as MergeOutcome};
 use cas_version::uni::Value;
-use cas_version::{Node, Path, Ref, diff, formats, fs, history, read_blob, sync, walk};
+use cas_version::{Node, Path, Ref, diff, formats, fs, gc, history, read_blob, sync, walk};
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const USAGE: &str = "usage: cas [--store DIR|URL] COMMAND
+const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--meta DIR] COMMAND
   commit DIR [-b BRANCH] [-m MESSAGE]   record DIR as a new version on BRANCH
   log [-b BRANCH]                       list records, newest first
   ls [-b BRANCH] [PREFIX]               list paths of the head version
@@ -27,7 +31,16 @@ const USAGE: &str = "usage: cas [--store DIR|URL] COMMAND
   show KEY                              print a blob: uni-bin as text, else raw
   push STORE [-b BRANCH]                send BRANCH to another store
   pull STORE [-b BRANCH]                fetch BRANCH from another store
-  serve ADDR                            serve the store over HTTP";
+  branch NEW [-b BRANCH]                start branch NEW at BRANCH's head
+  merge OTHER [-b BRANCH] [-m MESSAGE]  merge branch OTHER into BRANCH
+  gc                                    one collection run (two-phase)
+  purge KEY REASON                      delete a blob on purpose, leave a tombstone
+  serve ADDR [--open]                   serve the store over HTTP, under the access
+                                        policy in --meta, or with --open to anyone
+  access show                           the policy in --meta (default .cas-meta)
+  access user NAME                      add or re-key NAME; prints its token once
+  access grant WHO 'ACTION SCOPE'       e.g. grant '*' 'read blobs'
+  access revoke WHO 'ACTION SCOPE'";
 
 type Res<T> = Result<T, String>;
 
@@ -35,9 +48,13 @@ fn b3() -> &'static Algorithm {
     algo::lookup("blake3").unwrap()
 }
 
-fn open(spec: &str) -> Res<Arc<dyn Store>> {
-    if spec.starts_with("http://") {
-        return Ok(Arc::new(HttpStore::new(spec.trim_end_matches('/'))));
+fn open(spec: &str, token: Option<&str>) -> Res<Arc<dyn Store>> {
+    if spec.starts_with("http://") || spec.starts_with("https://") {
+        let h = HttpStore::new(spec.trim_end_matches('/'));
+        return Ok(Arc::new(match token {
+            Some(t) => h.with_token(t),
+            None => h,
+        }));
     }
     let backend = DiskBackend::open(spec).map_err(|e| format!("{spec}: {e}"))?;
     Ok(Arc::new(CoreStore::new(backend, AllowAll, Policy::permissive()).session(Who::anonymous())))
@@ -47,6 +64,8 @@ struct Args {
     store: String,
     branch: String,
     message: String,
+    token_file: Option<String>,
+    meta: String,
     rest: Vec<String>,
 }
 
@@ -55,6 +74,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         store: std::env::var("CAS_STORE").unwrap_or_else(|_| ".cas".into()),
         branch: "main".into(),
         message: String::new(),
+        token_file: None,
+        meta: ".cas-meta".into(),
         rest: Vec::new(),
     };
     argv.reverse();
@@ -64,6 +85,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--store" => a.store = value("--store")?,
             "-b" => a.branch = value("-b")?,
             "-m" => a.message = value("-m")?,
+            "--token-file" => a.token_file = Some(value("--token-file")?),
+            "--meta" => a.meta = value("--meta")?,
             _ => a.rest.push(arg),
         }
     }
@@ -108,7 +131,12 @@ fn node_text(n: &Option<Node>) -> String {
 }
 
 fn run(a: Args) -> Res<()> {
-    let s = open(&a.store)?;
+    let token = match &a.token_file {
+        Some(f) => Some(std::fs::read_to_string(f).map_err(|x| format!("{f}: {x}"))?.trim().to_string()),
+        None => None,
+    };
+    let token = token.as_deref();
+    let s = open(&a.store, token)?;
     let s = &*s;
     let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}\n{USAGE}"));
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
@@ -181,17 +209,105 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some(cmd @ ("push" | "pull")) => {
-            let other = open(&arg(1, "STORE")?)?;
+            let other = open(&arg(1, "STORE")?, token)?;
             let (src, dst) = if cmd == "push" { (s, &*other) } else { (&*other, s) };
             let (outcome, n) = sync::push(src, dst, &a.branch).map_err(e)?;
             println!("{outcome:?}: {} blobs copied, {} already present", n.blobs, n.present);
         }
+        Some("branch") => {
+            let new = arg(1, "NEW")?;
+            let r = head(s, &a.branch)?;
+            s.write(&new, r.to_string().as_bytes(), &cas_core::Expect::Absent).map_err(|x| format!("{new}: {x}"))?;
+            println!("{new} at {}", short(r.key()));
+        }
+        Some("merge") => {
+            let other = arg(1, "OTHER")?;
+            let theirs = head(s, &other)?;
+            let mut meta = BTreeMap::from([(Value::str("time"), Value::str(now()))]);
+            let msg = if a.message.is_empty() { format!("Merge {other} into {}", a.branch) } else { a.message.clone() };
+            meta.insert(Value::str("message"), Value::str(msg));
+            match merge::merge_branch(s, b3(), &a.branch, &theirs, meta).map_err(e)? {
+                MergeOutcome::UpToDate => println!("UpToDate"),
+                MergeOutcome::FastForward(r) => println!("FastForward {}", short(r.key())),
+                MergeOutcome::Merged(r) => println!("Merged {}", short(r.key())),
+                MergeOutcome::Conflicts(m) => {
+                    for c in &m.conflicts {
+                        println!(
+                            "conflict {:8} {:8} {:8} {}",
+                            node_text(&c.base),
+                            node_text(&c.ours),
+                            node_text(&c.theirs),
+                            c.path
+                        );
+                    }
+                    return Err(format!("{} conflicts; nothing recorded", m.conflicts.len()));
+                }
+            }
+        }
+        Some("gc") => {
+            let r = gc::collect(s, b3()).map_err(e)?;
+            println!("{} reachable, {} unreachable, {} removed", r.reachable, r.unreachable, r.removed.len());
+        }
+        Some("purge") => {
+            let (key, reason) = (arg(1, "KEY")?, arg(2, "REASON")?);
+            gc::purge(s, &key, &reason).map_err(e)?;
+            println!("purged {key}");
+        }
+        Some("access") => {
+            let meta = open(&a.meta, token)?;
+            let (old, mut rules) = access::load(&*meta).map_err(e)?;
+            match a.rest.get(1).map(String::as_str) {
+                Some("show") => {
+                    for n in rules.users.keys() {
+                        println!("user  {n}");
+                    }
+                    for (w, gs) in &rules.grants {
+                        let gs: Vec<String> = gs.iter().map(Grant::to_string).collect();
+                        println!("grant {w}: {}", gs.join(", "));
+                    }
+                    return Ok(());
+                }
+                Some("user") => {
+                    let t = rules.add_user(&arg(2, "NAME")?).map_err(e)?;
+                    access::save(&*meta, b3(), old, &rules).map_err(e)?;
+                    println!("{t}");
+                    return Ok(());
+                }
+                Some(op @ ("grant" | "revoke")) => {
+                    let (who, g) = (arg(2, "WHO")?, Grant::parse(&arg(3, "GRANT")?).map_err(e)?);
+                    let set = rules.grants.entry(who.clone()).or_default();
+                    if op == "grant" {
+                        set.insert(g);
+                    } else {
+                        set.remove(&g);
+                    }
+                    if set.is_empty() {
+                        rules.grants.remove(&who);
+                    }
+                }
+                _ => return Err(USAGE.into()),
+            }
+            // Round-trip through the document, so a bad grantee is refused here.
+            access::Rules::from_value(&rules.to_value()).map_err(e)?;
+            access::save(&*meta, b3(), old, &rules).map_err(e)?;
+        }
         Some("serve") => {
             let addr = arg(1, "ADDR")?;
             let backend = DiskBackend::open(&a.store).map_err(e)?;
-            let core = CoreStore::new(backend, AllowAll, Policy::permissive());
-            let server =
-                Server::start(core, &addr, 8, Arc::new(|_: &tiny_http::Request| Who::anonymous())).map_err(e)?;
+            let server = if a.rest.iter().any(|x| x == "--open") {
+                eprintln!("serving without access control");
+                let core = CoreStore::new(backend, AllowAll, Policy::permissive());
+                Server::start(core, &addr, 8, Arc::new(|_: &tiny_http::Request| Who::anonymous()))
+            } else {
+                let meta = open(&a.meta, None)?;
+                if access::load(&*meta).map_err(e)?.0.is_none() {
+                    eprintln!("no policy in {}: every request is denied (see `cas access`)", a.meta);
+                }
+                let gate = Access::new(meta);
+                let core = CoreStore::new(backend, gate.clone(), Policy::permissive());
+                Server::start(core, &addr, 8, gate.authenticate())
+            }
+            .map_err(e)?;
             println!("serving {} at {}", a.store, server.url());
             loop {
                 std::thread::park();

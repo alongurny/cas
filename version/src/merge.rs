@@ -63,7 +63,7 @@ pub fn merge_versions(
             }
         };
         if !clash {
-            if mine.get(p).is_none() {
+            if !mine.contains_key(p) {
                 edits.insert(p.clone(), t.new.clone().map_or(Edit::Remove, Edit::Set));
             }
             continue;
