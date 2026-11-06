@@ -80,7 +80,7 @@ impl Value {
     /// Parse a serialization; anything that is not exactly one is an error.
     pub fn deserialize(bytes: &[u8]) -> Result<Value, String> {
         let mut at = 0;
-        let v = de(bytes, &mut at)?;
+        let v = de(bytes, &mut at, 0)?;
         if at != bytes.len() {
             return Err(format!("trailing bytes at {at}"));
         }
@@ -123,7 +123,7 @@ impl Value {
 
     /// Parse the text notation, in its one canonical spelling.
     pub fn from_text(text: &str) -> Result<Value, String> {
-        let mut p = Parser { s: text, at: 0 };
+        let mut p = Parser { s: text, at: 0, depth: 0 };
         let v = p.value()?;
         if p.at != text.len() {
             return Err(format!("trailing bytes at {}", p.at));
@@ -184,7 +184,12 @@ fn read_leb128(b: &[u8], at: &mut usize) -> Result<usize, String> {
     }
 }
 
-fn de(b: &[u8], at: &mut usize) -> Result<Value, String> {
+/// More maps nested than this are refused: parsing, comparing, serializing
+/// and dropping a value all recurse, so an untrusted blob of a few hundred
+/// kilobytes of `01 01 …` would otherwise overflow the stack and abort.
+pub const MAX_DEPTH: usize = 256;
+
+fn de(b: &[u8], at: &mut usize, depth: usize) -> Result<Value, String> {
     let tag = *b.get(*at).ok_or("truncated value")?;
     *at += 1;
     let len = read_leb128(b, at)?;
@@ -196,17 +201,20 @@ fn de(b: &[u8], at: &mut usize) -> Result<Value, String> {
             Ok(Value::Str(s.to_string()))
         }
         1 => {
+            if depth >= MAX_DEPTH {
+                return Err(format!("maps nested deeper than {MAX_DEPTH} at {}", *at - 1));
+            }
             let mut m = BTreeMap::new();
             let mut prev: Option<&[u8]> = None;
             for _ in 0..len {
                 let start = *at;
-                let k = de(b, at)?;
+                let k = de(b, at, depth + 1)?;
                 let kb = &b[start..*at];
                 if prev.is_some_and(|p| p >= kb) {
                     return Err(format!("map key at {start} out of order"));
                 }
                 prev = Some(kb);
-                let v = de(b, at)?;
+                let v = de(b, at, depth + 1)?;
                 m.insert(k, v);
             }
             Ok(Value::Map(m))
@@ -218,6 +226,7 @@ fn de(b: &[u8], at: &mut usize) -> Result<Value, String> {
 struct Parser<'a> {
     s: &'a str,
     at: usize,
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -254,6 +263,16 @@ impl Parser<'_> {
             }
         }
         self.expect("{")?;
+        if self.depth >= MAX_DEPTH {
+            return Err(format!("maps nested deeper than {MAX_DEPTH} at {}", self.at));
+        }
+        self.depth += 1;
+        let v = self.map();
+        self.depth -= 1;
+        v
+    }
+
+    fn map(&mut self) -> Result<Value, String> {
         let mut m = BTreeMap::new();
         if self.eat("}") {
             return Ok(Value::Map(m));

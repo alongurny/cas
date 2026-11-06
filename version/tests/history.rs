@@ -79,6 +79,23 @@ fn uni_serialization_examples() {
     for t in ["{'b': {}, 'a': 'x'}", "{'a':'x'}", "'a' ", "\"a\"", "'a\\n'", "{ }", "{'a': 'x',}"] {
         assert!(Value::from_text(t).is_err(), "{t}");
     }
+    // Nesting is bounded, so a small hostile blob cannot overflow the stack.
+    let nested = |n: usize| {
+        let mut v = Value::empty();
+        for _ in 1..n {
+            v = Value::map([("k", v)]);
+        }
+        v
+    };
+    let deepest = nested(cas_version::uni::MAX_DEPTH);
+    assert_eq!(Value::deserialize(&deepest.serialize()).unwrap(), deepest);
+    assert_eq!(Value::from_text(&deepest.to_text()).unwrap(), deepest);
+    let deeper = Value::map([("k", deepest)]);
+    assert!(Value::deserialize(&deeper.serialize()).is_err());
+    assert!(Value::from_text(&deeper.to_text()).is_err());
+    let hostile: Vec<u8> = [1u8, 1, 0, 0].repeat(1_000_000);
+    assert!(Value::deserialize(&hostile).is_err());
+    assert!(Value::from_text(&"{'': ".repeat(1_000_000)).is_err());
 }
 
 fn version(s: &dyn Store, name: &str) -> Ref {
