@@ -9,13 +9,27 @@ use ureq::http::Response;
 pub struct HttpStore {
     agent: Agent,
     base: String,
+    token: Option<String>,
 }
 
 impl HttpStore {
     /// `base` is the server's URL, e.g. `http://127.0.0.1:8080`.
     pub fn new(base: impl Into<String>) -> HttpStore {
         let agent = Agent::config_builder().http_status_as_error(false).build().into();
-        HttpStore { agent, base: base.into().trim_end_matches('/').to_string() }
+        HttpStore { agent, base: base.into().trim_end_matches('/').to_string(), token: None }
+    }
+
+    /// Send `token` as `Authorization: Bearer <token>` (spec/access.md).
+    pub fn with_token(mut self, token: impl Into<String>) -> HttpStore {
+        self.token = Some(token.into());
+        self
+    }
+
+    fn auth<B>(&self, r: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        match &self.token {
+            Some(t) => r.header("Authorization", format!("Bearer {t}")),
+            None => r,
+        }
     }
 }
 
@@ -55,8 +69,10 @@ fn outcome(mut resp: Response<ureq::Body>) -> Error {
 
 impl Store for HttpStore {
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut resp =
-            self.agent.get(format!("{}/k/{}", self.base, wire::encode_key(key))).call().map_err(transport)?;
+        let mut resp = self
+            .auth(self.agent.get(format!("{}/k/{}", self.base, wire::encode_key(key))))
+            .call()
+            .map_err(transport)?;
         match resp.status().as_u16() {
             200 => Ok(Some(body(&mut resp)?)),
             404 => Ok(None),
@@ -69,8 +85,7 @@ impl Store for HttpStore {
         wire::encode_expect(expect, &mut payload);
         payload.extend_from_slice(value);
         let resp = self
-            .agent
-            .put(format!("{}/k/{}", self.base, wire::encode_key(key)))
+            .auth(self.agent.put(format!("{}/k/{}", self.base, wire::encode_key(key))))
             .header("Content-Type", "application/vnd.cas.write")
             .send(&payload[..])
             .map_err(transport)?;
@@ -81,8 +96,7 @@ impl Store for HttpStore {
         let mut payload = Vec::new();
         wire::encode_expect(expect, &mut payload);
         let resp = self
-            .agent
-            .post(format!("{}/remove/{}", self.base, wire::encode_key(key)))
+            .auth(self.agent.post(format!("{}/remove/{}", self.base, wire::encode_key(key))))
             .header("Content-Type", "application/vnd.cas.remove")
             .send(&payload[..])
             .map_err(transport)?;
@@ -97,7 +111,8 @@ impl Store for HttpStore {
         if let Some(t) = &span.to {
             query.push(format!("to={}", hex::encode(t)));
         }
-        let mut resp = self.agent.get(format!("{}/list?{}", self.base, query.join("&"))).call().map_err(transport)?;
+        let mut resp =
+            self.auth(self.agent.get(format!("{}/list?{}", self.base, query.join("&")))).call().map_err(transport)?;
         if resp.status().as_u16() != 200 {
             return Err(outcome(resp));
         }

@@ -7,6 +7,7 @@
 //! formats hold references to their children, so formats nest. A version is
 //! a reference to its root directory. See `spec/version.md`.
 
+pub mod access;
 pub mod derived;
 pub mod dir;
 pub mod formats;
@@ -188,6 +189,8 @@ pub enum Error {
     /// A branch moved in a way that would lose history if overwritten.
     Diverged(String),
     Io(String),
+    /// An access policy or grant that does not parse (spec/access.md).
+    Policy(String),
 }
 
 impl fmt::Display for Error {
@@ -203,6 +206,7 @@ impl fmt::Display for Error {
             Error::PathConflict(p) => write!(f, "{p} is a file, so nothing can go under it"),
             Error::Diverged(t) => write!(f, "branch {t} has diverged"),
             Error::Io(e) => write!(f, "io: {e}"),
+            Error::Policy(e) => write!(f, "policy: {e}"),
         }
     }
 }

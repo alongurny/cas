@@ -11,6 +11,10 @@ tailnet identity, an `Authorization` header, ...) tells the server who is
 calling; the server turns that into the `who` its gate sees. Nothing below
 names a caller.
 
+The outer protocol this implementation ships, a bearer token in an
+`Authorization` header checked against a policy in a separate meta-store,
+is in [access.md](access.md).
+
 ## Keys in URLs
 
 A key travels as one path segment, percent-encoded: every byte except

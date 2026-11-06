@@ -13,6 +13,15 @@ use tiny_http::{Header, Method, Request, Response};
 /// protocol plugs in.
 pub type Authenticate = dyn Fn(&Request) -> Who + Send + Sync;
 
+/// The bearer token of a request, from `Authorization: Bearer <token>`.
+pub fn bearer(req: &Request) -> Option<&str> {
+    req.headers()
+        .iter()
+        .find(|h| h.field.equiv("Authorization"))
+        .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
+        .map(str::trim)
+}
+
 pub struct Server {
     http: Arc<tiny_http::Server>,
 }
