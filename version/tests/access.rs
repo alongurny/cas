@@ -27,7 +27,7 @@ fn local_branch() -> Arc<dyn Store> {
     let f = put(&*s, b3(), "raw", b"hello\n").unwrap();
     let m = BTreeMap::from([(Path::new("a").unwrap(), Node::File(f))]);
     let v = build(&*s, b3(), formats::by_alias("dir").unwrap(), &m).unwrap();
-    history::commit(&*s, b3(), "main", &v, BTreeMap::new()).unwrap();
+    history::commit(&*s, b3(), "main", &v, history::Step::default(), None).unwrap();
     s
 }
 
@@ -93,14 +93,13 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
     let local = local_branch();
 
     let anon = HttpStore::new(&url);
-    assert!(matches!(sync::push(&*local, &anon, "main"), Err(Error::Store(CoreError::Denied))));
+    assert!(matches!(sync::push(&*local, &anon, "main", "main"), Err(Error::Store(CoreError::Denied))));
     let as_bob = HttpStore::new(&url).with_token(&bob);
-    assert!(matches!(sync::push(&*local, &as_bob, "main"), Err(Error::Store(CoreError::Denied))));
+    assert!(matches!(sync::push(&*local, &as_bob, "main", "main"), Err(Error::Store(CoreError::Denied))));
     let as_alice = HttpStore::new(&url).with_token(&alice);
-    assert_eq!(sync::push(&*local, &as_alice, "main").unwrap().0, sync::Outcome::Created);
+    assert_eq!(sync::push(&*local, &as_alice, "main", "main").unwrap().0, sync::Outcome::Created);
     // Anyone may read what alice pushed.
-    let head = history::head(&anon, "main").unwrap().unwrap();
-    assert_eq!(history::log(&anon, &head).unwrap().len(), 1);
+    assert_eq!(history::load(&anon, "main").unwrap().1.log().len(), 1);
     // A wrong token is just anonymous.
     let guess = HttpStore::new(&url).with_token("0123");
     assert_eq!(guess.write("main", b"x", &Expect::Absent), Err(CoreError::Denied));

@@ -2,11 +2,10 @@
 //! a base, path by path, and line by line inside text files both changed.
 //! Work follows the two diffs from the base, not the size of the tree.
 
-use crate::history::{self, Record};
-use crate::uni::Value;
+use crate::history::{History, NodeId, Step};
 use crate::{Change, Edit, Error, Node, Path, Ref, Result, by_alias, diff, put, read_blob, update};
+use cas_core::Store;
 use cas_core::algo::Algorithm;
-use cas_core::{Expect, Store};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A path both sides changed differently. The merged version keeps ours.
@@ -164,18 +163,23 @@ pub fn diff3<'a>(base: &[&'a str], ours: &[&'a str], theirs: &[&'a str]) -> Opti
     }
 }
 
-/// The base to merge against: the single best common ancestor, or, after a
-/// criss-cross, a virtual base made by merging the ancestors themselves
-/// (conflicts there resolve to the first ancestor's side).
-fn base_version(store: &dyn Store, alg: &'static Algorithm, a: &Ref, b: &Ref) -> Result<Option<Ref>> {
-    let bases: Vec<Ref> = history::merge_bases(store, a, b)?.into_iter().collect();
+/// The version to merge against: the single best common ancestor, or,
+/// after a criss-cross, a virtual base made by merging the ancestors
+/// themselves (conflicts there resolve to the first ancestor's side).
+fn base_version(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    h: &History,
+    a: &NodeId,
+    b: &NodeId,
+) -> Result<Option<Ref>> {
+    let bases: Vec<NodeId> = h.merge_bases(a, b).into_iter().collect();
     let Some((first, rest)) = bases.split_first() else { return Ok(None) };
     let mut acc = first.clone();
-    let mut version = history::read(store, first)?.version;
+    let mut version = first.version();
     for other in rest {
-        let inner = base_version(store, alg, &acc, other)?;
-        let theirs = history::read(store, other)?.version;
-        version = match inner {
+        let theirs = other.version();
+        version = match base_version(store, alg, h, &acc, other)? {
             Some(base) => merge_versions(store, alg, &base, &version, &theirs)?.version,
             None => version,
         };
@@ -184,51 +188,143 @@ fn base_version(store: &dyn Store, alg: &'static Algorithm, a: &Ref, b: &Ref) ->
     Ok(Some(version))
 }
 
-/// What merging a branch did.
+fn empty_dir(store: &dyn Store, alg: &'static Algorithm) -> Result<Ref> {
+    crate::build(store, alg, by_alias("dir").unwrap(), &BTreeMap::new())
+}
+
+/// What a merge or rebase did.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The other head is already in our history.
+    /// Nothing to do.
     UpToDate,
-    /// Our head was in theirs; the branch now points at theirs.
-    FastForward(Ref),
-    /// A new record with both heads as parents.
-    Merged(Ref),
-    /// Nothing recorded; the merged version (ours at each conflict) and the
-    /// conflicts, for the caller to resolve and commit.
+    /// Done; the new node (the tip of a rebase).
+    Done(NodeId),
+    /// Nothing recorded: the merged version (ours at each conflict) and the
+    /// conflicts, for the caller to resolve.
     Conflicts(Merged),
 }
 
-/// Merge record `theirs` into branch `tag`.
-pub fn merge_branch(
+/// The union of two histories: every node of both, with the union of
+/// their steps. Where both have a step between the same nodes, or a tag of
+/// the same name, `ours` wins; docs likewise.
+pub fn combine(ours: &History, theirs: &History) -> History {
+    let mut h = theirs.clone();
+    for (id, n) in &ours.nodes {
+        let e = h.nodes.entry(id.clone()).or_default();
+        e.after.extend(n.after.clone());
+        if n.doc.is_some() {
+            e.doc = n.doc.clone();
+        }
+    }
+    h.tags.extend(ours.tags.clone());
+    if ours.doc.is_some() {
+        h.doc = ours.doc.clone();
+    }
+    h
+}
+
+/// Merge tips `a` and `b` of `h` into a new node following both, with
+/// `step` from each. Rebasing is usually preferable (spec/history.md).
+pub fn merge_nodes(
     store: &dyn Store,
     alg: &'static Algorithm,
-    tag: &str,
-    theirs: &Ref,
-    meta: BTreeMap<Value, Value>,
+    h: &mut History,
+    a: &NodeId,
+    b: &NodeId,
+    step: &Step,
 ) -> Result<Outcome> {
-    let ours = history::head(store, tag)?.ok_or_else(|| Error::Missing(format!("tag {tag}")))?;
-    let set = |new: &Ref| {
-        store.write(tag, new.to_string().as_bytes(), &Expect::Value(ours.to_string().into_bytes())).map_err(Error::from)
-    };
-    if history::log(store, &ours)?.iter().any(|(r, _)| r == theirs) {
+    if h.follows(a, b) {
         return Ok(Outcome::UpToDate);
     }
-    if history::log(store, theirs)?.iter().any(|(r, _)| *r == ours) {
-        set(theirs)?;
-        return Ok(Outcome::FastForward(theirs.clone()));
-    }
-    let (ov, tv) = (history::read(store, &ours)?.version, history::read(store, theirs)?.version);
-    let base = match base_version(store, alg, &ours, theirs)? {
-        Some(b) => b,
-        // Unrelated histories merge against the empty tree.
-        None => crate::build(store, alg, by_alias("dir").unwrap(), &BTreeMap::new())?,
+    let base = match base_version(store, alg, h, a, b)? {
+        Some(v) => v,
+        // Unrelated lines merge against the empty tree.
+        None => empty_dir(store, alg)?,
     };
-    let merged = merge_versions(store, alg, &base, &ov, &tv)?;
+    let merged = merge_versions(store, alg, &base, &a.version(), &b.version())?;
     if !merged.conflicts.is_empty() {
         return Ok(Outcome::Conflicts(merged));
     }
-    let rec = Record { version: merged.version, parents: [ours.clone(), theirs.clone()].into(), meta };
-    let r = history::write(store, alg, &rec)?;
-    set(&r)?;
-    Ok(Outcome::Merged(r))
+    let after = BTreeMap::from([(a.clone(), step.clone()), (b.clone(), step.clone())]);
+    Ok(Outcome::Done(h.add(&merged.version, after, None)?))
+}
+
+/// The newest node of `mine` that `onto` also holds, and `mine`'s nodes
+/// after it, oldest first. Those must form a single line.
+fn private_part(mine: &History, onto: &History) -> Result<(Option<NodeId>, Vec<NodeId>)> {
+    let tip = mine.tip().ok_or_else(|| Error::Diverged("the history has several tips".into()))?;
+    let mut line = Vec::new();
+    let mut at = Some(tip);
+    while let Some(id) = at {
+        if onto.nodes.contains_key(&id) {
+            line.reverse();
+            return Ok((Some(id), line));
+        }
+        let after = &mine.nodes[&id].after;
+        if after.len() > 1 {
+            return Err(Error::Diverged(format!("{id} is a merge; rebase replays a single line")));
+        }
+        at = after.keys().next().cloned();
+        line.push(id);
+    }
+    line.reverse();
+    Ok((None, line))
+}
+
+/// Replay the nodes `mine` has beyond `onto` on top of `onto`'s tip, as a
+/// new history: `onto` plus the replayed line, steps and docs kept. Each
+/// node is merged three-way: its predecessor as base, the replayed tip as
+/// ours, the node as theirs.
+pub fn rebase(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    mine: &History,
+    onto: &History,
+) -> Result<(History, Outcome)> {
+    let (base, line) = private_part(mine, onto)?;
+    let mut h = onto.clone();
+    let Some(mut tip) = onto.tip() else {
+        if onto.nodes.is_empty() {
+            return Ok((mine.clone(), Outcome::UpToDate));
+        }
+        return Err(Error::Diverged("the target has several tips".into()));
+    };
+    if line.is_empty() || base.as_ref() == Some(&tip) {
+        return Ok((
+            combine(mine, onto),
+            if line.is_empty() { Outcome::UpToDate } else { Outcome::Done(mine.tip().unwrap()) },
+        ));
+    }
+    let mut prev = match &base {
+        Some(b) => b.version(),
+        None => empty_dir(store, alg)?,
+    };
+    for id in &line {
+        let n = &mine.nodes[id];
+        let step = n.after.values().next().cloned().unwrap_or_default();
+        let merged = merge_versions(store, alg, &prev, &tip.version(), &id.version())?;
+        if !merged.conflicts.is_empty() {
+            return Ok((h, Outcome::Conflicts(merged)));
+        }
+        tip = h.add(&merged.version, BTreeMap::from([(tip.clone(), step)]), n.doc.clone())?;
+        prev = id.version();
+    }
+    Ok((h, Outcome::Done(tip)))
+}
+
+/// Generate the next step of `public` from `mine`: one node holding the
+/// version of `mine`'s tip, after `public`'s tip, with `step`. `mine` must
+/// already contain `public`'s tip (rebase first); its own nodes stay
+/// private.
+pub fn publish(mine: &History, public: &mut History, step: Step, doc: Option<String>) -> Result<Outcome> {
+    let mtip = mine.tip().ok_or_else(|| Error::Diverged("the private history has several tips".into()))?;
+    if let Some(ptip) = public.tip() {
+        if !mine.follows(&mtip, &ptip) {
+            return Err(Error::Diverged("the public history moved; rebase first".into()));
+        }
+        if ptip.version() == mtip.version() {
+            return Ok(Outcome::UpToDate);
+        }
+    }
+    Ok(Outcome::Done(public.append(&mtip.version(), step, doc)?))
 }

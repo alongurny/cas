@@ -1,10 +1,9 @@
-//! Checks for the `uni-bin` and `record` formats and the history tooling
-//! (Stage 5).
+//! Checks for the `uni-bin` and `history` formats and the history tooling.
 
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Error as CoreError, Expect, Policy, Session, Store, Who};
-use cas_version::history::{self, Record};
+use cas_version::history::{self, History, NodeId, Step};
 use cas_version::uni::Value;
 use cas_version::{Error, Node, Path, Ref, build, formats, put};
 use proptest::prelude::*;
@@ -104,115 +103,170 @@ fn version(s: &dyn Store, name: &str) -> Ref {
         .unwrap()
 }
 
-fn meta(msg: &str) -> BTreeMap<Value, Value> {
-    BTreeMap::from([(Value::str("message"), Value::str(msg))])
+fn step(msg: &str) -> Step {
+    Step { changelog: Some(msg.into()), compatible: false }
 }
 
-fn rec(s: &dyn Store, v: &Ref, parents: &[&Ref], msg: &str) -> Ref {
-    let parents = parents.iter().map(|p| (*p).clone()).collect();
-    history::write(s, b3(), &Record { version: v.clone(), parents, meta: meta(msg) }).unwrap()
+fn ok(msg: &str) -> Step {
+    Step { changelog: Some(msg.into()), compatible: true }
+}
+
+/// A history given as (node version, [(predecessor, step)]).
+fn hist(nodes: &[(&Ref, &[(&NodeId, Step)])]) -> (History, Vec<NodeId>) {
+    let mut h = History::default();
+    let mut ids = Vec::new();
+    for (v, after) in nodes {
+        let after = after.iter().map(|(p, s)| ((*p).clone(), s.clone())).collect();
+        ids.push(h.add(v, after, None).unwrap());
+    }
+    (h, ids)
 }
 
 #[test]
-fn records_round_trip_and_are_content_addressed() {
+fn histories_round_trip_and_are_content_addressed() {
     let s = store();
-    let v = version(&s, "a");
-    let r1 = rec(&s, &v, &[], "first");
-    let r2 = rec(&s, &v, &[&r1], "second");
-    let got = history::read(&s, &r2).unwrap();
-    assert_eq!(got, Record { version: v.clone(), parents: BTreeSet::from([r1.clone()]), meta: meta("second") });
-    // The same record written again is the same blob.
-    assert_eq!(rec(&s, &v, &[&r1], "second"), r2);
-    // The stored bytes are uni, keyed by their hash, with this exact text.
-    let bytes = s.read(r2.key()).unwrap().unwrap();
-    assert_eq!(b3().key(&bytes), r2.key());
+    let (v1, v2) = (version(&s, "a"), version(&s, "b"));
+    let mut h = History { doc: Some("demo".into()), ..History::default() };
+    let n1 = h.append(&v1, Step::default(), Some("first".into())).unwrap();
+    let n2 = h.append(&v2, ok("rename"), None).unwrap();
+    h.tags.insert("v1".into(), n1.clone());
+    let r = history::write(&s, b3(), &h).unwrap();
+    assert_eq!(history::read(&s, &r).unwrap(), h);
+    assert_eq!(history::write(&s, b3(), &h).unwrap(), r);
+    let bytes = s.read(r.key()).unwrap().unwrap();
     assert_eq!(
         Value::deserialize(&bytes).unwrap().to_text(),
-        format!("{{'meta': {{'message': 'second'}}, 'parents': {{'{r1}': {{}}}}, 'version': '{v}'}}")
+        format!(
+            // Keys sort by their serialization: shorter first.
+            "{{'doc': 'demo', 'tags': {{'v1': '{n1}'}}, 'nodes': {{'{n1}': {{'doc': 'first'}}, '{n2}': {{'after': {{'{n1}': {{'changelog': 'rename', 'compatible': {{}}}}}}}}}}}}"
+        )
     );
-    // Versions do not change when records point at them.
-    assert_eq!(version(&s, "a"), v);
+    // A node is its version: nothing about the history is in it.
+    assert_eq!(n1.version(), v1);
+    assert_eq!(version(&s, "a"), v1);
+    // The same version again gets an occurrence suffix.
+    let n3 = h.append(&v1, step("revert"), None).unwrap();
+    assert_eq!(n3.as_str(), format!("{v1}#2"));
+    assert_eq!(n3.version(), v1);
 }
 
 #[test]
-fn malformed_records_are_rejected() {
+fn malformed_histories_are_rejected() {
     let s = store();
     let v = version(&s, "a");
-    let rf = formats::by_alias("record").unwrap();
+    let id = v.to_string();
+    let hf = formats::by_alias("history").unwrap();
+    let node = |after: Value| Value::map([("after", after)]);
     let bad = [
         Value::str("x"),
-        Value::map([("version", Value::str(v.to_string()))]),
-        Value::map([("meta", Value::empty()), ("parents", Value::empty()), ("version", Value::str("nope"))]),
-        Value::map([
-            ("meta", Value::empty()),
-            ("parents", Value::map([(v.to_string(), "x")])),
-            ("version", Value::str(v.to_string())),
-        ]),
-        Value::map([
-            ("extra", Value::empty()),
-            ("meta", Value::empty()),
-            ("parents", Value::empty()),
-            ("version", Value::str(v.to_string())),
-        ]),
+        Value::map([("extra", Value::empty())]),
+        Value::map([("nodes", Value::map([("nope", Value::empty())]))]),
+        Value::map([("nodes", Value::map([(format!("{id}#1"), Value::empty())]))]),
+        Value::map([("nodes", Value::map([(format!("{id}#02"), Value::empty())]))]),
+        Value::map([("nodes", Value::map([(id.clone(), Value::map([("x", Value::empty())]))]))]),
+        // A predecessor that is not a node.
+        Value::map([("nodes", Value::map([(id.clone(), node(Value::map([(format!("{id}#2"), Value::empty())])))]))]),
+        // A cycle.
+        Value::map([(
+            "nodes",
+            Value::map([
+                (id.clone(), node(Value::map([(format!("{id}#2"), Value::empty())]))),
+                (format!("{id}#2"), node(Value::map([(id.clone(), Value::empty())]))),
+            ]),
+        )]),
+        Value::map([("nodes", Value::map([(id.clone(), node(Value::map([(id.clone(), Value::empty())])))]))]),
+        // compatible is {} when present.
+        Value::map([(
+            "nodes",
+            Value::map([
+                (id.clone(), Value::empty()),
+                (format!("{id}#2"), node(Value::map([(id.clone(), Value::map([("compatible", "yes")]))]))),
+            ]),
+        )]),
+        Value::map([("tags", Value::map([("v1", id.as_str())]))]),
+        Value::map([("nodes", Value::map([(id.clone(), Value::empty())])), ("tags", Value::map([("", id.as_str())]))]),
     ];
     for b in bad {
         let bytes = b.serialize();
-        assert!(rf.check("k", &bytes).is_err(), "{b}");
-        assert!(matches!(put(&s, b3(), "record", &bytes), Err(Error::Malformed { .. })));
+        assert!(hf.check("k", &bytes).is_err(), "{b}");
+        assert!(matches!(put(&s, b3(), "history", &bytes), Err(Error::Malformed { .. })));
     }
     assert!(matches!(history::read(&s, &v), Err(Error::UnknownFormat(_))));
+    assert!(put(&s, b3(), "history", &Value::empty().serialize()).is_ok());
 }
 
 #[test]
-fn commit_moves_the_branch_by_compare_and_swap() {
+fn commit_moves_the_name_by_compare_and_swap() {
     let s = store();
     let (v1, v2) = (version(&s, "a"), version(&s, "b"));
     assert_eq!(history::head(&s, "main").unwrap(), None);
-    let c1 = history::commit(&s, b3(), "main", &v1, meta("one")).unwrap();
-    let c2 = history::commit(&s, b3(), "main", &v2, meta("two")).unwrap();
-    assert_eq!(history::head(&s, "main").unwrap(), Some(c2.clone()));
-    assert_eq!(history::read(&s, &c2).unwrap().parents, BTreeSet::from([c1.clone()]));
+    let n1 = history::commit(&s, b3(), "main", &v1, step("one"), None).unwrap();
+    let n2 = history::commit(&s, b3(), "main", &v2, step("two"), None).unwrap();
+    let (old, h) = history::load(&s, "main").unwrap();
+    assert_eq!(h.log(), vec![n2.clone(), n1.clone()]);
+    assert_eq!(h.nodes[&n2].after[&n1], step("two"));
 
-    // Someone else moves the branch between our read and our swap.
-    let mine = history::write(&s, b3(), &Record { version: v1.clone(), parents: [c2.clone()].into(), meta: meta("x") })
-        .unwrap();
-    let theirs = history::commit(&s, b3(), "main", &v1, meta("theirs")).unwrap();
-    let r = s.write("main", mine.to_string().as_bytes(), &Expect::Value(c2.to_string().into_bytes()));
-    assert_eq!(r, Err(CoreError::Conflict));
-    assert_eq!(history::head(&s, "main").unwrap(), Some(theirs));
+    // Someone else moves the name between our load and our save.
+    let mut mine = h.clone();
+    mine.append(&v1, step("mine"), None).unwrap();
+    history::commit(&s, b3(), "main", &v1, step("theirs"), None).unwrap();
+    let r = history::save(&s, b3(), "main", old.as_ref(), &mine);
+    assert_eq!(r, Err(Error::Store(CoreError::Conflict)));
+    // `record` retries from the new value instead.
+    let (_, h) = history::load(&s, "main").unwrap();
+    assert_eq!(h.nodes.len(), 3);
+    let _ = Expect::Absent;
 }
 
 #[test]
-fn log_and_merge_bases() {
+fn log_merge_bases_compatibility_and_extension() {
     let s = store();
-    let v = version(&s, "a");
+    let (v0, va, vb, vc, vm) =
+        (version(&s, "0"), version(&s, "a"), version(&s, "b"), version(&s, "c"), version(&s, "m"));
     //   root - a1 - a2 ----- m
-    //      \             /
-    //       b1 --------
-    let root = rec(&s, &v, &[], "root");
-    let a1 = rec(&s, &v, &[&root], "a1");
-    let a2 = rec(&s, &v, &[&a1], "a2");
-    let b1 = rec(&s, &v, &[&root], "b1");
-    let m = rec(&s, &v, &[&a2, &b1], "m");
+    //      \               /
+    //       b1 ------------
+    let mut h = History::default();
+    let root = h.add(&v0, BTreeMap::new(), None).unwrap();
+    let a1 = h.add(&va, BTreeMap::from([(root.clone(), ok("a1"))]), None).unwrap();
+    let a2 = h.add(&vb, BTreeMap::from([(a1.clone(), ok("a2"))]), None).unwrap();
+    let b1 = h.add(&vc, BTreeMap::from([(root.clone(), step("b1"))]), None).unwrap();
+    let before = h.clone();
+    let m = h.add(&vm, BTreeMap::from([(a2.clone(), ok("m")), (b1.clone(), step("m"))]), None).unwrap();
 
-    let log: Vec<Ref> = history::log(&s, &m).unwrap().into_iter().map(|(r, _)| r).collect();
+    let log = h.log();
     assert_eq!(log.len(), 5);
-    assert_eq!(log[0], m);
-    assert_eq!(log[4], root);
-    let pos = |r: &Ref| log.iter().position(|x| x == r).unwrap();
+    assert_eq!((&log[0], &log[4]), (&m, &root));
+    let pos = |r: &NodeId| log.iter().position(|x| x == r).unwrap();
     assert!(pos(&a2) < pos(&a1) && pos(&a1) < pos(&root) && pos(&b1) < pos(&root));
+    assert_eq!(h.tips(), BTreeSet::from([m.clone()]));
+    assert_eq!(before.tips(), BTreeSet::from([a2.clone(), b1.clone()]));
 
-    assert_eq!(history::merge_bases(&s, &a2, &b1).unwrap(), BTreeSet::from([root.clone()]));
-    assert_eq!(history::merge_bases(&s, &m, &a1).unwrap(), BTreeSet::from([a1.clone()]));
-    assert_eq!(history::merge_bases(&s, &a2, &a2).unwrap(), BTreeSet::from([a2.clone()]));
+    assert_eq!(h.merge_bases(&a2, &b1), BTreeSet::from([root.clone()]));
+    assert_eq!(h.merge_bases(&m, &a1), BTreeSet::from([a1.clone()]));
+    assert_eq!(h.merge_bases(&a2, &a2), BTreeSet::from([a2.clone()]));
 
-    // Criss-cross: two merges of a1 and b1 in opposite orders have both as
-    // best common ancestors.
-    let x = rec(&s, &v, &[&a1, &b1], "x");
-    let y = rec(&s, &v, &[&b1, &a1], "y-differs");
-    assert_eq!(history::merge_bases(&s, &x, &y).unwrap(), BTreeSet::from([a1, b1]));
+    // Compatible along root-a1-a2-m, not along b1.
+    assert!(h.compatible(&root, &m) && h.compatible(&a1, &a2) && h.compatible(&b1, &b1));
+    assert!(!h.compatible(&root, &b1) && !h.compatible(&b1, &m) && !h.compatible(&m, &root));
 
-    // Unrelated histories share nothing.
-    let other = rec(&s, &v, &[], "other");
-    assert!(history::merge_bases(&s, &m, &other).unwrap().is_empty());
+    // Extension ignores tags and docs, not steps.
+    assert!(h.extends(&before) && !before.extends(&h));
+    let mut tagged = before.clone();
+    tagged.tags.insert("v1".into(), a1.clone());
+    tagged.doc = Some("x".into());
+    assert!(tagged.extends(&before) && before.extends(&tagged));
+    let mut rewritten = before.clone();
+    rewritten.nodes.get_mut(&a2).unwrap().after.insert(a1.clone(), step("reworded"));
+    assert!(!rewritten.extends(&before));
+
+    // Criss-cross: two merges of a1 and b1 have both as best common ancestors.
+    let x = h.add(&vm, BTreeMap::from([(a1.clone(), step("x")), (b1.clone(), step("x"))]), None).unwrap();
+    let y = h.add(&vm, BTreeMap::from([(b1.clone(), step("y")), (a1.clone(), step("y"))]), None).unwrap();
+    assert_eq!(h.merge_bases(&x, &y), BTreeSet::from([a1, b1]));
+
+    // Unrelated lines share nothing.
+    let other = h.add(&va, BTreeMap::new(), None).unwrap();
+    assert!(h.merge_bases(&m, &other).is_empty());
+    let _ = hist;
 }

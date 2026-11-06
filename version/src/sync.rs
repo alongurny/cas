@@ -27,8 +27,6 @@ pub struct Copied {
     pub blobs: usize,
     /// Blobs skipped because the destination already had them.
     pub present: usize,
-    /// Purged blobs whose tombstones were carried over instead.
-    pub purged: usize,
 }
 
 /// The references inside a blob, by its format. Unknown formats are
@@ -36,10 +34,7 @@ pub struct Copied {
 pub(crate) fn children(store: &dyn Store, r: &Ref) -> Result<Vec<Ref>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(_), _)) => Ok(tree::load(store, r)?.into_iter().map(|Item { child, .. }| child).collect()),
-        Some((_, "record")) => {
-            let rec = history::read(store, r)?;
-            Ok(std::iter::once(rec.version).chain(rec.parents).collect())
-        }
+        Some((_, "history")) => Ok(history::read(store, r)?.nodes.keys().map(|id| id.version()).collect()),
         _ => Ok(Vec::new()),
     }
 }
@@ -89,11 +84,6 @@ pub fn copy(src: &dyn Store, dst: &dyn Store, root: &Ref) -> Result<Copied> {
             copy_blob(src, dst, r.key(), &mut n)?;
             continue;
         }
-        if let Some(reason) = src.read(&crate::gc::tombstone(r.key()))? {
-            crate::gc::purge(dst, r.key(), &String::from_utf8_lossy(&reason))?;
-            n.purged += 1;
-            continue;
-        }
         if has(dst, r.key())? {
             n.present += 1;
             continue;
@@ -106,41 +96,41 @@ pub fn copy(src: &dyn Store, dst: &dyn Store, root: &Ref) -> Result<Copied> {
     Ok(n)
 }
 
-/// How a branch tag was synced.
+/// How a history name was synced.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The destination already pointed at the same record.
+    /// The destination already held the same history.
     UpToDate,
-    /// The destination had no such tag; it now points at the source's head.
+    /// The destination had no such name; it now holds the source's history.
     Created,
-    /// The destination's head was behind; it moved forward.
+    /// The source's history extends the destination's; the name moved.
     FastForward,
 }
 
-/// Make branch `tag` in `dst` point at its head in `src`, copying what is
-/// needed. Moves the tag only when that loses no history: the destination
-/// has no head, or its head is an ancestor of the source's. Otherwise
-/// `Diverged`; merging is left to the caller.
-pub fn push(src: &dyn Store, dst: &dyn Store, tag: &str) -> Result<(Outcome, Copied)> {
-    let head = history::head(src, tag)?.ok_or_else(|| Error::Missing(format!("tag {tag} in the source")))?;
-    let theirs = history::head(dst, tag)?;
+/// Make `to` in `dst` hold the history `from` names in `src`, copying what
+/// is needed. Fast-forward only: the name moves when the destination has
+/// none or the new history extends its own. Otherwise `Diverged`; rebase
+/// or merge is the caller's choice.
+pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(Outcome, Copied)> {
+    let head = history::head(src, from)?.ok_or_else(|| Error::Missing(format!("history {from} in the source")))?;
+    let theirs = history::head(dst, to)?;
     if theirs.as_ref() == Some(&head) {
         return Ok((Outcome::UpToDate, Copied::default()));
     }
     if let Some(t) = &theirs
-        && !history::log(src, &head)?.iter().any(|(r, _)| r == t)
+        && !history::read(src, &head)?.extends(&history::read(dst, t)?)
     {
-        return Err(Error::Diverged(tag.to_string()));
+        return Err(Error::Diverged(to.to_string()));
     }
     let copied = copy(src, dst, &head)?;
     let expect = match &theirs {
         Some(t) => Expect::Value(t.to_string().into_bytes()),
         None => Expect::Absent,
     };
-    match dst.write(tag, head.to_string().as_bytes(), &expect) {
+    match dst.write(to, head.to_string().as_bytes(), &expect) {
         Ok(()) => Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied)),
         // The destination moved while we copied; the copy is still valid.
-        Err(CoreError::Conflict) => Err(Error::Diverged(tag.to_string())),
+        Err(CoreError::Conflict) => Err(Error::Diverged(to.to_string())),
         Err(e) => Err(e.into()),
     }
 }

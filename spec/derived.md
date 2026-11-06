@@ -1,7 +1,7 @@
 # Derived data (Stage 6)
 
 Derived data is a cache of f(X): the result of a deterministic function f over an input X, which is
-a version (or one of its directories) or a history record. Everything else, such as indexes,
+a version (or one of its directories) or a history. Everything else, such as indexes,
 summaries, blame or path logs, is built from such results.
 
 ## Functions
@@ -42,15 +42,13 @@ follows the change) applied to derived data.
 
 - [summary](functions/summary.md): number of directories and files under a directory, computed
   recursively.
-- [changes](functions/changes.md): the paths a record changed relative to every parent. This is
-  the first history-derived function.
-
-`path_log(head, path)` walks the log from `head` and keeps the records whose cached `changes`
-include `path` or something under it.
+`path_log(history, path)` walks the history's log and keeps the nodes where the object at `path`
+differs from every predecessor's (a root counts when `path` exists). Each test is one lookup per
+side, so it needs no cache: its cost follows the depth of `path`.
 
 ## Conformance
 
 `version/tests/derived.rs` checks function ids and objects, cache hits (no writes on a second
 derive), incremental recomputation after one edit (at most six writes in a 111-directory tree),
-that a result recorded first wins, input-format checks, and `changes` and `path_log` across a
-linear history and a merge.
+that a result recorded first wins, input-format checks, and `path_log` across a linear history
+and a merge.

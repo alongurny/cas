@@ -105,7 +105,7 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("git-blob", include_str!("../../spec/formats/git-blob.md"), Kind::Leaf(git)),
         format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
         format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),
-        format("record", include_str!("../../spec/formats/record.md"), Kind::Leaf(crate::history::check)),
+        format("history", include_str!("../../spec/formats/history.md"), Kind::Leaf(crate::history::check)),
     ]
 });
 

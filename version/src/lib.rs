@@ -20,7 +20,7 @@ mod tree;
 pub mod uni;
 
 pub use formats::{Format, Kind, by_alias, by_id, publish};
-pub use tree::{Walk, build, diff, lookup, merge_diff, update, walk};
+pub use tree::{Walk, build, diff, lookup, merge_diff, object_at, update, walk};
 
 use cas_core::algo::Algorithm;
 use cas_core::key::{Parsed, classify};
@@ -173,8 +173,6 @@ pub enum Error {
     Store(cas_core::Error),
     /// A blob the version refers to is absent from the store.
     Missing(String),
-    /// A blob deliberately deleted with `gc::purge`.
-    Purged(String),
     /// A blob that is not valid in the format it was read with.
     Malformed {
         key: String,
@@ -198,7 +196,6 @@ impl fmt::Display for Error {
         match self {
             Error::Store(e) => write!(f, "store: {e}"),
             Error::Missing(k) => write!(f, "missing blob {k}"),
-            Error::Purged(k) => write!(f, "blob {k} was purged"),
             Error::Malformed { key, reason } => write!(f, "malformed blob {key}: {reason}"),
             Error::UnknownFormat(s) => write!(f, "unknown format {s}"),
             Error::BadPath(p) => write!(f, "bad path {p:?}"),
@@ -243,8 +240,6 @@ pub fn read_blob(store: &dyn Store, key: &str) -> Result<Vec<u8>> {
     }
     match store.read(key)? {
         Some(v) => Ok(v),
-        // A purged blob leaves a tombstone, so its absence is expected.
-        None if store.read(&gc::tombstone(key))?.is_some() => Err(Error::Purged(key.to_string())),
         None => Err(Error::Missing(key.to_string())),
     }
 }

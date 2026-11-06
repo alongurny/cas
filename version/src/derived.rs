@@ -6,12 +6,11 @@
 //! map of its name, input format, output format and spec key. Changing a
 //! function's definition gives a new id, so results never mix.
 
-use crate::history;
+use crate::history::{History, NodeId};
 use crate::uni::Value;
-use crate::{Change, Error, Path, Ref, Result, by_alias, diff, malformed, read_blob, tree, write_blob};
+use crate::{Error, Path, Ref, Result, by_alias, malformed, object_at, read_blob, tree, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::{Error as CoreError, Expect, Store};
-use std::collections::BTreeSet;
 
 type Compute = fn(&dyn Store, &'static Algorithm, &Ref) -> Result<Value>;
 
@@ -127,43 +126,30 @@ fn summary(store: &dyn Store, alg: &'static Algorithm, input: &Ref) -> Result<Va
 pub static SUMMARY: Function =
     Function { name: "summary", input: "dir", spec: include_str!("../../spec/functions/summary.md"), compute: summary };
 
-/// `changes`: the paths a record changed, compared with each of its
-/// parents. A path counts when it differs from every parent's version.
-fn changes(store: &dyn Store, _: &'static Algorithm, input: &Ref) -> Result<Value> {
-    let rec = history::read(store, input)?;
-    let paths = |d: Vec<Change>| d.into_iter().map(|c| c.path).collect::<BTreeSet<Path>>();
-    let changed = if rec.parents.is_empty() {
-        // A first record adds everything.
-        tree::walk(store, &rec.version, None).map(|r| r.map(|(p, _)| p)).collect::<Result<BTreeSet<_>>>()?
-    } else {
-        let mut sets = Vec::new();
-        for p in &rec.parents {
-            sets.push(paths(diff(store, &history::read(store, p)?.version, &rec.version, None)?));
-        }
-        let first = sets.pop().unwrap();
-        first.into_iter().filter(|p| sets.iter().all(|s| s.contains(p))).collect()
-    };
-    Ok(Value::Map(changed.into_iter().map(|p| (Value::str(p.as_str()), Value::empty())).collect()))
-}
-
-pub static CHANGES: Function = Function {
-    name: "changes",
-    input: "record",
-    spec: include_str!("../../spec/functions/changes.md"),
-    compute: changes,
-};
-
-/// The records from `head` back that changed `path` (or anything under
-/// it), newest first in log order, using cached `changes`.
-pub fn path_log(store: &dyn Store, alg: &'static Algorithm, head: &Ref, path: &Path) -> Result<Vec<Ref>> {
+/// The nodes of `h` whose step changed `path` (or anything under it),
+/// newest first in log order. A node counts when what lies at `path`
+/// differs from every predecessor's; a root counts when `path` exists in
+/// it. Each test is one lookup per side, so the cost follows the depth of
+/// `path`, not the size of the trees.
+pub fn path_log(store: &dyn Store, h: &History, path: &Path) -> Result<Vec<NodeId>> {
+    let at = |id: &NodeId| object_at(store, &id.version(), path);
     let mut out = Vec::new();
-    for (r, _) in history::log(store, head)? {
-        let changed = value(store, &derive(store, alg, &CHANGES, &r)?)?;
-        let hit = changed.as_map().is_some_and(|m| {
-            m.keys().filter_map(Value::as_str).any(|p| Path::new(p).is_ok_and(|p| p.starts_with(path)))
-        });
+    for id in h.log() {
+        let here = at(&id)?;
+        let after = &h.nodes[&id].after;
+        let hit = if after.is_empty() {
+            here.is_some()
+        } else {
+            let mut changed = true;
+            for p in after.keys() {
+                if at(p)? == here {
+                    changed = false;
+                }
+            }
+            changed
+        };
         if hit {
-            out.push(r);
+            out.push(id);
         }
     }
     Ok(out)

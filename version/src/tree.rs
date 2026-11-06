@@ -198,6 +198,14 @@ fn resolve(store: &dyn Store, root: &Ref, path: Option<&Path>) -> Result<At> {
     Ok(at)
 }
 
+/// The object at `path`: a file's reference or a directory's own.
+pub fn object_at(store: &dyn Store, root: &Ref, path: &Path) -> Result<Option<Ref>> {
+    Ok(match resolve(store, root, Some(path))? {
+        At::Nothing => None,
+        At::File(r) | At::Dir(r) => Some(r),
+    })
+}
+
 pub fn lookup(store: &dyn Store, root: &Ref, path: &Path) -> Result<Option<Node>> {
     Ok(resolve(store, root, Some(path))?.node())
 }

@@ -1,41 +1,70 @@
-# History records (Stage 5)
+# Histories
 
-History is metadata, kept apart from versions. A **record** (format `record`,
-[formats/record.md](formats/record.md)) names a version, the records it follows, and free
-metadata. Versions never refer to records, so the same tree reached by different histories has
-one key. Records chain only among themselves.
+A version (`dir` and the other formats) is pure content. Everything about
+versioning lives in a separate object, a **history** (format `history`,
+[formats/history.md](formats/history.md)): which versions, in what order,
+what changed at each step and whether that step is a compatible upgrade,
+which versions carry which tags, and their documentation. There is no
+commit object and no parent link: a node of a history is a version.
 
-Records are stored in `uni-bin` ([formats/uni-bin.md](formats/uni-bin.md)), a general data
-format modeled on Uniform's primitive values. A value is a string or a map from values to values,
-and the blob is its canonical binary serialization. The same values written as canonical text,
-such as `{'a': 'x', 'b': {}}`, are a different format, `uni-txt`
-([formats/uni-txt.md](formats/uni-txt.md)), with their own keys. The format says which fields hold
-references, written as strings `<format> <key>`. There is no separate reference kind; one can come
-later as a new format, if tools need to find links without knowing a format.
+Histories are stored in `uni-bin` ([formats/uni-bin.md](formats/uni-bin.md)),
+a general data format modeled on Uniform's primitive values. A value is a
+string or a map from values to values, and the blob is its canonical
+binary serialization. The same values written as canonical text are a
+different format, `uni-txt` ([formats/uni-txt.md](formats/uni-txt.md)).
+References are strings `<format> <key>`; the format says which fields hold
+them.
 
-## Branches
+## Naming a history
 
-A branch is a tag whose value is the text of a reference to a record. `commit(tag, version,
-meta)` reads the tag, writes a record whose parent is the current head (none for a new branch),
-and moves the tag by compare-and-swap from the old value. If someone moved the tag in between,
-the swap fails with `conflict` and nothing is lost: the new record exists, just unreferenced.
-Merging after a conflict is deferred (handoff).
+A history object never changes. The store's mutable values (its tags in
+the core spec, compare-and-set by name) give histories names: the value is
+the text of a reference to the current history object. Recording a version
+writes a new history object and moves the name from the old reference.
+A lost race is a store `conflict`, and the caller retries from the new
+value.
 
-## Walking history
+By convention the shared history is `main`, readable by the public (what
+public means depends on where the store runs, spec/access.md). This is only
+a convention: nothing in the format treats `main` specially.
 
-- `log(head)` returns `head` and everything it follows, each once. A record always comes before
-  its parents, and ties go to the smallest reference, so the order is deterministic.
-- `merge_bases(a, b)` returns the best common ancestors: records both reach (each reaches itself)
-  that no other common ancestor follows. There is more than one after a criss-cross merge, and
-  none for unrelated histories.
+## Workflow
+
+Branches are not first-class and are discouraged. Each person keeps their
+own private histories instead:
+
+1. Accumulate small changes in a private history. Each change is a node;
+   their keys never need to be shown to anyone.
+2. Generate the public history from it: add one node (or a few) holding
+   the final version after the public tip, with a changelog for the whole
+   change. The public history does not reveal the private nodes, and the
+   split into nodes is chosen anew.
+3. When the public history moved meanwhile, rebase: replay the private
+   steps onto its new tip (three-way at path level, spec/merge.md), then
+   publish.
+
+A merge (a node with two predecessors) is supported but not preferred; a
+public history usually stays linear. Pushing a history moves the
+destination's name only when the new history extends the old one
+(fast-forward only); anything else is a new history the destination's
+owner has to accept explicitly.
+
+## Operations (module `history`)
+
+- `load(store, name)` and `save(store, alg, name, old, history)`, the
+  compare-and-set pair; `record(store, alg, name, f)` loads, applies `f`
+  and saves.
+- `History::add(version, after, step)` adds a node after the given
+  predecessors (by default the single tip), choosing a `#n` suffix if the
+  version already occurs.
+- `tips`, `log` (newest first: a node before its predecessors, ties by the
+  smallest id), `follows`, `merge_bases`, `compatible(a, b)`,
+  `extends(old, new)`.
+- `rebase` and `publish` in module `merge`.
 
 ## Conformance
 
-`version/tests/history.rs` checks:
-
-- `uni-bin`: round trips through bytes and text; that no other bytes decode to the same value; and
-  rejection of non-shortest lengths, unsorted or duplicate keys, invalid UTF-8 and trailing bytes.
-- Records: round trips, content addressing, and rejection of malformed records.
-- Commits: they move the branch, and a concurrent move gives `conflict`.
-- `log` order, and merge bases for a linear history, a merge, a criss-cross and unrelated
-  histories.
+`version/tests/history.rs` checks `uni-bin` (round trips, canonical form,
+rejections), the history format (round trips, every validity rule),
+recording and its conflict, `#n` ids, log order, merge bases, compatible
+upgrades and extension.

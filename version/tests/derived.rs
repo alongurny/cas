@@ -3,8 +3,8 @@
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Session, Span, Store, Who};
-use cas_version::derived::{self, CHANGES, SUMMARY};
-use cas_version::history;
+use cas_version::derived::{self, SUMMARY};
+use cas_version::history::{History, Step};
 use cas_version::uni::Value;
 use cas_version::{Edit, Node, Path, Ref, build, formats, put, update};
 use std::collections::BTreeMap;
@@ -70,7 +70,6 @@ fn function_ids_are_content_addressed() {
     derived::publish(&s, &SUMMARY).unwrap();
     let object = s.read(&SUMMARY.id()).unwrap().unwrap();
     assert_eq!(Value::deserialize(&object).unwrap(), SUMMARY.object());
-    assert_ne!(SUMMARY.id(), CHANGES.id());
     let v = version(&s, &["a"]);
     assert_eq!(SUMMARY.tag(&v), format!("derived/{}/{}", SUMMARY.id(), v.key()));
 }
@@ -115,57 +114,33 @@ fn a_result_recorded_first_wins() {
     s.write(&SUMMARY.tag(&v), theirs.to_string().as_bytes(), &Expect::Absent).unwrap();
     assert_eq!(derived::derive(&s, b3(), &SUMMARY, &v).unwrap(), theirs);
     // Inputs in the wrong format are refused.
-    let rec = history::commit(&s, b3(), "main", &v, BTreeMap::new()).unwrap();
-    assert!(derived::derive(&s, b3(), &SUMMARY, &rec).is_err());
-    assert!(derived::derive(&s, b3(), &CHANGES, &v).is_err());
-}
-
-fn changed(s: &dyn Store, r: &Ref) -> Vec<String> {
-    let v = derived::value(s, &derived::derive(s, b3(), &CHANGES, r).unwrap()).unwrap();
-    // uni-bin orders keys by serialization (shorter strings first), so put
-    // them in path order.
-    let mut paths: Vec<Path> = v.as_map().unwrap().keys().map(|k| Path::new(k.as_str().unwrap()).unwrap()).collect();
-    paths.sort();
-    paths.into_iter().map(|p| p.to_string()).collect()
+    let raw = put(&s, b3(), "raw", b"not a dir").unwrap();
+    assert!(derived::derive(&s, b3(), &SUMMARY, &raw).is_err());
 }
 
 #[test]
-fn changes_and_path_log() {
+fn path_log() {
     let s = store();
-    let meta = BTreeMap::new;
+    let mut h = History::default();
     let v1 = version(&s, &["a/x", "b"]);
-    let c1 = history::commit(&s, b3(), "main", &v1, meta()).unwrap();
-    assert_eq!(changed(&s, &c1), ["a", "a/x", "b"]);
-
+    let c1 = h.append(&v1, Step::default(), None).unwrap();
     let v2 = update(&s, b3(), &v1, &BTreeMap::from([(Path::new("b").unwrap(), Edit::Set(file(&s, "b2")))])).unwrap();
-    let c2 = history::commit(&s, b3(), "main", &v2, meta()).unwrap();
-    assert_eq!(changed(&s, &c2), ["b"]);
-
+    let c2 = h.append(&v2, Step::default(), None).unwrap();
     let v3 = update(&s, b3(), &v2, &BTreeMap::from([(Path::new("a/y").unwrap(), Edit::Set(file(&s, "y")))])).unwrap();
-    let c3 = history::commit(&s, b3(), "main", &v3, meta()).unwrap();
-    assert_eq!(changed(&s, &c3), ["a/y"]);
+    let c3 = h.append(&v3, Step::default(), None).unwrap();
 
-    // A merge of c2 and a side branch that changed c: only paths that
-    // differ from both parents count.
+    // A merge of c3 and a side line that added c: a path counts only when
+    // it differs from every predecessor.
     let side_v = update(&s, b3(), &v1, &BTreeMap::from([(Path::new("c").unwrap(), Edit::Set(file(&s, "c")))])).unwrap();
-    let side = history::write(
-        &s,
-        b3(),
-        &history::Record { version: side_v, parents: [c1.clone()].into(), meta: BTreeMap::new() },
-    )
-    .unwrap();
+    let side = h.add(&side_v, BTreeMap::from([(c1.clone(), Step::default())]), None).unwrap();
     let mv = update(&s, b3(), &v3, &BTreeMap::from([(Path::new("c").unwrap(), Edit::Set(file(&s, "c")))])).unwrap();
-    let m = history::write(
-        &s,
-        b3(),
-        &history::Record { version: mv, parents: [c3.clone(), side.clone()].into(), meta: BTreeMap::new() },
-    )
-    .unwrap();
-    assert!(changed(&s, &m).is_empty());
+    let m = h.add(&mv, BTreeMap::from([(c3.clone(), Step::default()), (side.clone(), Step::default())]), None).unwrap();
 
-    let log = |p: &str| derived::path_log(&s, b3(), &m, &Path::new(p).unwrap()).unwrap();
+    let log = |p: &str| derived::path_log(&s, &h, &Path::new(p).unwrap()).unwrap();
     assert_eq!(log("b"), [c2.clone(), c1.clone()]);
     assert_eq!(log("a"), [c3.clone(), c1.clone()]);
+    assert_eq!(log("a/y"), std::slice::from_ref(&c3));
     assert_eq!(log("c"), [side]);
     assert!(log("zzz").is_empty());
+    let _ = (m, Ref::parse);
 }

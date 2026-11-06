@@ -2,9 +2,10 @@
 
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
-use cas_core::{AllowAll, CoreStore, Policy, Session, Store, Who};
+use cas_core::{AllowAll, CoreStore, Policy, Session, Who};
+use cas_version::history::{History, NodeId, Step};
 use cas_version::merge::{self, Outcome, diff3, merge_versions};
-use cas_version::{Edit, Node, Path, Ref, build, formats, history, lookup, put, read_blob, update, walk};
+use cas_version::{Edit, Node, Path, Ref, build, formats, lookup, put, read_blob, update, walk};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -121,78 +122,115 @@ fn line_level_merge_inside_one_file() {
     assert_eq!(text_at(&s, &m.version, "f").as_deref(), Some("A\nb\nc\nD\n"));
 }
 
+fn step(msg: &str) -> Step {
+    Step { changelog: Some(msg.into()), compatible: false }
+}
+
 #[test]
-fn merging_branches() {
+fn merging_two_tips_of_a_history() {
     let s = store();
-    let meta = BTreeMap::new;
-    let base = tree(&s, &[("f", "a\nb\nc\n"), ("g", "1\n")]);
-    let c0 = history::commit(&s, b3(), "main", &base, meta()).unwrap();
-    // A side branch from c0.
-    s.write("side", c0.to_string().as_bytes(), &cas_core::Expect::Absent).unwrap();
-    let side = history::commit(&s, b3(), "side", &edit(&s, &base, "g", Some("2\n")), meta()).unwrap();
+    let v0 = tree(&s, &[("f", "a\nb\nc\n")]);
+    let mut h = History::default();
+    let root = h.append(&v0, Step::default(), None).unwrap();
+    let ours =
+        h.add(&edit(&s, &v0, "f", Some("A\nb\nc\n")), BTreeMap::from([(root.clone(), step("A"))]), None).unwrap();
+    let theirs =
+        h.add(&edit(&s, &v0, "f", Some("a\nb\nC\n")), BTreeMap::from([(root.clone(), step("C"))]), None).unwrap();
+    assert!(h.append(&v0, Step::default(), None).is_err(), "two tips: append refuses");
 
-    // main has not moved: fast-forward.
-    assert_eq!(merge::merge_branch(&s, b3(), "main", &side, meta()).unwrap(), Outcome::FastForward(side.clone()));
-    assert_eq!(merge::merge_branch(&s, b3(), "main", &c0, meta()).unwrap(), Outcome::UpToDate);
-
-    // Both move: a merge record with two parents.
-    let side2 = history::commit(
-        &s,
-        b3(),
-        "side",
-        &edit(&s, &edit(&s, &base, "g", Some("2\n")), "f", Some("A\nb\nc\n")),
-        meta(),
-    )
-    .unwrap();
-    let mv = history::read(&s, &history::head(&s, "main").unwrap().unwrap()).unwrap().version;
-    let main2 = history::commit(&s, b3(), "main", &edit(&s, &mv, "f", Some("a\nb\nC\n")), meta()).unwrap();
-    let Outcome::Merged(m) = merge::merge_branch(&s, b3(), "main", &side2, meta()).unwrap() else { panic!() };
-    let rec = history::read(&s, &m).unwrap();
-    assert_eq!(rec.parents, [main2, side2.clone()].into());
-    assert_eq!(text_at(&s, &rec.version, "f").as_deref(), Some("A\nb\nC\n"));
-    assert_eq!(history::head(&s, "main").unwrap(), Some(m));
+    let Outcome::Done(m) = merge::merge_nodes(&s, b3(), &mut h, &ours, &theirs, &step("merge")).unwrap() else {
+        panic!()
+    };
+    assert_eq!(h.nodes[&m].after.keys().cloned().collect::<Vec<_>>().len(), 2);
+    assert_eq!(text_at(&s, &m.version(), "f").as_deref(), Some("A\nb\nC\n"));
+    assert_eq!(h.tip(), Some(m.clone()));
+    assert_eq!(merge::merge_nodes(&s, b3(), &mut h, &m, &ours, &step("x")).unwrap(), Outcome::UpToDate);
 
     // A real conflict records nothing.
-    let head = history::head(&s, "main").unwrap().unwrap();
-    let hv = history::read(&s, &head).unwrap().version;
-    history::commit(&s, b3(), "main", &edit(&s, &hv, "g", Some("main\n")), meta()).unwrap();
-    let sv = history::read(&s, &side2).unwrap().version;
-    let side3 = history::commit(&s, b3(), "side", &edit(&s, &sv, "g", Some("side\n")), meta()).unwrap();
-    let before = history::head(&s, "main").unwrap();
-    let Outcome::Conflicts(c) = merge::merge_branch(&s, b3(), "main", &side3, meta()).unwrap() else { panic!() };
+    let g1 = h.add(&edit(&s, &m.version(), "g", Some("1\n")), BTreeMap::from([(m.clone(), step("1"))]), None).unwrap();
+    let g2 = h.add(&edit(&s, &m.version(), "g", Some("2\n")), BTreeMap::from([(m.clone(), step("2"))]), None).unwrap();
+    let before = h.clone();
+    let Outcome::Conflicts(c) = merge::merge_nodes(&s, b3(), &mut h, &g1, &g2, &step("x")).unwrap() else { panic!() };
     assert_eq!(c.conflicts.iter().map(|c| c.path.to_string()).collect::<Vec<_>>(), ["g"]);
-    assert_eq!(history::head(&s, "main").unwrap(), before);
+    assert_eq!(h, before);
 }
 
 #[test]
 fn criss_cross_uses_a_virtual_base() {
     let s = store();
-    let rec = |v: &Ref, ps: &[&Ref]| {
-        history::write(
-            &s,
-            b3(),
-            &history::Record {
-                version: v.clone(),
-                parents: ps.iter().map(|r| (*r).clone()).collect(),
-                meta: BTreeMap::new(),
-            },
-        )
-        .unwrap()
-    };
+    let mut h = History::default();
+    let after = |ps: &[&NodeId]| ps.iter().map(|p| ((*p).clone(), Step::default())).collect::<BTreeMap<_, _>>();
     let v0 = tree(&s, &[("x", "0\n"), ("y", "0\n")]);
-    let r0 = rec(&v0, &[]);
+    let r0 = h.add(&v0, after(&[]), None).unwrap();
     let va = edit(&s, &v0, "x", Some("a\n"));
     let vb = edit(&s, &v0, "y", Some("b\n"));
-    let (ra, rb) = (rec(&va, &[&r0]), rec(&vb, &[&r0]));
+    let (ra, rb) = (h.add(&va, after(&[&r0]), None).unwrap(), h.add(&vb, after(&[&r0]), None).unwrap());
     let vab = edit(&s, &va, "y", Some("b\n"));
-    let (m1, m2) = (rec(&vab, &[&ra, &rb]), rec(&vab, &[&rb, &ra]));
+    let (m1, m2) = (h.add(&vab, after(&[&ra, &rb]), None).unwrap(), h.add(&vab, after(&[&rb, &ra]), None).unwrap());
     // Each side then edits a different file.
-    let o = rec(&edit(&s, &vab, "x", Some("o\n")), &[&m1]);
-    let t = rec(&edit(&s, &vab, "y", Some("t\n")), &[&m2]);
-    s.write("main", o.to_string().as_bytes(), &cas_core::Expect::Absent).unwrap();
-    let Outcome::Merged(m) = merge::merge_branch(&s, b3(), "main", &t, BTreeMap::new()).unwrap() else { panic!() };
-    let v = history::read(&s, &m).unwrap().version;
+    let o = h.add(&edit(&s, &vab, "x", Some("o\n")), after(&[&m1]), None).unwrap();
+    let t = h.add(&edit(&s, &vab, "y", Some("t\n")), after(&[&m2]), None).unwrap();
+    let Outcome::Done(m) = merge::merge_nodes(&s, b3(), &mut h, &o, &t, &Step::default()).unwrap() else { panic!() };
+    let v = m.version();
     assert_eq!((text_at(&s, &v, "x").as_deref(), text_at(&s, &v, "y").as_deref()), (Some("o\n"), Some("t\n")));
+}
+
+#[test]
+fn private_work_is_rebased_and_published_as_one_step() {
+    let s = store();
+    let v0 = tree(&s, &[("f", "a\nb\nc\n"), ("g", "1\n")]);
+    let mut public = History::default();
+    let p0 = public.append(&v0, Step::default(), None).unwrap();
+
+    // Private history: a copy of public plus small steps.
+    let mut mine = public.clone();
+    let v1 = edit(&s, &v0, "f", Some("A\nb\nc\n"));
+    mine.append(&v1, step("wip 1"), None).unwrap();
+    let v2 = edit(&s, &v1, "f", Some("A\nB\nc\n"));
+    mine.append(&v2, step("wip 2"), None).unwrap();
+
+    // Meanwhile public moved.
+    let vp = edit(&s, &v0, "g", Some("2\n"));
+    let p1 = public.append(&vp, step("g"), None).unwrap();
+    assert!(matches!(
+        merge::publish(&mine, &mut public.clone(), step("x"), None),
+        Err(cas_version::Error::Diverged(_))
+    ));
+
+    // Rebase replays the two private steps onto the public tip.
+    let (rebased, outcome) = merge::rebase(&s, b3(), &mine, &public).unwrap();
+    let Outcome::Done(tip) = outcome else { panic!("{outcome:?}") };
+    assert!(rebased.extends(&public));
+    assert_eq!(rebased.nodes.len(), 4);
+    assert_eq!(text_at(&s, &tip.version(), "f").as_deref(), Some("A\nB\nc\n"));
+    assert_eq!(text_at(&s, &tip.version(), "g").as_deref(), Some("2\n"));
+    assert_eq!(rebased.nodes[&tip].after.values().next().unwrap(), &step("wip 2"));
+
+    // Publishing adds one node: the private steps stay private.
+    let mut next = public.clone();
+    let Outcome::Done(n) =
+        merge::publish(&rebased, &mut next, Step { compatible: true, ..step("f: A and B") }, None).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(next.nodes.len(), 3);
+    assert!(next.extends(&public));
+    assert_eq!(n.version(), tip.version());
+    assert_eq!(next.nodes[&n].after.keys().collect::<Vec<_>>(), [&p1]);
+    assert!(next.compatible(&p1, &n) && !next.compatible(&p0, &n));
+    assert_eq!(merge::publish(&rebased, &mut next, step("again"), None).unwrap(), Outcome::UpToDate);
+
+    // Rebasing onto a history that already has our base is a no-op replay.
+    let (same, o) = merge::rebase(&s, b3(), &rebased, &public).unwrap();
+    assert!(matches!(o, Outcome::Done(_)));
+    assert!(same.extends(&rebased));
+
+    // A conflicting private step stops the rebase with the conflict.
+    let mut clash = History::default();
+    clash.append(&v0, Step::default(), None).unwrap();
+    clash.append(&edit(&s, &v0, "g", Some("3\n")), step("g3"), None).unwrap();
+    let (_, o) = merge::rebase(&s, b3(), &clash, &next).unwrap();
+    assert!(matches!(o, Outcome::Conflicts(_)), "{o:?}");
 }
 
 const NAMES: &[&str] = &["a", "b", "c"];

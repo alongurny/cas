@@ -38,8 +38,8 @@ opaque file: it is walked, diffed and stored, but not opened or checked out.
 
 ## 2. Versions
 
-A **version** is a reference to its root directory, written as `<format> <key>`, as tags and
-history records will hold it. It maps paths to nodes. A node is a directory or a file (a reference
+A **version** is a reference to its root directory, written as `<format> <key>`, as histories and
+the store's names hold it. It maps paths to nodes. A node is a directory or a file (a reference
 in a non-directory format). Every parent of a path is a directory, and **empty directories are
 kept**.
 
@@ -87,7 +87,8 @@ are `malformed(key, reason)`. A root, or a file being checked out, in an unknown
 
 ## 4. Not in this format
 
-Parents, authors, messages and times belong to history records (Stage 5). Ownership, timestamps
+Order, changelogs, compatibility, tags and docs belong to histories (spec/history.md); versions
+have no parents. Ownership, timestamps
 and ACLs are left out, and would be formats of their own.
 
 ## 5. Conformance

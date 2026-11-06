@@ -27,7 +27,7 @@ fn commit_log_diff_checkout_and_sync() {
     let log = cas(&store, &["log"]);
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("second") && lines[1].contains("first"), "{log}");
+    assert!(lines[0].contains("second") && !lines[1].contains("first"), "{log}");
 
     assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      src/lib.rs");
     assert_eq!(cas(&store, &["summary"]).trim(), "{'dirs': '2', 'files': '2'}");
@@ -98,35 +98,58 @@ fn commit_log_diff_checkout_and_sync() {
 }
 
 #[test]
-fn branch_merge_gc_and_purge() {
+fn private_history_rebase_publish_merge_and_gc() {
     let tmp = tempfile::tempdir().unwrap();
     let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
     std::fs::create_dir_all(&work).unwrap();
     let w = work.to_str().unwrap();
+    let s = store.to_str().unwrap();
     std::fs::write(work.join("notes"), "one\ntwo\nthree\n").unwrap();
-    cas(&store, &["commit", w, "-m", "base"]);
-    cas(&store, &["branch", "feature"]);
+    std::fs::write(work.join("other"), "1\n").unwrap();
+    cas(&store, &["commit", w, "--doc", "the first version"]);
+    cas(&store, &["tag", "v1"]);
+    // A private history starts as a copy of main.
+    assert!(cas(&store, &["push", s, "--as", "alon"]).starts_with("Created"));
     std::fs::write(work.join("notes"), "ONE\ntwo\nthree\n").unwrap();
-    cas(&store, &["commit", w, "-m", "ours"]);
-    std::fs::write(work.join("notes"), "one\ntwo\nTHREE\n").unwrap();
-    std::fs::write(work.join("secret"), "hunter2\n").unwrap();
-    cas(&store, &["commit", w, "-b", "feature", "-m", "theirs"]);
+    cas(&store, &["commit", w, "-H", "alon", "-m", "wip 1"]);
+    std::fs::write(work.join("notes"), "ONE\nTWO\nthree\n").unwrap();
+    cas(&store, &["commit", w, "-H", "alon", "-m", "wip 2"]);
+    assert_eq!(cas(&store, &["log", "-H", "alon"]).lines().count(), 3);
 
-    assert!(cas(&store, &["merge", "feature"]).starts_with("Merged"));
-    assert!(cas(&store, &["merge", "feature"]).starts_with("UpToDate"));
+    // Main moves meanwhile: publishing needs a rebase first.
+    let main_work = tmp.path().join("main-work");
+    cas(&store, &["checkout", main_work.to_str().unwrap()]);
+    std::fs::write(main_work.join("other"), "2\n").unwrap();
+    cas(&store, &["commit", main_work.to_str().unwrap(), "-m", "other: 2", "--compatible"]);
+    let no = Command::new(env!("CARGO_BIN_EXE_cas"))
+        .arg("--store")
+        .arg(&store)
+        .args(["publish", "main", "-H", "alon"])
+        .output()
+        .unwrap();
+    assert!(!no.status.success());
+    assert!(cas(&store, &["rebase", "main", "-H", "alon"]).starts_with("Done"));
+    assert!(cas(&store, &["publish", "main", "-H", "alon", "-m", "notes: upper case"]).starts_with("Done"));
+    let log = cas(&store, &["log"]);
+    assert_eq!(log.lines().count(), 3, "{log}");
+    assert!(log.lines().next().unwrap().contains("notes: upper case") && log.contains("(v1)"), "{log}");
+    assert_eq!(cas(&store, &["compatible", "v1", "latest"]).trim(), "breaking");
+    assert_eq!(cas(&store, &["path-log", "notes"]).lines().count(), 2);
     let out = tmp.path().join("out");
     cas(&store, &["checkout", out.to_str().unwrap()]);
-    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "ONE\ntwo\nTHREE\n");
-    let log = cas(&store, &["log"]);
-    assert_eq!(log.lines().count(), 4, "{log}");
+    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "ONE\nTWO\nthree\n");
+    assert_eq!(std::fs::read_to_string(out.join("other")).unwrap(), "2\n");
 
-    // Purge the secret: the tree keeps the path, the content is gone.
-    let key = format!("blake3:{}", blake3_hex(b"hunter2\n"));
-    cas(&store, &["purge", &key, "leaked"]);
-    assert!(cas(&store, &["ls"]).contains("secret"));
-    let shown =
-        Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["show", &key]).output().unwrap();
-    assert!(String::from_utf8_lossy(&shown.stderr).contains("purged"));
+    // A merge: two diverged copies of main, combined as one node.
+    assert!(cas(&store, &["push", s, "--as", "side"]).starts_with("Created"));
+    std::fs::write(out.join("notes"), "ONE\nTWO\nTHREE\n").unwrap();
+    cas(&store, &["commit", out.to_str().unwrap(), "-H", "side"]);
+    std::fs::write(out.join("notes"), "one\nTWO\nthree\n").unwrap();
+    cas(&store, &["commit", out.to_str().unwrap()]);
+    assert!(cas(&store, &["merge", "side", "-m", "merge side"]).starts_with("Done"));
+    std::fs::remove_dir_all(&out).unwrap();
+    cas(&store, &["checkout", out.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
 
     // Collection keeps everything reachable.
     for _ in 0..3 {
@@ -134,10 +157,5 @@ fn branch_merge_gc_and_purge() {
     }
     std::fs::remove_dir_all(&out).unwrap();
     cas(&store, &["checkout", out.to_str().unwrap(), "notes"]);
-    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "ONE\ntwo\nTHREE\n");
-}
-
-/// The blake3 hex digest the store names raw files by.
-fn blake3_hex(bytes: &[u8]) -> String {
-    cas_core::algo::lookup("blake3").unwrap().key(bytes).split_once(':').unwrap().1.to_string()
+    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
 }

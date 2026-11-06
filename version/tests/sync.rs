@@ -5,6 +5,7 @@ use cas_core::client::HttpStore;
 use cas_core::mem::MemBackend;
 use cas_core::server::Server;
 use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Span, Store, Who};
+use cas_version::history::Step;
 use cas_version::sync::{self, Copied, Outcome};
 use cas_version::{Edit, Error, Node, Path, Ref, build, diff, formats, history, put, update, walk};
 use std::collections::BTreeMap;
@@ -85,20 +86,20 @@ fn push_copies_only_what_is_missing() {
     for dst in [store(), remote()] {
         let src = store();
         let v1 = big(&*src);
-        history::commit(&*src, b3(), "main", &v1, BTreeMap::new()).unwrap();
-        let (o, n) = sync::push(&*src, &*dst, "main").unwrap();
+        history::commit(&*src, b3(), "main", &v1, Step::default(), None).unwrap();
+        let (o, n) = sync::push(&*src, &*dst, "main", "main").unwrap();
         assert_eq!(o, Outcome::Created);
-        // 100 files, 10 directories, the root, one record, and the specs and
-        // objects of the dir, raw and record formats.
+        // 100 files, 10 directories, the root, one history, and the specs and
+        // objects of the dir, raw and history formats.
         assert_eq!(n.blobs, 100 + 10 + 1 + 1 + 6);
         same_tree(&*src, &*dst, &v1);
 
-        assert_eq!(sync::push(&*src, &*dst, "main").unwrap(), (Outcome::UpToDate, Copied::default()));
+        assert_eq!(sync::push(&*src, &*dst, "main", "main").unwrap(), (Outcome::UpToDate, Copied::default()));
 
-        // One edit: one file, one directory, the root, one record.
+        // One edit: one file, one directory, the root, one history.
         let v2 = edit(&*src, &v1, "d4/f7", "changed");
-        history::commit(&*src, b3(), "main", &v2, BTreeMap::new()).unwrap();
-        let (o, n) = sync::push(&*src, &*dst, "main").unwrap();
+        history::commit(&*src, b3(), "main", &v2, Step::default(), None).unwrap();
+        let (o, n) = sync::push(&*src, &*dst, "main", "main").unwrap();
         assert_eq!(o, Outcome::FastForward);
         assert_eq!(n.blobs, 4);
         assert_eq!(history::head(&*dst, "main").unwrap(), history::head(&*src, "main").unwrap());
@@ -107,35 +108,41 @@ fn push_copies_only_what_is_missing() {
 }
 
 #[test]
-fn diverged_branches_are_not_overwritten() {
+fn diverged_histories_are_not_overwritten() {
     let (a, b) = (store(), store());
     let v = big(&*a);
-    history::commit(&*a, b3(), "main", &v, BTreeMap::new()).unwrap();
-    sync::push(&*a, &*b, "main").unwrap();
-    // Both sides commit on top of the shared head.
+    history::commit(&*a, b3(), "main", &v, Step::default(), None).unwrap();
+    sync::push(&*a, &*b, "main", "main").unwrap();
+    // Both sides add a node after the shared tip.
     let va = edit(&*a, &v, "d1/f1", "a");
-    history::commit(&*a, b3(), "main", &va, BTreeMap::new()).unwrap();
+    history::commit(&*a, b3(), "main", &va, Step::default(), None).unwrap();
     let vb = edit(&*b, &v, "d2/f2", "b");
-    let b_head = history::commit(&*b, b3(), "main", &vb, BTreeMap::new()).unwrap();
+    history::commit(&*b, b3(), "main", &vb, Step::default(), None).unwrap();
+    let b_head = history::head(&*b, "main").unwrap();
 
-    assert_eq!(sync::push(&*a, &*b, "main"), Err(Error::Diverged("main".into())));
-    assert_eq!(history::head(&*b, "main").unwrap(), Some(b_head.clone()));
-    // Pulling b's head into a under another name lets a merge later.
-    b.write("side", b_head.to_string().as_bytes(), &Expect::Absent).unwrap();
-    sync::push(&*b, &*a, "side").unwrap();
-    let base = history::merge_bases(&*a, &history::head(&*a, "main").unwrap().unwrap(), &b_head).unwrap();
-    assert_eq!(base.len(), 1);
+    assert_eq!(sync::push(&*a, &*b, "main", "main"), Err(Error::Diverged("main".into())));
+    assert_eq!(history::head(&*b, "main").unwrap(), b_head);
+    // A rewritten history (a reworded step) is not an extension either.
+    let (old, mut h) = history::load(&*a, "main").unwrap();
+    let tip = h.tip().unwrap();
+    let pred = h.nodes[&tip].after.keys().next().unwrap().clone();
+    h.nodes.get_mut(&tip).unwrap().after.insert(pred, Step { changelog: Some("reworded".into()), compatible: false });
+    history::save(&*a, b3(), "main", old.as_ref(), &h).unwrap();
+    // Under another name it is just a new history.
+    sync::push(&*a, &*b, "main", "a-main").unwrap();
+    assert_eq!(history::head(&*b, "a-main").unwrap(), history::head(&*a, "main").unwrap());
 }
 
 #[test]
 fn an_interrupted_copy_resumes() {
     let src = store();
     let v = big(&*src);
-    let head = history::commit(&*src, b3(), "main", &v, BTreeMap::new()).unwrap();
+    history::commit(&*src, b3(), "main", &v, Step::default(), None).unwrap();
+    let head = history::head(&*src, "main").unwrap();
     let dst = store();
     for budget in [5, 40, 1000] {
         let flaky = Flaky { inner: Arc::clone(&dst), budget: AtomicUsize::new(budget) };
-        match sync::push(&*src, &flaky, "main") {
+        match sync::push(&*src, &flaky, "main", "main") {
             Ok((o, _)) => assert_eq!(o, Outcome::Created),
             Err(Error::Store(cas_core::Error::Unavailable(_))) => {
                 // Whatever arrived is complete: each directory the
@@ -154,10 +161,10 @@ fn an_interrupted_copy_resumes() {
             Err(e) => panic!("{e}"),
         }
     }
-    assert_eq!(history::head(&*dst, "main").unwrap(), Some(head));
+    assert_eq!(history::head(&*dst, "main").unwrap(), head);
     same_tree(&*src, &*dst, &v);
     // Format descriptions came along.
-    for alias in ["dir", "raw", "record"] {
+    for alias in ["dir", "raw", "history"] {
         assert!(sync::has(&*dst, formats::by_alias(alias).unwrap().id()).unwrap(), "{alias}");
     }
 }
