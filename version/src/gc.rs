@@ -4,8 +4,6 @@
 //! here by format walkers, from roots that are tags. Collection is two
 //! phase: a blob is removed only when two runs in a row found it
 //! unreachable, so a writer has until the next run to link what it wrote.
-//! Purging removes one blob on purpose and leaves a tombstone, so readers
-//! and syncs treat its absence as intended rather than as corruption.
 
 use crate::formats::{self, METAFORMAT};
 use crate::sync::children;
@@ -16,28 +14,8 @@ use cas_core::key::{Parsed, classify};
 use cas_core::{Expect, Span, Store, list_all};
 use std::collections::BTreeSet;
 
-/// The tag recording that `key` was purged; its value is the reason.
-pub fn tombstone(key: &str) -> String {
-    format!("purged/{key}")
-}
-
 /// The tag holding the blobs the previous run found unreachable.
 pub const PENDING: &str = "gc/pending";
-
-/// Delete blob `key` everywhere in `store` on purpose, such as a secret
-/// committed by mistake. Versions and records that refer to it stay; reads
-/// of it report `Purged`.
-pub fn purge(store: &dyn Store, key: &str, reason: &str) -> Result<()> {
-    if !is_blob_key(key) {
-        return Err(crate::Error::BadKey(key.to_string()));
-    }
-    match store.write(&tombstone(key), reason.as_bytes(), &Expect::Absent) {
-        Ok(()) | Err(cas_core::Error::Conflict) => {}
-        Err(e) => return Err(e.into()),
-    }
-    store.remove(key, &Expect::Absent)?;
-    Ok(())
-}
 
 fn blake3() -> &'static Algorithm {
     algo::lookup("blake3").unwrap()
@@ -100,8 +78,8 @@ pub fn mark(store: &dyn Store) -> Result<BTreeSet<String>> {
         }
         match children(store, &r) {
             Ok(c) => todo.extend(c),
-            // Purged or missing blobs end the walk there.
-            Err(crate::Error::Purged(_) | crate::Error::Missing(_)) => {}
+            // A missing blob ends the walk there.
+            Err(crate::Error::Missing(_)) => {}
             Err(e) => return Err(e),
         }
     }

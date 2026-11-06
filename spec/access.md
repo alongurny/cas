@@ -95,7 +95,7 @@ A team where everyone signed in can push branches under `team/` and run
 collection (spec/gc.md needs `remove blobs` and `write tag:gc/`):
 
     +      read *, list *, write blobs, write tag:team/
-    admin  remove blobs, write tag:gc/, write tag:purged/
+    admin  remove blobs, write tag:gc/
 
 ## Limits
 

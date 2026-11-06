@@ -1,15 +1,15 @@
 # Reachability, collection and purging
 
 The core never deletes on its own: a blob stays until someone removes it.
-This layer decides what may go. Code: `version/src/gc.rs`.
+This layer decides what may go: only blobs nothing reaches. Code:
+`version/src/gc.rs`.
 
 ## Reachability
 
 Roots are tags. A tag whose value parses as a reference `<format> <key>`
-roots that blob; other tag values (tombstone reasons, free text) root
-nothing. From each rooted reference, format walkers follow children the same
-way sync does: a `dir` follows its entries, a `record` its version and
-parents. Formats this tooling does not know are opaque and have no children.
+roots that blob; other tag values root nothing. From each rooted reference, format walkers follow children the same
+way sync does: a `dir` follows its entries, a `history` its nodes'
+versions. Formats this tooling does not know are opaque and have no children.
 
 Also reachable:
 
@@ -18,7 +18,7 @@ Also reachable:
   cache entry keeps its own description alive;
 - the metaformat document.
 
-A missing or purged blob ends the walk at that point without an error.
+A missing blob ends the walk at that point without an error.
 
 Derived tags are roots like any other, so a cache keeps its results alive.
 Dropping a cache means removing its `derived/` tags.
@@ -51,27 +51,9 @@ older ones become garbage and follow the same two runs.
   than one collection interval must re-check with `has` before linking, or
   write the blob again (writing an existing blob is harmless).
 
-## Purging
+## Deleting content on purpose
 
-`purge(key, reason)` removes one blob on purpose, for content that must not
-be kept (a leaked secret, material under a takedown), even while versions
-still reference it.
-
-1. Write tag `purged/<key>` with the reason, expecting it absent (an
-   existing tombstone is kept).
-2. Remove the blob.
-
-The tombstone is written first so that no reader ever sees the blob missing
-without a reason. Afterwards:
-
-- reading the blob through this layer fails with `Purged`, not `Missing`;
-- trees and history that point at it stay intact; listing and diff still
-  work, only the content is gone;
-- `sync::copy` carries the tombstone instead of the blob and purges the
-  destination's copy;
-- collection skips over the hole.
-
-A copy already held by another store is purged when that store learns the
-tombstone: by the next sync that meets the key, or by copying the
-`purged/` tags across directly. Purging cannot reach stores you do not
-sync with; that is inherent in content addressing.
+Not supported. Removing a blob that versions still reference does not make
+its content secret: the key stays in every tree that lists it, and a key
+reveals content drawn from a small space (a short password, say) to a
+search. Secure deletion needs its own design and is out of scope for now.
