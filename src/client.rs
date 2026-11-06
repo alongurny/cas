@@ -41,18 +41,22 @@ fn outcome(mut resp: Response<ureq::Body>) -> Error {
             None => Error::Unavailable(format!("server rejected the request ({})", reason.unwrap_or_default())),
         },
         422 => {
-            let message = body(&mut resp).ok().filter(|b| !b.is_empty()).map(|b| String::from_utf8_lossy(&b).into_owned());
+            let message =
+                body(&mut resp).ok().filter(|b| !b.is_empty()).map(|b| String::from_utf8_lossy(&b).into_owned());
             Error::Refused { reason: reason.unwrap_or_default(), message }
         }
         409 => Error::Conflict,
-        503 => Error::Unavailable(body(&mut resp).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default()),
+        503 => {
+            Error::Unavailable(body(&mut resp).map(|b| String::from_utf8_lossy(&b).into_owned()).unwrap_or_default())
+        }
         s => Error::Unavailable(format!("unexpected HTTP status {s}")),
     }
 }
 
 impl Store for HttpStore {
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut resp = self.agent.get(format!("{}/k/{}", self.base, wire::encode_key(key))).call().map_err(transport)?;
+        let mut resp =
+            self.agent.get(format!("{}/k/{}", self.base, wire::encode_key(key))).call().map_err(transport)?;
         match resp.status().as_u16() {
             200 => Ok(Some(body(&mut resp)?)),
             404 => Ok(None),

@@ -276,7 +276,10 @@ pub fn outcome_order(h: &dyn Harness) {
     assert_eq!(denied.read("bad\nkey"), Err(Error::Denied));
     assert_eq!(denied.write("foo:abcd", b"x", &A), Err(Error::Denied));
 
-    let tight = h.store(Policy { max_blob_len: Some(1), ..Policy::permissive() }.with_algorithms(&["blake3"]), Box::new(AllowAll));
+    let tight = h.store(
+        Policy { max_blob_len: Some(1), ..Policy::permissive() }.with_algorithms(&["blake3"]),
+        Box::new(AllowAll),
+    );
     assert_eq!(tight.write("blake3:XYZ", b"x", &A), Err(Error::Invalid(Invalid::Key)));
     let sha = algo::lookup("sha256").unwrap().key(b"x");
     assert_eq!(refused_reason(tight.write(&sha, b"wrong", &A)), "unsupported-algorithm");

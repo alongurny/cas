@@ -136,7 +136,14 @@ fn merging_branches() {
     assert_eq!(merge::merge_branch(&s, b3(), "main", &c0, meta()).unwrap(), Outcome::UpToDate);
 
     // Both move: a merge record with two parents.
-    let side2 = history::commit(&s, b3(), "side", &edit(&s, &edit(&s, &base, "g", Some("2\n")), "f", Some("A\nb\nc\n")), meta()).unwrap();
+    let side2 = history::commit(
+        &s,
+        b3(),
+        "side",
+        &edit(&s, &edit(&s, &base, "g", Some("2\n")), "f", Some("A\nb\nc\n")),
+        meta(),
+    )
+    .unwrap();
     let mv = history::read(&s, &history::head(&s, "main").unwrap().unwrap()).unwrap().version;
     let main2 = history::commit(&s, b3(), "main", &edit(&s, &mv, "f", Some("a\nb\nC\n")), meta()).unwrap();
     let Outcome::Merged(m) = merge::merge_branch(&s, b3(), "main", &side2, meta()).unwrap() else { panic!() };
@@ -164,7 +171,11 @@ fn criss_cross_uses_a_virtual_base() {
         history::write(
             &s,
             b3(),
-            &history::Record { version: v.clone(), parents: ps.iter().map(|r| (*r).clone()).collect(), meta: BTreeMap::new() },
+            &history::Record {
+                version: v.clone(),
+                parents: ps.iter().map(|r| (*r).clone()).collect(),
+                meta: BTreeMap::new(),
+            },
         )
         .unwrap()
     };

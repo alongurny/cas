@@ -19,8 +19,8 @@ pub fn classify(key: &str) -> Option<Parsed<'_>> {
         return Some(Parsed::Tag);
     }
     let (alg, digest_hex) = (&key[..colon], &key[colon + 1..]);
-    let alg_ok = (1..=32).contains(&alg.len())
-        && alg.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    let alg_ok =
+        (1..=32).contains(&alg.len()) && alg.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     let digest_ok = !digest_hex.is_empty() && digest_hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
     (alg_ok && digest_ok).then_some(Parsed::Blob { alg, digest_hex })
 }

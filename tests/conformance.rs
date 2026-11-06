@@ -14,7 +14,9 @@ fn mem(policy: Policy, gate: Box<dyn Gate>) -> Arc<dyn Store> {
 fn disk(policy: Policy, gate: Box<dyn Gate>) -> Arc<dyn Store> {
     // Leaked so the directory outlives the store for the test's duration.
     let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
-    Arc::new(CoreStore::with_gate(DiskBackend::open(dir.path()).unwrap(), gate.into(), policy).session(Who::anonymous()))
+    Arc::new(
+        CoreStore::with_gate(DiskBackend::open(dir.path()).unwrap(), gate.into(), policy).session(Who::anonymous()),
+    )
 }
 
 /// A server over a fresh in-memory store, and an HTTP client for it.
@@ -36,7 +38,8 @@ fn local() -> Arc<dyn Store> {
 
 fn cached(policy: Policy, gate: Box<dyn Gate>) -> Arc<dyn Store> {
     let gate: Arc<dyn Gate> = gate.into();
-    let upstream = Arc::new(CoreStore::with_gate(MemBackend::new(), Arc::clone(&gate), policy).session(Who::anonymous()));
+    let upstream =
+        Arc::new(CoreStore::with_gate(MemBackend::new(), Arc::clone(&gate), policy).session(Who::anonymous()));
     Arc::new(CachingStore::new(local(), upstream, gate, Who::anonymous()))
 }
 
@@ -72,11 +75,13 @@ fn disk_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let k = cas_core::algo::lookup("blake3").unwrap().key(b"durable");
     {
-        let s = CoreStore::new(DiskBackend::open(dir.path()).unwrap(), AllowAll, Policy::permissive()).session(Who::anonymous());
+        let s = CoreStore::new(DiskBackend::open(dir.path()).unwrap(), AllowAll, Policy::permissive())
+            .session(Who::anonymous());
         s.write(&k, b"durable", &Expect::Absent).unwrap();
         s.write("main", k.as_bytes(), &Expect::Absent).unwrap();
     }
-    let s = CoreStore::new(DiskBackend::open(dir.path()).unwrap(), AllowAll, Policy::permissive()).session(Who::anonymous());
+    let s = CoreStore::new(DiskBackend::open(dir.path()).unwrap(), AllowAll, Policy::permissive())
+        .session(Who::anonymous());
     assert_eq!(s.read("main").unwrap(), Some(k.as_bytes().to_vec()));
     assert_eq!(s.read(&k).unwrap(), Some(b"durable".to_vec()));
     let _: &dyn Harness = &(disk as fn(_, _) -> _);
@@ -93,10 +98,14 @@ impl Store for Upstream {
     fn read(&self, key: &str) -> cas_core::Result<Option<Vec<u8>>> {
         self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let v = self.inner.read(key)?;
-        Ok(if self.corrupt { v.map(|mut v| {
-            v.push(b'!');
+        Ok(if self.corrupt {
+            v.map(|mut v| {
+                v.push(b'!');
+                v
+            })
+        } else {
             v
-        }) } else { v })
+        })
     }
     fn write(&self, key: &str, value: &[u8], expect: &Expect) -> cas_core::Result<()> {
         self.inner.write(key, value, expect)
@@ -149,7 +158,8 @@ fn cache_never_serves_a_denied_read() {
     let upstream = local();
     upstream.write(&k, b"secret", &Expect::Absent).unwrap();
     let shared_local = local();
-    let alice = CachingStore::new(Arc::clone(&shared_local), Arc::clone(&upstream), Arc::clone(&gate), Who::named("alice"));
+    let alice =
+        CachingStore::new(Arc::clone(&shared_local), Arc::clone(&upstream), Arc::clone(&gate), Who::named("alice"));
     assert_eq!(alice.read(&k).unwrap(), Some(b"secret".to_vec()));
     let anon = CachingStore::new(shared_local, upstream, gate, Who::anonymous());
     assert_eq!(anon.read(&k), Err(Error::Denied));

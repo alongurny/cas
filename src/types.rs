@@ -92,7 +92,10 @@ pub enum Error {
     Denied,
     Invalid(Invalid),
     /// Permitted and well formed, but this store's policy declines it.
-    Refused { reason: String, message: Option<String> },
+    Refused {
+        reason: String,
+        message: Option<String>,
+    },
     /// A tag's current state did not equal `expect`.
     Conflict,
     /// Transient failure. For write and remove the outcome is unknown.

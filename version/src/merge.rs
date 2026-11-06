@@ -34,7 +34,13 @@ fn ancestors(p: &Path) -> impl Iterator<Item = Path> {
 }
 
 /// Merge `theirs` into `ours`, both descended from `base`.
-pub fn merge_versions(store: &dyn Store, alg: &'static Algorithm, base: &Ref, ours: &Ref, theirs: &Ref) -> Result<Merged> {
+pub fn merge_versions(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    base: &Ref,
+    ours: &Ref,
+    theirs: &Ref,
+) -> Result<Merged> {
     let mine = changes(store, base, ours)?;
     let other = changes(store, base, theirs)?;
     let mut edits = BTreeMap::new();
@@ -49,7 +55,10 @@ pub fn merge_versions(store: &dyn Store, alg: &'static Algorithm, base: &Ref, ou
                 let above = ancestors(p).any(|q| mine.get(&q).is_some_and(|o| o.new != Some(Node::Dir)));
                 // They removed or replaced a directory we changed inside.
                 let below = t.new != Some(Node::Dir)
-                    && mine.range(p.clone()..).take_while(|(q, _)| q.starts_with(p)).any(|(q, o)| other.get(q) != Some(o));
+                    && mine
+                        .range(p.clone()..)
+                        .take_while(|(q, _)| q.starts_with(p))
+                        .any(|(q, o)| other.get(q) != Some(o));
                 above || below
             }
         };
@@ -136,7 +145,8 @@ pub fn diff3<'a>(base: &[&'a str], ours: &[&'a str], theirs: &[&'a str]) -> Opti
         while i < base.len() && (mo[i].is_none() || mt[i].is_none()) {
             i += 1;
         }
-        let (b1, o1, t1) = if i < base.len() { (i, mo[i].unwrap(), mt[i].unwrap()) } else { (base.len(), ours.len(), theirs.len()) };
+        let (b1, o1, t1) =
+            if i < base.len() { (i, mo[i].unwrap(), mt[i].unwrap()) } else { (base.len(), ours.len(), theirs.len()) };
         let (cb, co, ct) = (&base[b0..b1], &ours[o0..o1], &theirs[t0..t1]);
         if co == cb {
             out.extend_from_slice(ct);

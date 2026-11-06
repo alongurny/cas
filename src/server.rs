@@ -19,7 +19,12 @@ pub struct Server {
 
 impl Server {
     /// Listen on `addr` (e.g. `127.0.0.1:0`) with `workers` handler threads.
-    pub fn start(store: Arc<CoreStore>, addr: &str, workers: usize, auth: Arc<Authenticate>) -> std::io::Result<Server> {
+    pub fn start(
+        store: Arc<CoreStore>,
+        addr: &str,
+        workers: usize,
+        auth: Arc<Authenticate>,
+    ) -> std::io::Result<Server> {
         let http = Arc::new(tiny_http::Server::http(addr).map_err(std::io::Error::other)?);
         for _ in 0..workers.max(1) {
             let (http, store, auth) = (Arc::clone(&http), Arc::clone(&store), Arc::clone(&auth));

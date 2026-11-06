@@ -71,9 +71,10 @@ impl CoreStore {
         match parsed {
             Parsed::Tag => Ok(Kind::Tag),
             Parsed::Blob { alg, digest_hex } => {
-                let algorithm = algo::lookup(alg)
-                    .filter(|a| self.policy.algorithms.contains(a.name))
-                    .ok_or_else(|| Error::refused("unsupported-algorithm", format!("this store does not accept {alg}")))?;
+                let algorithm =
+                    algo::lookup(alg).filter(|a| self.policy.algorithms.contains(a.name)).ok_or_else(|| {
+                        Error::refused("unsupported-algorithm", format!("this store does not accept {alg}"))
+                    })?;
                 if digest_hex.len() != algorithm.digest_len * 2 {
                     return Err(Error::Invalid(Invalid::Key));
                 }
@@ -124,7 +125,11 @@ impl CoreStore {
                 Ok(self.backend.put_blob(key, value)?)
             }
             Kind::Tag => {
-                if self.backend.cas_tag(key, expect, Some(value))? { Ok(()) } else { Err(Error::Conflict) }
+                if self.backend.cas_tag(key, expect, Some(value))? {
+                    Ok(())
+                } else {
+                    Err(Error::Conflict)
+                }
             }
         }
     }
@@ -141,7 +146,11 @@ impl CoreStore {
                 Ok(self.backend.remove_blob(key)?)
             }
             Kind::Tag => {
-                if self.backend.cas_tag(key, expect, None)? { Ok(()) } else { Err(Error::Conflict) }
+                if self.backend.cas_tag(key, expect, None)? {
+                    Ok(())
+                } else {
+                    Err(Error::Conflict)
+                }
             }
         }
     }
