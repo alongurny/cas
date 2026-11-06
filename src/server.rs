@@ -5,6 +5,7 @@ use crate::key::{Parsed, classify};
 use crate::store::{CoreStore, Store};
 use crate::types::{Error, Span};
 use crate::wire;
+use std::io::Read;
 use std::sync::Arc;
 use std::thread;
 use tiny_http::{Header, Method, Request, Response};
@@ -22,17 +23,35 @@ pub fn bearer(req: &Request) -> Option<&str> {
         .map(str::trim)
 }
 
+/// The largest request body [`Server::start`] reads: an expect frame and a
+/// value. A body is read before the gate can see it (the gate may look at the
+/// value), so without a bound any caller could make each worker buffer
+/// without end. Larger requests are answered 413 before they are buffered.
+pub const DEFAULT_MAX_BODY: usize = 64 << 20;
+
 pub struct Server {
     http: Arc<tiny_http::Server>,
 }
 
 impl Server {
-    /// Listen on `addr` (e.g. `127.0.0.1:0`) with `workers` handler threads.
+    /// Listen on `addr` (e.g. `127.0.0.1:0`) with `workers` handler threads,
+    /// reading request bodies of at most [`DEFAULT_MAX_BODY`] bytes.
     pub fn start(
         store: Arc<CoreStore>,
         addr: &str,
         workers: usize,
         auth: Arc<Authenticate>,
+    ) -> std::io::Result<Server> {
+        Server::start_with_max_body(store, addr, workers, auth, DEFAULT_MAX_BODY)
+    }
+
+    /// [`Server::start`], reading request bodies of at most `max_body` bytes.
+    pub fn start_with_max_body(
+        store: Arc<CoreStore>,
+        addr: &str,
+        workers: usize,
+        auth: Arc<Authenticate>,
+        max_body: usize,
     ) -> std::io::Result<Server> {
         let http = Arc::new(tiny_http::Server::http(addr).map_err(std::io::Error::other)?);
         for _ in 0..workers.max(1) {
@@ -40,7 +59,7 @@ impl Server {
             thread::spawn(move || {
                 while let Ok(req) = http.recv() {
                     let who = auth(&req);
-                    handle(&store.session(who), req);
+                    handle(&store.session(who), req, max_body);
                 }
             });
         }
@@ -84,7 +103,35 @@ fn bad_request(req: Request) {
     let _ = req.respond(empty(400).with_header(header("CAS-Reason", "request")));
 }
 
-fn handle(store: &dyn Store, mut req: Request) {
+enum Body {
+    Read(Vec<u8>),
+    TooLarge,
+    Broken,
+}
+
+/// The request body, refused unread when its declared length is over `max`,
+/// and never buffered past `max + 1` bytes when it declares none.
+fn read_body(req: &mut Request, max: usize) -> Body {
+    if req.body_length().is_some_and(|n| n > max) {
+        return Body::TooLarge;
+    }
+    let mut body = Vec::new();
+    match req.as_reader().take(max as u64 + 1).read_to_end(&mut body) {
+        Ok(_) if body.len() > max => Body::TooLarge,
+        Ok(_) => Body::Read(body),
+        Err(_) => Body::Broken,
+    }
+}
+
+fn too_large(req: Request, max: usize) {
+    let _ = req.respond(
+        Response::from_data(format!("request bodies are limited to {max} bytes"))
+            .with_status_code(413)
+            .with_header(header("CAS-Reason", "too-large")),
+    );
+}
+
+fn handle(store: &dyn Store, mut req: Request, max_body: usize) {
     let url = req.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
     let method = req.method().clone();
@@ -109,10 +156,11 @@ fn handle(store: &dyn Store, mut req: Request) {
                 Err(e) => respond_error(req, e),
             },
             Method::Put => {
-                let mut body = Vec::new();
-                if req.as_reader().read_to_end(&mut body).is_err() {
-                    return bad_request(req);
-                }
+                let body = match read_body(&mut req, max_body) {
+                    Body::Read(body) => body,
+                    Body::TooLarge => return too_large(req, max_body),
+                    Body::Broken => return bad_request(req),
+                };
                 let Some((expect, value)) = wire::decode_expect(&body) else { return bad_request(req) };
                 match store.write(&key, value, &expect) {
                     Ok(()) => drop(req.respond(empty(204))),
@@ -129,10 +177,11 @@ fn handle(store: &dyn Store, mut req: Request) {
             Ok(k) => k,
             Err(e) => return respond_error(req, e),
         };
-        let mut body = Vec::new();
-        if req.as_reader().read_to_end(&mut body).is_err() {
-            return bad_request(req);
-        }
+        let body = match read_body(&mut req, max_body) {
+            Body::Read(body) => body,
+            Body::TooLarge => return too_large(req, max_body),
+            Body::Broken => return bad_request(req),
+        };
         match wire::decode_expect(&body) {
             Some((expect, [])) => match store.remove(&key, &expect) {
                 Ok(()) => drop(req.respond(empty(204))),

@@ -56,6 +56,7 @@ out for an open bound. A client may add `limit={n}` as a paging hint.
 | invalid | 400 | `CAS-Reason: key`, `expect`, `hash-mismatch` or `request` | empty |
 | refused | 422 | `CAS-Reason: {reason}` | optional UTF-8 message |
 | conflict | 409 | | empty |
+| request too large | 413 | `CAS-Reason: too-large` | optional UTF-8 message |
 | unavailable | 503 | | optional UTF-8 message |
 
 A partial `list` answer means the rest of the span is `[CAS-Rest-From, to)`.
@@ -63,7 +64,10 @@ Keys contain no control characters, so `\n` separates them unambiguously.
 
 `invalid` with reason `request` means the HTTP request itself is malformed (bad
 framing, bad hex). That is not a core op, so it is the one answer that can
-come before `denied`.
+come before `denied`. So can 413: a server bounds the request bodies it reads
+(the gate may look at the value, so the body is read before the gate) and
+answers 413 to a larger one without buffering it. A client reports it as
+`refused` with reason `too-large`.
 
 ### Caching headers
 

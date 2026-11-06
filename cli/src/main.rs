@@ -35,8 +35,9 @@ const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--meta DI
   merge OTHER [-b BRANCH] [-m MESSAGE]  merge branch OTHER into BRANCH
   gc                                    one collection run (two-phase)
   purge KEY REASON                      delete a blob on purpose, leave a tombstone
-  serve ADDR [--open]                   serve the store over HTTP, under the access
-                                        policy in --meta, or with --open to anyone
+  serve ADDR [--open] [--max-body BYTES] serve the store over HTTP, under the access
+                                        policy in --meta, or with --open to anyone;
+                                        request bodies up to BYTES (default 64 MiB)
   access show                           the policy in --meta (default .cas-meta)
   access user NAME                      add or re-key NAME; prints its token once
   access grant WHO 'ACTION SCOPE'       e.g. grant '*' 'read blobs'
@@ -293,11 +294,21 @@ fn run(a: Args) -> Res<()> {
         }
         Some("serve") => {
             let addr = arg(1, "ADDR")?;
+            let max_body = match a.rest.iter().position(|x| x == "--max-body") {
+                Some(i) => a.rest.get(i + 1).and_then(|n| n.parse().ok()).ok_or("--max-body takes a byte count")?,
+                None => cas_core::server::DEFAULT_MAX_BODY,
+            };
             let backend = DiskBackend::open(&a.store).map_err(e)?;
             let server = if a.rest.iter().any(|x| x == "--open") {
                 eprintln!("serving without access control");
                 let core = CoreStore::new(backend, AllowAll, Policy::permissive());
-                Server::start(core, &addr, 8, Arc::new(|_: &tiny_http::Request| Who::anonymous()))
+                Server::start_with_max_body(
+                    core,
+                    &addr,
+                    8,
+                    Arc::new(|_: &tiny_http::Request| Who::anonymous()),
+                    max_body,
+                )
             } else {
                 let meta = open(&a.meta, None)?;
                 if access::load(&*meta).map_err(e)?.0.is_none() {
@@ -305,7 +316,7 @@ fn run(a: Args) -> Res<()> {
                 }
                 let gate = Access::new(meta);
                 let core = CoreStore::new(backend, gate.clone(), Policy::permissive());
-                Server::start(core, &addr, 8, gate.authenticate())
+                Server::start_with_max_body(core, &addr, 8, gate.authenticate(), max_body)
             }
             .map_err(e)?;
             println!("serving {} at {}", a.store, server.url());
