@@ -1,0 +1,235 @@
+//! Checks for three-way merge.
+
+use cas_core::algo::{self, Algorithm};
+use cas_core::mem::MemBackend;
+use cas_core::{AllowAll, CoreStore, Policy, Session, Store, Who};
+use cas_version::merge::{self, Outcome, diff3, merge_versions};
+use cas_version::{Edit, Node, Path, Ref, build, formats, history, lookup, put, read_blob, update, walk};
+use proptest::prelude::*;
+use std::collections::BTreeMap;
+
+fn b3() -> &'static Algorithm {
+    algo::lookup("blake3").unwrap()
+}
+
+fn store() -> Session {
+    CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive()).session(Who::anonymous())
+}
+
+fn file(s: &Session, text: &str) -> Node {
+    Node::File(put(s, b3(), "raw", text.as_bytes()).unwrap())
+}
+
+fn p(s: &str) -> Path {
+    Path::new(s).unwrap()
+}
+
+fn tree(s: &Session, entries: &[(&str, &str)]) -> Ref {
+    let empty = build(s, b3(), formats::by_alias("dir").unwrap(), &BTreeMap::new()).unwrap();
+    let edits = entries
+        .iter()
+        .map(|(path, text)| (p(path), Edit::Set(if *text == "/" { Node::Dir } else { file(s, text) })))
+        .collect();
+    update(s, b3(), &empty, &edits).unwrap()
+}
+
+fn edit(s: &Session, v: &Ref, path: &str, text: Option<&str>) -> Ref {
+    let e = match text {
+        None => Edit::Remove,
+        Some("/") => Edit::Set(Node::Dir),
+        Some(t) => Edit::Set(file(s, t)),
+    };
+    update(s, b3(), v, &BTreeMap::from([(p(path), e)])).unwrap()
+}
+
+fn text_at(s: &Session, v: &Ref, path: &str) -> Option<String> {
+    match lookup(s, v, &p(path)).unwrap()? {
+        Node::File(r) => Some(String::from_utf8(read_blob(s, r.key()).unwrap()).unwrap()),
+        Node::Dir => Some("/".into()),
+    }
+}
+
+#[test]
+fn diff3_cases() {
+    let l = |s: &'static str| s.split_inclusive('\n').collect::<Vec<_>>();
+    let base = l("a\nb\nc\nd\n");
+    assert_eq!(diff3(&base, &l("A\nb\nc\nd\n"), &l("a\nb\nc\nD\n")).unwrap().concat(), "A\nb\nc\nD\n");
+    assert_eq!(diff3(&base, &l("a\nb\nx\nc\nd\n"), &l("a\nb\nc\nd\ny\n")).unwrap().concat(), "a\nb\nx\nc\nd\ny\n");
+    assert_eq!(diff3(&base, &l("a\nc\nd\n"), &l("a\nb\nc\n")).unwrap().concat(), "a\nc\n");
+    assert_eq!(diff3(&base, &l("a\nB\nc\nd\n"), &l("a\nB\nc\nd\n")).unwrap().concat(), "a\nB\nc\nd\n");
+    assert!(diff3(&base, &l("a\nX\nc\nd\n"), &l("a\nY\nc\nd\n")).is_none());
+    assert_eq!(diff3(&[], &l("x\n"), &[]).unwrap().concat(), "x\n");
+    assert!(diff3(&[], &l("x\n"), &l("y\n")).is_none());
+}
+
+#[test]
+fn path_level_merges() {
+    let s = store();
+    let base = tree(&s, &[("a/x", "1\n"), ("a/y", "2\n"), ("b", "3\n"), ("d/z", "4\n")]);
+    // Disjoint edits combine.
+    let ours = edit(&s, &base, "a/x", Some("ours\n"));
+    let theirs = edit(&s, &edit(&s, &base, "b", None), "c", Some("new\n"));
+    let m = merge_versions(&s, b3(), &base, &ours, &theirs).unwrap();
+    assert!(m.conflicts.is_empty());
+    let want = edit(&s, &edit(&s, &ours, "b", None), "c", Some("new\n"));
+    assert_eq!(m.version, want);
+    // And the other way round gives the same version.
+    assert_eq!(merge_versions(&s, b3(), &base, &theirs, &ours).unwrap().version, want);
+
+    // Same change on both sides is no conflict.
+    let m = merge_versions(&s, b3(), &base, &ours, &ours).unwrap();
+    assert_eq!((m.version, m.conflicts.len()), (ours.clone(), 0));
+
+    // Different changes to one path: conflict, ours kept.
+    let theirs = edit(&s, &base, "a/x", Some("theirs\n"));
+    let m = merge_versions(&s, b3(), &base, &ours, &theirs).unwrap();
+    assert_eq!(m.conflicts.len(), 1);
+    assert_eq!(m.conflicts[0].path, p("a/x"));
+    assert_eq!(text_at(&s, &m.version, "a/x").as_deref(), Some("ours\n"));
+
+    // They removed a directory we changed inside: conflict at the
+    // directory, and our change survives.
+    let theirs = edit(&s, &base, "a", None);
+    let m = merge_versions(&s, b3(), &base, &ours, &theirs).unwrap();
+    assert!(m.conflicts.iter().any(|c| c.path == p("a")));
+    assert_eq!(text_at(&s, &m.version, "a/x").as_deref(), Some("ours\n"));
+
+    // We replaced a directory by a file; they added inside it: conflict.
+    let ours2 = edit(&s, &base, "d", Some("file now\n"));
+    let theirs2 = edit(&s, &base, "d/new", Some("n\n"));
+    let m = merge_versions(&s, b3(), &base, &ours2, &theirs2).unwrap();
+    assert_eq!(m.conflicts.iter().map(|c| c.path.to_string()).collect::<Vec<_>>(), ["d/new"]);
+    assert_eq!(text_at(&s, &m.version, "d").as_deref(), Some("file now\n"));
+
+    // Both add files in a new directory, and an empty one: they combine.
+    let o = edit(&s, &base, "n/o", Some("o\n"));
+    let t = edit(&s, &edit(&s, &base, "n/t", Some("t\n")), "e", Some("/"));
+    let m = merge_versions(&s, b3(), &base, &o, &t).unwrap();
+    assert!(m.conflicts.is_empty());
+    assert_eq!(text_at(&s, &m.version, "n/t").as_deref(), Some("t\n"));
+    assert_eq!(text_at(&s, &m.version, "e").as_deref(), Some("/"));
+}
+
+#[test]
+fn line_level_merge_inside_one_file() {
+    let s = store();
+    let base = tree(&s, &[("f", "a\nb\nc\nd\n")]);
+    let ours = edit(&s, &base, "f", Some("A\nb\nc\nd\n"));
+    let theirs = edit(&s, &base, "f", Some("a\nb\nc\nD\n"));
+    let m = merge_versions(&s, b3(), &base, &ours, &theirs).unwrap();
+    assert!(m.conflicts.is_empty());
+    assert_eq!(text_at(&s, &m.version, "f").as_deref(), Some("A\nb\nc\nD\n"));
+}
+
+#[test]
+fn merging_branches() {
+    let s = store();
+    let meta = BTreeMap::new;
+    let base = tree(&s, &[("f", "a\nb\nc\n"), ("g", "1\n")]);
+    let c0 = history::commit(&s, b3(), "main", &base, meta()).unwrap();
+    // A side branch from c0.
+    s.write("side", c0.to_string().as_bytes(), &cas_core::Expect::Absent).unwrap();
+    let side = history::commit(&s, b3(), "side", &edit(&s, &base, "g", Some("2\n")), meta()).unwrap();
+
+    // main has not moved: fast-forward.
+    assert_eq!(merge::merge_branch(&s, b3(), "main", &side, meta()).unwrap(), Outcome::FastForward(side.clone()));
+    assert_eq!(merge::merge_branch(&s, b3(), "main", &c0, meta()).unwrap(), Outcome::UpToDate);
+
+    // Both move: a merge record with two parents.
+    let side2 = history::commit(&s, b3(), "side", &edit(&s, &edit(&s, &base, "g", Some("2\n")), "f", Some("A\nb\nc\n")), meta()).unwrap();
+    let mv = history::read(&s, &history::head(&s, "main").unwrap().unwrap()).unwrap().version;
+    let main2 = history::commit(&s, b3(), "main", &edit(&s, &mv, "f", Some("a\nb\nC\n")), meta()).unwrap();
+    let Outcome::Merged(m) = merge::merge_branch(&s, b3(), "main", &side2, meta()).unwrap() else { panic!() };
+    let rec = history::read(&s, &m).unwrap();
+    assert_eq!(rec.parents, [main2, side2.clone()].into());
+    assert_eq!(text_at(&s, &rec.version, "f").as_deref(), Some("A\nb\nC\n"));
+    assert_eq!(history::head(&s, "main").unwrap(), Some(m));
+
+    // A real conflict records nothing.
+    let head = history::head(&s, "main").unwrap().unwrap();
+    let hv = history::read(&s, &head).unwrap().version;
+    history::commit(&s, b3(), "main", &edit(&s, &hv, "g", Some("main\n")), meta()).unwrap();
+    let sv = history::read(&s, &side2).unwrap().version;
+    let side3 = history::commit(&s, b3(), "side", &edit(&s, &sv, "g", Some("side\n")), meta()).unwrap();
+    let before = history::head(&s, "main").unwrap();
+    let Outcome::Conflicts(c) = merge::merge_branch(&s, b3(), "main", &side3, meta()).unwrap() else { panic!() };
+    assert_eq!(c.conflicts.iter().map(|c| c.path.to_string()).collect::<Vec<_>>(), ["g"]);
+    assert_eq!(history::head(&s, "main").unwrap(), before);
+}
+
+#[test]
+fn criss_cross_uses_a_virtual_base() {
+    let s = store();
+    let rec = |v: &Ref, ps: &[&Ref]| {
+        history::write(
+            &s,
+            b3(),
+            &history::Record { version: v.clone(), parents: ps.iter().map(|r| (*r).clone()).collect(), meta: BTreeMap::new() },
+        )
+        .unwrap()
+    };
+    let v0 = tree(&s, &[("x", "0\n"), ("y", "0\n")]);
+    let r0 = rec(&v0, &[]);
+    let va = edit(&s, &v0, "x", Some("a\n"));
+    let vb = edit(&s, &v0, "y", Some("b\n"));
+    let (ra, rb) = (rec(&va, &[&r0]), rec(&vb, &[&r0]));
+    let vab = edit(&s, &va, "y", Some("b\n"));
+    let (m1, m2) = (rec(&vab, &[&ra, &rb]), rec(&vab, &[&rb, &ra]));
+    // Each side then edits a different file.
+    let o = rec(&edit(&s, &vab, "x", Some("o\n")), &[&m1]);
+    let t = rec(&edit(&s, &vab, "y", Some("t\n")), &[&m2]);
+    s.write("main", o.to_string().as_bytes(), &cas_core::Expect::Absent).unwrap();
+    let Outcome::Merged(m) = merge::merge_branch(&s, b3(), "main", &t, BTreeMap::new()).unwrap() else { panic!() };
+    let v = history::read(&s, &m).unwrap().version;
+    assert_eq!((text_at(&s, &v, "x").as_deref(), text_at(&s, &v, "y").as_deref()), (Some("o\n"), Some("t\n")));
+}
+
+const NAMES: &[&str] = &["a", "b", "c"];
+
+fn edits_strategy() -> impl Strategy<Value = Vec<(String, Option<String>)>> {
+    let path = prop::collection::vec(prop::sample::select(NAMES), 1..3).prop_map(|n| n.join("/"));
+    let what = prop_oneof![Just(None), Just(Some("/".to_string())), "[xy]".prop_map(|t| Some(format!("{t}\n")))];
+    prop::collection::vec((path, what), 0..5)
+}
+
+fn apply(s: &Session, v: &Ref, edits: &[(String, Option<String>)]) -> Ref {
+    let mut v = v.clone();
+    for (path, what) in edits {
+        let e = match what.as_deref() {
+            None => Edit::Remove,
+            Some("/") => Edit::Set(Node::Dir),
+            Some(t) => Edit::Set(file(s, t)),
+        };
+        if let Ok(n) = update(s, b3(), &v, &BTreeMap::from([(p(path), e)])) {
+            v = n;
+        }
+    }
+    v
+}
+
+proptest! {
+    #[test]
+    fn merge_properties(base_e in edits_strategy(), oe in edits_strategy(), te in edits_strategy()) {
+        let s = store();
+        let empty = build(&s, b3(), formats::by_alias("dir").unwrap(), &BTreeMap::new()).unwrap();
+        let base = apply(&s, &empty, &base_e);
+        let (o, t) = (apply(&s, &base, &oe), apply(&s, &base, &te));
+        // Trivial sides.
+        prop_assert_eq!(merge_versions(&s, b3(), &base, &o, &base).unwrap().version, o.clone());
+        prop_assert_eq!(merge_versions(&s, b3(), &base, &base, &t).unwrap().version, t.clone());
+        prop_assert_eq!(merge_versions(&s, b3(), &base, &o, &o).unwrap().version, o.clone());
+        // A clean merge is symmetric, and keeps every path neither side touched.
+        let m = merge_versions(&s, b3(), &base, &o, &t).unwrap();
+        let n = merge_versions(&s, b3(), &base, &t, &o).unwrap();
+        prop_assert_eq!(m.conflicts.is_empty(), n.conflicts.is_empty());
+        if m.conflicts.is_empty() {
+            prop_assert_eq!(&m.version, &n.version);
+            for item in walk(&s, &m.version, None) {
+                let (path, node) = item.unwrap();
+                let (ob, tb) = (lookup(&s, &o, &path).unwrap(), lookup(&s, &t, &path).unwrap());
+                prop_assert!(Some(&node) == ob.as_ref() || Some(&node) == tb.as_ref() || matches!(node, Node::File(_)),
+                    "{} is in neither side", path);
+            }
+        }
+    }
+}

@@ -12,6 +12,7 @@ pub mod dir;
 pub mod formats;
 pub mod fs;
 pub mod history;
+pub mod merge;
 pub mod sync;
 mod tree;
 pub mod uni;
