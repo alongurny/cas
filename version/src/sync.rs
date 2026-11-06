@@ -27,11 +27,13 @@ pub struct Copied {
     pub blobs: usize,
     /// Blobs skipped because the destination already had them.
     pub present: usize,
+    /// Purged blobs whose tombstones were carried over instead.
+    pub purged: usize,
 }
 
 /// The references inside a blob, by its format. Unknown formats are
 /// opaque, so their blobs are copied without following anything.
-fn children(store: &dyn Store, r: &Ref) -> Result<Vec<Ref>> {
+pub(crate) fn children(store: &dyn Store, r: &Ref) -> Result<Vec<Ref>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(_), _)) => Ok(tree::load(store, r)?.into_iter().map(|Item { child, .. }| child).collect()),
         Some((_, "record")) => {
@@ -85,6 +87,11 @@ pub fn copy(src: &dyn Store, dst: &dyn Store, root: &Ref) -> Result<Copied> {
         }
         if expanded {
             copy_blob(src, dst, r.key(), &mut n)?;
+            continue;
+        }
+        if let Some(reason) = src.read(&crate::gc::tombstone(r.key()))? {
+            crate::gc::purge(dst, r.key(), &String::from_utf8_lossy(&reason))?;
+            n.purged += 1;
             continue;
         }
         if has(dst, r.key())? {
