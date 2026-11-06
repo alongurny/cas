@@ -117,7 +117,9 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
 #[test]
 fn an_unreadable_policy_denies_everything() {
     let meta = store();
-    meta.write(access::VAR, b"not a view", &Expect::Absent).unwrap();
+    // A view of bytes that are not a policy document.
+    let junk = put(&*meta, b3(), "raw", b"not a policy").unwrap();
+    meta.write(access::VAR, junk.to_string().as_bytes(), &Expect::Absent).unwrap();
     let gate = Access::new(meta);
     let s = CoreStore::new(MemBackend::new(), gate, Policy::permissive()).session(Who::anonymous());
     assert_eq!(s.read("main"), Err(CoreError::Denied));

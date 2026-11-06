@@ -84,6 +84,8 @@ pub enum Invalid {
     Expect,
     /// A blob value that does not hash to its key.
     HashMismatch,
+    /// A variable value that is not a view: two blob keys, one space.
+    View,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

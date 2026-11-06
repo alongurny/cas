@@ -70,12 +70,15 @@ fn a_chunked_body_is_read_no_further_than_the_bound() {
 fn bodies_within_the_bound_go_through_and_a_client_sees_too_large() {
     let (_server, url) = serve();
     let store = HttpStore::new(&url);
+    // Blob bodies: variables hold only short views.
+    let b3 = cas_core::algo::lookup("blake3").unwrap();
     let fits = vec![b'v'; MAX - 1];
-    store.write("main", &fits, &Expect::Absent).unwrap();
-    assert_eq!(store.read("main").unwrap(), Some(fits));
-    match store.write("other", &vec![b'v'; MAX], &Expect::Absent) {
+    store.write(&b3.key(&fits), &fits, &Expect::Absent).unwrap();
+    assert_eq!(store.read(&b3.key(&fits)).unwrap(), Some(fits));
+    let big = vec![b'v'; MAX];
+    match store.write(&b3.key(&big), &big, &Expect::Absent) {
         Err(Error::Refused { reason, .. }) => assert_eq!(reason, "too-large"),
         other => panic!("expected too-large, got {other:?}"),
     }
-    assert_eq!(store.read("other").unwrap(), None);
+    assert_eq!(store.read(&b3.key(&big)).unwrap(), None);
 }

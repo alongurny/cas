@@ -53,7 +53,7 @@ out for an open bound. A client may add `limit={n}` as a paging hint.
 | ok (list) | 200 | `CAS-Rest-From: {hex}` when only part of the span was answered | each key followed by `\n` |
 | absent | 404 | `Cache-Control: no-store` | |
 | denied | 403 | nothing else | empty |
-| invalid | 400 | `CAS-Reason: key`, `expect`, `hash-mismatch` or `request` | empty |
+| invalid | 400 | `CAS-Reason: key`, `expect`, `hash-mismatch`, `view` or `request` | empty |
 | refused | 422 | `CAS-Reason: {reason}` | optional UTF-8 message |
 | conflict | 409 | | empty |
 | request too large | 413 | `CAS-Reason: too-large` | optional UTF-8 message |

@@ -125,6 +125,9 @@ impl CoreStore {
                 Ok(self.backend.put_blob(key, value)?)
             }
             Kind::Var => {
+                if !is_view(value) {
+                    return Err(Error::Invalid(Invalid::View));
+                }
                 if self.backend.cas_var(key, expect, Some(value))? {
                     Ok(())
                 } else {
@@ -190,4 +193,12 @@ impl Store for Session {
     fn list(&self, span: &Span) -> Result<ListPage> {
         self.store.list(&self.who, span)
     }
+}
+
+/// Whether `value` is a view: `<format> <key>`, two blob keys separated by
+/// one space. Only the syntax is checked; the blobs need not exist.
+pub fn is_view(value: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(value) else { return false };
+    let Some((f, k)) = s.split_once(' ') else { return false };
+    [f, k].iter().all(|x| matches!(crate::key::classify(x), Some(crate::key::Parsed::Blob { .. })))
 }

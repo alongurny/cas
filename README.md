@@ -7,6 +7,10 @@ whoever chose the name, changed only by compare-and-set (the Stage 1 core spec c
 **view** is `<format> <key>`, a blob together with the format to read it in. A **tag** is a label
 inside a history.
 
+A variable holds only a view (amending the Stage 1 spec, where tag values were any bytes): a write of
+anything else is `invalid` (`view`). Only the syntax is checked, two blob keys and one space; the
+blobs need not exist. So every variable is a root the tooling can follow.
+
 - `cas-core` (this directory), Stages 2 and 3: the core store from the Stage 1 spec, and the wire protocol in [spec/wire.md](spec/wire.md).
 - `cas-version` ([version/](version)), Stage 4: the version format in [spec/version.md](spec/version.md). It is a tooling layer of ordinary blobs that the core does not know about. Every view is `<format> <key>`, and a format's id is the key of its format object in the single metaformat ([spec/metaformat.md](spec/metaformat.md)). Formats nest: directory formats hold views. The formats so far are `dir`, `raw`, `exec`, `symlink` and `git-blob` ([spec/formats/](spec/formats)). It provides build, update, lookup, prefix walk (sparse checkout), diff, and import/checkout of a local directory, and it keeps empty directories.
 - Histories ([spec/history.md](spec/history.md)), also in `cas-version`. `uni-bin` is a general data format of strings and maps, stored as a canonical binary serialization. A version has no parents; a `history` object holds versions as nodes in an order (a DAG), with a changelog on each step, an opt-in compatible flag (every step breaks unless marked), tags and docs. A variable (the store's mutable, compare-and-set names) points at the current history. The `history` module provides commit, tags, log, merge bases, compatibility and extension checks. Branches are not first-class: private histories, rebase and publish are the workflow.

@@ -78,11 +78,11 @@ fn disk_survives_reopen() {
         let s = CoreStore::new(DiskBackend::open(dir.path()).unwrap(), AllowAll, Policy::permissive())
             .session(Who::anonymous());
         s.write(&k, b"durable", &Expect::Absent).unwrap();
-        s.write("main", k.as_bytes(), &Expect::Absent).unwrap();
+        s.write("main", &cas_core::conformance::view(b"durable"), &Expect::Absent).unwrap();
     }
     let s = CoreStore::new(DiskBackend::open(dir.path()).unwrap(), AllowAll, Policy::permissive())
         .session(Who::anonymous());
-    assert_eq!(s.read("main").unwrap(), Some(k.as_bytes().to_vec()));
+    assert_eq!(s.read("main").unwrap(), Some(cas_core::conformance::view(b"durable")));
     assert_eq!(s.read(&k).unwrap(), Some(b"durable".to_vec()));
     let _: &dyn Harness = &(disk as fn(_, _) -> _);
 }
@@ -127,7 +127,8 @@ fn cache_answers_blob_reads_and_forwards_var_reads() {
     let up = counted(false);
     let k = cas_core::algo::lookup("blake3").unwrap().key(b"v");
     up.inner.write(&k, b"v", &Expect::Absent).unwrap();
-    up.inner.write("main", b"1", &Expect::Absent).unwrap();
+    let (v1, v2) = (cas_core::conformance::view(b"1"), cas_core::conformance::view(b"2"));
+    up.inner.write("main", &v1, &Expect::Absent).unwrap();
     let cache = CachingStore::new(local(), up.clone(), Arc::new(AllowAll), Who::anonymous());
     let reads = || up.reads.load(std::sync::atomic::Ordering::SeqCst);
 
@@ -135,9 +136,9 @@ fn cache_answers_blob_reads_and_forwards_var_reads() {
     assert_eq!(cache.read(&k).unwrap(), Some(b"v".to_vec()));
     assert_eq!(reads(), 1, "second blob read is served locally");
 
-    assert_eq!(cache.read("main").unwrap(), Some(b"1".to_vec()));
-    up.inner.write("main", b"2", &Expect::Value(b"1".to_vec())).unwrap();
-    assert_eq!(cache.read("main").unwrap(), Some(b"2".to_vec()), "variable reads are never stale");
+    assert_eq!(cache.read("main").unwrap(), Some(v1.clone()));
+    up.inner.write("main", &v2, &Expect::Value(v1)).unwrap();
+    assert_eq!(cache.read("main").unwrap(), Some(v2), "variable reads are never stale");
 }
 
 #[test]

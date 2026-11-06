@@ -47,6 +47,12 @@ fn val(v: &[u8]) -> Expect {
     Expect::Value(v.to_vec())
 }
 
+/// A view for test values: `<format> <key>` with the blake3 key of `x`.
+/// Variables hold only views; the blobs need not exist.
+pub fn view(x: &[u8]) -> Vec<u8> {
+    format!("{} {}", blake3(b"raw"), blake3(x)).into_bytes()
+}
+
 /// Spec 9.1: key classification and grammar.
 pub fn key_grammar(h: &dyn Harness) {
     let s = h.open();
@@ -65,8 +71,8 @@ pub fn key_grammar(h: &dyn Harness) {
     assert_eq!(refused_reason(s.read("foo:abcd")), "unsupported-algorithm");
     // Variables may hold ':' after a '/'.
     let derived = format!("derived/blame/{}", blake3(b"x"));
-    s.write(&derived, b"v", &A).unwrap();
-    assert_eq!(s.read(&derived).unwrap(), Some(b"v".to_vec()));
+    s.write(&derived, &view(b"v"), &A).unwrap();
+    assert_eq!(s.read(&derived).unwrap(), Some(view(b"v")));
 }
 
 /// Spec 9.2: every registered algorithm round-trips when accepted, and is
@@ -135,8 +141,9 @@ pub fn blob_expect(h: &dyn Harness) {
 
 /// Spec 9.6: the variable CAS truth table for write and remove.
 pub fn var_cas_table(h: &dyn Harness) {
-    let currents: [Option<&[u8]>; 2] = [None, Some(b"A")];
-    let expects = [A, val(b"A"), val(b"B")];
+    let (va, vn) = (view(b"A"), view(b"N"));
+    let currents: [Option<&[u8]>; 2] = [None, Some(&va)];
+    let expects = [A, val(&va), val(&view(b"B"))];
     for (i, current) in currents.iter().enumerate() {
         for (j, expect) in expects.iter().enumerate() {
             let s = h.open();
@@ -145,10 +152,10 @@ pub fn var_cas_table(h: &dyn Harness) {
                 s.write(&t, c, &A).unwrap();
             }
             let ok = expect.matches(*current);
-            let w = s.write(&t, b"N", expect);
+            let w = s.write(&t, &vn, expect);
             assert_eq!(w, if ok { Ok(()) } else { Err(Error::Conflict) }, "write {current:?} {expect:?}");
             let after = s.read(&t).unwrap();
-            assert_eq!(after.as_deref(), if ok { Some(&b"N"[..]) } else { *current });
+            assert_eq!(after.as_deref(), if ok { Some(&vn[..]) } else { *current });
 
             let s = h.open();
             if let Some(c) = current {
@@ -172,7 +179,7 @@ pub fn cas_race(h: &dyn Harness) {
             let (s, b) = (Arc::clone(&s), Arc::clone(&barrier));
             thread::spawn(move || {
                 b.wait();
-                s.write("race", format!("{i}").as_bytes(), &A)
+                s.write("race", &view(format!("{i}").as_bytes()), &A)
             })
         })
         .collect::<Vec<_>>()
@@ -186,16 +193,19 @@ pub fn cas_race(h: &dyn Harness) {
     assert_eq!(wins, 1);
 
     let (threads, incs) = (8, 25);
+    // The counter holds view(n); decode by lookup.
+    let views: Arc<BTreeMap<Vec<u8>, u64>> =
+        Arc::new((0..=threads * incs).map(|n| (view(n.to_string().as_bytes()), n)).collect());
     let handles: Vec<_> = (0..threads)
         .map(|_| {
-            let s = Arc::clone(&s);
+            let (s, views) = (Arc::clone(&s), Arc::clone(&views));
             thread::spawn(move || {
                 for _ in 0..incs {
                     loop {
                         let cur = s.read("counter").unwrap();
-                        let n: u64 = cur.as_deref().map_or(0, |v| std::str::from_utf8(v).unwrap().parse().unwrap());
+                        let n: u64 = cur.as_deref().map_or(0, |v| views[v]);
                         let expect = cur.map_or(A, Expect::Value);
-                        match s.write("counter", (n + 1).to_string().as_bytes(), &expect) {
+                        match s.write("counter", &view((n + 1).to_string().as_bytes()), &expect) {
                             Ok(()) => break,
                             Err(Error::Conflict) => continue,
                             Err(e) => panic!("{e}"),
@@ -208,32 +218,46 @@ pub fn cas_race(h: &dyn Harness) {
     for t in handles {
         t.join().unwrap();
     }
-    assert_eq!(s.read("counter").unwrap(), Some((threads * incs).to_string().into_bytes()));
+    assert_eq!(s.read("counter").unwrap(), Some(view((threads * incs).to_string().as_bytes())));
 }
 
-/// Spec 9.8: an empty value is present.
+/// Spec 9.8: an empty blob is present; a variable holds only a view.
 pub fn empty_values(h: &dyn Harness) {
     let s = h.open();
-    s.write("empty", b"", &A).unwrap();
-    assert_eq!(s.read("empty").unwrap(), Some(Vec::new()));
-    assert_eq!(s.write("empty", b"x", &A), Err(Error::Conflict));
-    s.write("empty", b"x", &val(b"")).unwrap();
     let k = blake3(b"");
     s.write(&k, b"", &A).unwrap();
     assert_eq!(s.read(&k).unwrap(), Some(Vec::new()));
+    let not_views: [&[u8]; 8] = [
+        b"",
+        b"x",
+        b"blake3:ab",
+        b"blake3:ab  blake3:cd",
+        b"blake3:ab blake3:cd ",
+        b"main blake3:cd",
+        b"blake3:AB blake3:cd",
+        b"\xffblake3:ab blake3:cd",
+    ];
+    for v in not_views {
+        assert_eq!(s.write("v", v, &A), Err(Error::Invalid(Invalid::View)), "{v:?}");
+    }
+    assert_eq!(s.read("v").unwrap(), None);
+    // Only syntax: the blobs a view names need not exist.
+    s.write("v", b"blake3:ab blake3:cd", &A).unwrap();
 }
 
 /// Spec 9.9: size limits are store policy and refuse with a reason.
 pub fn size_policy(h: &dyn Harness) {
-    let policy = Policy { max_blob_len: Some(4), max_var_len: Some(2), ..Policy::permissive() };
+    let short = view(b"12");
+    let policy = Policy { max_blob_len: Some(4), max_var_len: Some(short.len()), ..Policy::permissive() };
     let s = h.store(policy, Box::new(AllowAll));
     s.write(&blake3(b"1234"), b"1234", &A).unwrap();
     assert_eq!(refused_reason(s.write(&blake3(b"12345"), b"12345", &A)), "too-large");
-    s.write("t", b"12", &A).unwrap();
-    assert_eq!(refused_reason(s.write("t", b"123", &val(b"12"))), "too-large");
-    assert_eq!(s.read("t").unwrap(), Some(b"12".to_vec()));
+    s.write("t", &short, &A).unwrap();
+    let long = format!("{} {}", blake3(b"raw"), algo::lookup("sha512").unwrap().key(b"x"));
+    assert_eq!(refused_reason(s.write("t", long.as_bytes(), &val(&short))), "too-large");
+    assert_eq!(s.read("t").unwrap(), Some(short));
     let short_keys = h.store(Policy { max_key_len: Some(8), ..Policy::permissive() }, Box::new(AllowAll));
-    short_keys.write("12345678", b"v", &A).unwrap();
+    short_keys.write("12345678", &view(b"v"), &A).unwrap();
     assert_eq!(refused_reason(short_keys.read("123456789")), "key-too-long");
 }
 
@@ -242,7 +266,7 @@ pub fn list_spans(h: &dyn Harness) {
     let s = h.store(Policy { list_page: 2, ..Policy::permissive() }, Box::new(AllowAll));
     let vars = ["a", "refs/heads/main", "refs/heads/x", "refs/tags/v1", "z"];
     for t in vars {
-        s.write(t, b"v", &A).unwrap();
+        s.write(t, &view(b"v"), &A).unwrap();
     }
     let blobs: Vec<String> = (0..3u8).map(|i| blake3(&[i])).collect();
     for (i, b) in blobs.iter().enumerate() {
@@ -307,8 +331,8 @@ pub fn deny_paths(h: &dyn Harness) {
     let s = h.store(Policy::permissive(), Box::new(gate));
     assert_eq!(s.write("ro/x", b"v", &A), Err(Error::Denied));
     assert_eq!(s.read("ro/x").unwrap(), None);
-    s.write("public/a", b"v", &A).unwrap();
-    s.write("secret/a", b"v", &A).unwrap();
+    s.write("public/a", &view(b"v"), &A).unwrap();
+    s.write("secret/a", &view(b"v"), &A).unwrap();
     assert_eq!(s.read("secret/a"), Err(Error::Denied));
     assert_eq!(s.list(&Span::all()), Err(Error::Denied));
     assert_eq!(list_all(&*s, &Span::prefix("public/")).unwrap(), ["public/a"]);
@@ -355,11 +379,15 @@ pub fn model(h: &dyn Harness) {
                 match o {
                     M::Read(k) => prop_assert_eq!(s.read(&key(k)).unwrap(), m.get(&key(k)).cloned()),
                     M::Write(k, v, e) => {
-                        let (k, e) = (key(k), e.map_or(A, |e| val(&[e])));
-                        let got = s.write(&k, &[v], &e);
-                        let want = if k.starts_with('t') {
+                        let k = key(k);
+                        let var = k.starts_with('t');
+                        // Variables hold views of the byte; blobs the byte itself.
+                        let enc = |b: u8| if var { view(&[b]) } else { vec![b] };
+                        let e = e.map_or(A, |e| Expect::Value(enc(e)));
+                        let got = s.write(&k, &enc(v), &e);
+                        let want = if var {
                             if e.matches(m.get(&k).map(Vec::as_slice)) {
-                                m.insert(k, vec![v]);
+                                m.insert(k, enc(v));
                                 Ok(())
                             } else {
                                 Err(Error::Conflict)
@@ -375,9 +403,11 @@ pub fn model(h: &dyn Harness) {
                         prop_assert_eq!(got, want);
                     }
                     M::Remove(k, e) => {
-                        let (k, e) = (key(k), e.map_or(A, |e| val(&[e])));
+                        let k = key(k);
+                        let var = k.starts_with('t');
+                        let e = e.map_or(A, |e| Expect::Value(if var { view(&[e]) } else { vec![e] }));
                         let got = s.remove(&k, &e);
-                        let want = if k.starts_with('t') {
+                        let want = if var {
                             if e.matches(m.get(&k).map(Vec::as_slice)) {
                                 m.remove(&k);
                                 Ok(())

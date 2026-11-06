@@ -44,6 +44,7 @@ pub fn invalid_reason(r: Invalid) -> &'static str {
         Invalid::Key => "key",
         Invalid::Expect => "expect",
         Invalid::HashMismatch => "hash-mismatch",
+        Invalid::View => "view",
     }
 }
 
@@ -52,6 +53,7 @@ pub fn parse_invalid_reason(s: &str) -> Option<Invalid> {
         "key" => Some(Invalid::Key),
         "expect" => Some(Invalid::Expect),
         "hash-mismatch" => Some(Invalid::HashMismatch),
+        "view" => Some(Invalid::View),
         _ => None,
     }
 }
