@@ -1,6 +1,6 @@
 //! Derived data (Stage 6, spec/derived.md): a cache of f(X) for
 //! deterministic functions f. The result of function F over input X is a
-//! blob, and the tag `derived/F/X` holds a reference to it.
+//! blob, and the variable `derived/F/X` holds a view of it.
 //!
 //! A function is identified by the key of its function object, a `uni-bin`
 //! map of its name, input format, output format and spec key. Changing a
@@ -8,11 +8,11 @@
 
 use crate::history::{History, NodeId};
 use crate::uni::Value;
-use crate::{Error, Path, Ref, Result, by_alias, malformed, object_at, read_blob, tree, write_blob};
+use crate::{Error, Path, Result, View, by_alias, malformed, object_at, read_blob, tree, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::{Error as CoreError, Expect, Store};
 
-type Compute = fn(&dyn Store, &'static Algorithm, &Ref) -> Result<Value>;
+type Compute = fn(&dyn Store, &'static Algorithm, &View) -> Result<Value>;
 
 pub struct Function {
     pub name: &'static str,
@@ -43,7 +43,7 @@ impl Function {
         blake3().key(&self.object().serialize())
     }
 
-    pub fn tag(&self, input: &Ref) -> String {
+    pub fn var(&self, input: &View) -> String {
         format!("derived/{}/{}", self.id(), input.key())
     }
 }
@@ -55,7 +55,7 @@ pub fn publish(store: &dyn Store, f: &Function) -> Result<()> {
     Ok(())
 }
 
-fn check_input(f: &Function, input: &Ref) -> Result<()> {
+fn check_input(f: &Function, input: &View) -> Result<()> {
     if input.format() == by_alias(f.input).unwrap().id() {
         Ok(())
     } else {
@@ -64,29 +64,29 @@ fn check_input(f: &Function, input: &Ref) -> Result<()> {
 }
 
 /// The cached result of `f` over `input`, if any.
-pub fn cached(store: &dyn Store, f: &Function, input: &Ref) -> Result<Option<Ref>> {
+pub fn cached(store: &dyn Store, f: &Function, input: &View) -> Result<Option<View>> {
     check_input(f, input)?;
-    let tag = f.tag(input);
-    match store.read(&tag)? {
+    let var = f.var(input);
+    match store.read(&var)? {
         None => Ok(None),
         Some(v) => {
-            let s = String::from_utf8(v).map_err(|_| malformed(&tag, "not UTF-8"))?;
-            Ref::parse(&s).map(Some).map_err(|_| malformed(&tag, "not a reference"))
+            let s = String::from_utf8(v).map_err(|_| malformed(&var, "not UTF-8"))?;
+            View::parse(&s).map(Some).map_err(|_| malformed(&var, "not a view"))
         }
     }
 }
 
 /// `f(input)`: the cached result, or else computed, stored, and recorded
-/// under its tag. If another writer recorded a result first, that one is
+/// under its variable. If another writer recorded a result first, that one is
 /// returned; functions are deterministic, so it is the same value.
-pub fn derive(store: &dyn Store, alg: &'static Algorithm, f: &Function, input: &Ref) -> Result<Ref> {
+pub fn derive(store: &dyn Store, alg: &'static Algorithm, f: &Function, input: &View) -> Result<View> {
     if let Some(r) = cached(store, f, input)? {
         return Ok(r);
     }
     let value = (f.compute)(store, alg, input)?;
     let key = write_blob(store, alg, &value.serialize())?;
-    let result = Ref { format: by_alias("uni-bin").unwrap().id().to_string(), key };
-    match store.write(&f.tag(input), result.to_string().as_bytes(), &Expect::Absent) {
+    let result = View { format: by_alias("uni-bin").unwrap().id().to_string(), key };
+    match store.write(&f.var(input), result.to_string().as_bytes(), &Expect::Absent) {
         Ok(()) => Ok(result),
         Err(CoreError::Conflict) => Ok(cached(store, f, input)?.expect("a conflicting tag exists")),
         Err(e) => Err(e.into()),
@@ -94,7 +94,7 @@ pub fn derive(store: &dyn Store, alg: &'static Algorithm, f: &Function, input: &
 }
 
 /// Read a derived result's value.
-pub fn value(store: &dyn Store, r: &Ref) -> Result<Value> {
+pub fn value(store: &dyn Store, r: &View) -> Result<Value> {
     Value::deserialize(&read_blob(store, r.key())?).map_err(|e| malformed(r.key(), e))
 }
 
@@ -109,7 +109,7 @@ fn number(v: &Value, field: &str) -> u64 {
 /// `summary`: how many directories and files lie under a directory. Each
 /// subdirectory's summary is itself derived, so after an edit only the
 /// directories on the edited paths are recomputed.
-fn summary(store: &dyn Store, alg: &'static Algorithm, input: &Ref) -> Result<Value> {
+fn summary(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<Value> {
     let (mut dirs, mut files) = (0, 0);
     for item in tree::load(store, input)? {
         if item.child.is_dir() {

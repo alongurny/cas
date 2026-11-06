@@ -5,7 +5,7 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Parsed<'a> {
     Blob { alg: &'a str, digest_hex: &'a str },
-    Tag,
+    Var,
 }
 
 /// Classify `key`, or `None` when it breaks the key byte rules or the blob
@@ -14,9 +14,9 @@ pub fn classify(key: &str) -> Option<Parsed<'_>> {
     if key.is_empty() || key.chars().any(|c| c.is_control()) {
         return None;
     }
-    let Some(colon) = key.find(':') else { return Some(Parsed::Tag) };
+    let Some(colon) = key.find(':') else { return Some(Parsed::Var) };
     if key[..colon].contains('/') {
-        return Some(Parsed::Tag);
+        return Some(Parsed::Var);
     }
     let (alg, digest_hex) = (&key[..colon], &key[colon + 1..]);
     let alg_ok =
@@ -31,9 +31,9 @@ mod tests {
 
     #[test]
     fn classification() {
-        assert_eq!(classify("main"), Some(Parsed::Tag));
-        assert_eq!(classify("refs/heads/main"), Some(Parsed::Tag));
-        assert_eq!(classify("derived/blame/blake3:8e4c"), Some(Parsed::Tag));
+        assert_eq!(classify("main"), Some(Parsed::Var));
+        assert_eq!(classify("refs/heads/main"), Some(Parsed::Var));
+        assert_eq!(classify("derived/blame/blake3:8e4c"), Some(Parsed::Var));
         assert_eq!(classify("blake3:af13"), Some(Parsed::Blob { alg: "blake3", digest_hex: "af13" }));
         assert_eq!(classify("foo:bar"), None); // not hex
         assert_eq!(classify("http://x"), None);

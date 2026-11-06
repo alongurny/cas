@@ -1,15 +1,15 @@
 //! Sync (Stage 7, spec/sync.md): two stores converge with plain core ops.
-//! Tooling walks formats from a reference and writes what the other store
+//! Tooling walks formats from a view and writes what the other store
 //! lacks; there is no negotiation.
 //!
 //! Copies keep the closure invariant: a blob is written only after
-//! everything it references, so a store that has a blob has all of it, and
+//! everything it refers to, so a store that has a blob has all of it, and
 //! a walk can stop at the first blob the destination already holds.
 
 use crate::dir::Item;
 use crate::formats::{self, Kind};
 use crate::history;
-use crate::{Error, Ref, Result, is_blob_key, read_blob, tree};
+use crate::{Error, Result, View, is_blob_key, read_blob, tree};
 use cas_core::{Error as CoreError, Expect, Span, Store};
 
 /// Whether `store` holds the blob `key`, without reading it.
@@ -29,9 +29,9 @@ pub struct Copied {
     pub present: usize,
 }
 
-/// The references inside a blob, by its format. Unknown formats are
+/// The views inside a blob, by its format. Unknown formats are
 /// opaque, so their blobs are copied without following anything.
-pub(crate) fn children(store: &dyn Store, r: &Ref) -> Result<Vec<Ref>> {
+pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(_), _)) => Ok(tree::load(store, r)?.into_iter().map(|Item { child, .. }| child).collect()),
         Some((_, "history")) => Ok(history::read(store, r)?.nodes.keys().map(|id| id.version()).collect()),
@@ -71,10 +71,10 @@ fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -
 
 /// Copy everything reachable from `root` that `dst` lacks, children before
 /// parents. Stops descending at blobs `dst` already has.
-pub fn copy(src: &dyn Store, dst: &dyn Store, root: &Ref) -> Result<Copied> {
+pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
     let mut n = Copied::default();
     let mut formats_seen = std::collections::BTreeSet::new();
-    // An explicit stack of (reference, children pushed yet).
+    // An explicit stack of (view, children pushed yet).
     let mut stack = vec![(root.clone(), false)];
     while let Some((r, expanded)) = stack.pop() {
         if formats_seen.insert(r.format().to_string()) {

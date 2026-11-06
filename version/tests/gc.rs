@@ -24,7 +24,7 @@ fn commit(s: &dyn Store, files: &[(&str, &str)]) -> history::NodeId {
     history::commit(s, b3(), "main", &v, history::Step::default(), None).unwrap()
 }
 
-fn files(s: &dyn Store, v: &cas_version::Ref) -> Vec<(Path, cas_version::Ref)> {
+fn files(s: &dyn Store, v: &cas_version::View) -> Vec<(Path, cas_version::View)> {
     walk(s, v, None)
         .map(|r| r.unwrap())
         .filter_map(|(p, n)| match n {

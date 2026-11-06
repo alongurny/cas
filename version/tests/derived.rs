@@ -6,7 +6,7 @@ use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Session, Span, Sto
 use cas_version::derived::{self, SUMMARY};
 use cas_version::history::{History, Step};
 use cas_version::uni::Value;
-use cas_version::{Edit, Node, Path, Ref, build, formats, put, update};
+use cas_version::{Edit, Node, Path, View, build, formats, put, update};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -43,7 +43,7 @@ fn file(s: &dyn Store, text: &str) -> Node {
     Node::File(put(s, b3(), "raw", text.as_bytes()).unwrap())
 }
 
-fn version(s: &dyn Store, paths: &[&str]) -> Ref {
+fn version(s: &dyn Store, paths: &[&str]) -> View {
     let mut m = BTreeMap::new();
     for p in paths {
         let path = Path::new(p.trim_end_matches('/')).unwrap();
@@ -57,7 +57,7 @@ fn version(s: &dyn Store, paths: &[&str]) -> Ref {
     build(s, b3(), formats::by_alias("dir").unwrap(), &m).unwrap()
 }
 
-fn counts(s: &dyn Store, r: &Ref) -> (String, String) {
+fn counts(s: &dyn Store, r: &View) -> (String, String) {
     let v = derived::value(s, r).unwrap();
     let m = v.as_map().unwrap();
     let get = |k: &str| m[&Value::str(k)].as_str().unwrap().to_string();
@@ -71,7 +71,7 @@ fn function_ids_are_content_addressed() {
     let object = s.read(&SUMMARY.id()).unwrap().unwrap();
     assert_eq!(Value::deserialize(&object).unwrap(), SUMMARY.object());
     let v = version(&s, &["a"]);
-    assert_eq!(SUMMARY.tag(&v), format!("derived/{}/{}", SUMMARY.id(), v.key()));
+    assert_eq!(SUMMARY.var(&v), format!("derived/{}/{}", SUMMARY.id(), v.key()));
 }
 
 #[test]
@@ -96,7 +96,7 @@ fn summary_is_cached_and_incremental() {
     assert_eq!(c.writes.load(Ordering::SeqCst), 0);
 
     // After one edit, only the directories on its path are recomputed:
-    // three results and three tags.
+    // three results and three variables.
     let edit = BTreeMap::from([(Path::new("d3/e4/g").unwrap(), Edit::Set(file(&s, "new")))]);
     let v2 = update(&s, b3(), &v, &edit).unwrap();
     let c = Counting { inner: &s, writes: AtomicUsize::new(0) };
@@ -109,9 +109,9 @@ fn summary_is_cached_and_incremental() {
 fn a_result_recorded_first_wins() {
     let s = store();
     let v = version(&s, &["a"]);
-    // Another writer recorded a result under the tag first.
+    // Another writer recorded a result under the variable first.
     let theirs = put(&s, b3(), "uni-bin", &Value::map([("dirs", "0"), ("files", "1")]).serialize()).unwrap();
-    s.write(&SUMMARY.tag(&v), theirs.to_string().as_bytes(), &Expect::Absent).unwrap();
+    s.write(&SUMMARY.var(&v), theirs.to_string().as_bytes(), &Expect::Absent).unwrap();
     assert_eq!(derived::derive(&s, b3(), &SUMMARY, &v).unwrap(), theirs);
     // Inputs in the wrong format are refused.
     let raw = put(&s, b3(), "raw", b"not a dir").unwrap();
@@ -142,5 +142,5 @@ fn path_log() {
     assert_eq!(log("a/y"), std::slice::from_ref(&c3));
     assert_eq!(log("c"), [side]);
     assert!(log("zzz").is_empty());
-    let _ = (m, Ref::parse);
+    let _ = (m, View::parse);
 }

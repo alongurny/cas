@@ -51,14 +51,14 @@ fn commit_log_diff_checkout_and_sync() {
     let token = cas(&served, &["--meta", m, "access", "user", "alice"]);
     let token_file = tmp.path().join("alice.token");
     std::fs::write(&token_file, token.trim()).unwrap();
-    for g in ["read blobs", "list blobs", "read tag:main"] {
+    for g in ["read blobs", "list blobs", "read var:main"] {
         cas(&served, &["--meta", m, "access", "grant", "*", g]);
     }
-    for g in ["write blobs", "write tag:main"] {
+    for g in ["write blobs", "write var:main"] {
         cas(&served, &["--meta", m, "access", "grant", "alice", g]);
     }
     let shown = cas(&served, &["--meta", m, "access", "show"]);
-    assert!(shown.contains("user  alice") && shown.contains("grant alice: write blobs, write tag:main"), "{shown}");
+    assert!(shown.contains("user  alice") && shown.contains("grant alice: write blobs, write var:main"), "{shown}");
     assert!(!shown.contains(token.trim()));
     let addr = "127.0.0.1:47391";
     let mut server = Command::new(env!("CARGO_BIN_EXE_cas"))

@@ -2,10 +2,10 @@
 //!
 //! Layout under the root:
 //! - `blobs/<alg>/<first two hex chars>/<digest hex>`
-//! - `tags/<hex of the tag name's bytes>` (hex keeps bytewise order and any
+//! - `variables/<hex of the variable name's bytes>` (hex keeps bytewise order and any
 //!   name safe as a file name)
 //! - `tmp/` for writes in flight, renamed into place once synced
-//! - `lock`, held exclusively around every tag CAS, so CAS is atomic across
+//! - `lock`, held exclusively around every variable CAS, so CAS is atomic across
 //!   threads and processes sharing the root.
 
 use crate::backend::Backend;
@@ -26,7 +26,7 @@ pub struct DiskBackend {
 impl DiskBackend {
     pub fn open(root: impl Into<PathBuf>) -> io::Result<DiskBackend> {
         let root = root.into();
-        for dir in ["blobs", "tags", "tmp"] {
+        for dir in ["blobs", "vars", "tmp"] {
             fs::create_dir_all(root.join(dir))?;
         }
         let lock = OpenOptions::new().create(true).truncate(false).write(true).open(root.join("lock"))?;
@@ -38,7 +38,7 @@ impl DiskBackend {
             Some(Parsed::Blob { alg, digest_hex }) => {
                 self.root.join("blobs").join(alg).join(&digest_hex[..2.min(digest_hex.len())]).join(digest_hex)
             }
-            _ => tag_path(&self.root.join("tags"), key),
+            _ => var_path(&self.root.join("vars"), key),
         }
     }
 
@@ -70,7 +70,7 @@ impl DiskBackend {
 
     fn all_keys(&self) -> io::Result<Vec<String>> {
         let mut keys = Vec::new();
-        tag_names(&self.root.join("tags"), String::new(), &mut keys)?;
+        var_names(&self.root.join("vars"), String::new(), &mut keys)?;
         for alg in fs::read_dir(self.root.join("blobs"))? {
             let alg = alg?;
             let alg_name = alg.file_name().to_string_lossy().into_owned();
@@ -84,15 +84,15 @@ impl DiskBackend {
     }
 }
 
-/// File names are limited (often to 255 bytes), so a tag's hex name is cut
+/// File names are limited (often to 255 bytes), so a variable's hex name is cut
 /// into pieces of at most `TAG_PIECE` characters. Every piece but the last
 /// is a directory, marked with a trailing `-` so it never collides with a
-/// file of the same hex. Tags up to 127 bytes are a single file, as before.
+/// file of the same hex. Variables up to 127 bytes are a single file, as before.
 const TAG_PIECE: usize = 254;
 
-fn tag_path(tags: &Path, name: &str) -> PathBuf {
+fn var_path(vars: &Path, name: &str) -> PathBuf {
     let hex = hex::encode(name);
-    let mut path = tags.to_path_buf();
+    let mut path = vars.to_path_buf();
     let mut rest = hex.as_str();
     while rest.len() > TAG_PIECE {
         path.push(format!("{}-", &rest[..TAG_PIECE]));
@@ -102,12 +102,12 @@ fn tag_path(tags: &Path, name: &str) -> PathBuf {
     path
 }
 
-fn tag_names(dir: &Path, prefix: String, keys: &mut Vec<String>) -> io::Result<()> {
+fn var_names(dir: &Path, prefix: String, keys: &mut Vec<String>) -> io::Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
         match name.strip_suffix('-') {
-            Some(piece) if entry.file_type()?.is_dir() => tag_names(&entry.path(), prefix.clone() + piece, keys)?,
+            Some(piece) if entry.file_type()?.is_dir() => var_names(&entry.path(), prefix.clone() + piece, keys)?,
             _ => {
                 let bytes = hex::decode(prefix.clone() + &name).map_err(io::Error::other)?;
                 keys.push(String::from_utf8(bytes).map_err(io::Error::other)?);
@@ -147,7 +147,7 @@ impl Backend for DiskBackend {
         self.remove_file(&self.path(key))
     }
 
-    fn cas_tag(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool> {
+    fn cas_var(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool> {
         let lock = self.lock.lock().unwrap();
         lock.lock()?;
         let result = (|| {
@@ -179,18 +179,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn long_tag_names() {
+    fn long_var_names() {
         let dir = tempfile::tempdir().unwrap();
         let b = DiskBackend::open(dir.path()).unwrap();
         let names = ["t".repeat(127), "u".repeat(128), "v".repeat(1000), format!("derived/{}/x", "a".repeat(200))];
         for n in &names {
-            assert!(b.cas_tag(n, &Expect::Absent, Some(n.as_bytes())).unwrap());
+            assert!(b.cas_var(n, &Expect::Absent, Some(n.as_bytes())).unwrap());
             assert_eq!(b.get(n).unwrap().as_deref(), Some(n.as_bytes()));
         }
         let mut want: Vec<String> = names.to_vec();
         want.sort();
         assert_eq!(b.list(&Span::all(), 100).unwrap(), want);
-        assert!(b.cas_tag(&names[2], &Expect::Value(names[2].clone().into_bytes()), None).unwrap());
+        assert!(b.cas_var(&names[2], &Expect::Value(names[2].clone().into_bytes()), None).unwrap());
         assert_eq!(b.get(&names[2]).unwrap(), None);
         assert_eq!(b.list(&Span::all(), 100).unwrap().len(), 3);
     }

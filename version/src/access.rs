@@ -4,10 +4,10 @@
 //! its arguments. This module supplies both ends: a bearer token becomes a
 //! `Who`, and an allow-list of grants decides each op. Users and grants are
 //! one `uni-bin` document kept in a separate store, the meta-store, under
-//! tag `policy`; only the token's hash is stored.
+//! variable `policy`; only the token's hash is stored.
 
 use crate::uni::Value;
-use crate::{Error, Ref, Result, put, read_blob};
+use crate::{Error, Result, View, put, read_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::key::{Parsed, classify};
 use cas_core::server::{Authenticate, bearer};
@@ -15,8 +15,8 @@ use cas_core::{Expect, Gate, Op, Span, Store, Who};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 
-/// The meta-store tag holding the policy document.
-pub const TAG: &str = "policy";
+/// The meta-store variable holding the policy document.
+pub const VAR: &str = "policy";
 /// Grants to `ANYONE` apply to every caller, signed in or not.
 pub const ANYONE: &str = "*";
 /// Grants to `USERS` apply to every signed-in caller.
@@ -37,11 +37,11 @@ pub enum Scope {
     All,
     /// Every blob key.
     Blobs,
-    /// Tags whose names start with the prefix (empty: every tag).
-    Tags(String),
+    /// Variables whose names start with the prefix (empty: every variable).
+    Vars(String),
 }
 
-/// One permission: `<action> <scope>`, e.g. `read blobs`, `write tag:main`.
+/// One permission: `<action> <scope>`, e.g. `read blobs`, `write var:main`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Grant {
     pub action: Action,
@@ -50,7 +50,7 @@ pub struct Grant {
 
 impl Grant {
     pub fn parse(s: &str) -> Result<Grant> {
-        let bad = || Error::Policy(format!("grant {s:?}: expected `read|write|remove|list *|blobs|tag:PREFIX`"));
+        let bad = || Error::Policy(format!("grant {s:?}: expected `read|write|remove|list *|blobs|var:PREFIX`"));
         let (a, sc) = s.split_once(' ').ok_or_else(bad)?;
         let action = match a {
             "read" => Action::Read,
@@ -62,7 +62,7 @@ impl Grant {
         let scope = match sc {
             "*" => Scope::All,
             "blobs" => Scope::Blobs,
-            _ => Scope::Tags(sc.strip_prefix("tag:").ok_or_else(bad)?.to_string()),
+            _ => Scope::Vars(sc.strip_prefix("var:").ok_or_else(bad)?.to_string()),
         };
         Ok(Grant { action, scope })
     }
@@ -79,7 +79,7 @@ impl std::fmt::Display for Grant {
         match &self.scope {
             Scope::All => write!(f, "{a} *"),
             Scope::Blobs => write!(f, "{a} blobs"),
-            Scope::Tags(p) => write!(f, "{a} tag:{p}"),
+            Scope::Vars(p) => write!(f, "{a} var:{p}"),
         }
     }
 }
@@ -139,7 +139,7 @@ impl Scope {
         match (self, classify(key)) {
             (Scope::All, _) => true,
             (Scope::Blobs, Some(Parsed::Blob { .. })) => true,
-            (Scope::Tags(p), Some(Parsed::Tag)) => key.starts_with(p.as_str()),
+            (Scope::Vars(p), Some(Parsed::Var)) => key.starts_with(p.as_str()),
             _ => false,
         }
     }
@@ -150,8 +150,8 @@ impl Scope {
         match self {
             Scope::All => true,
             Scope::Blobs => algo::REGISTRY.iter().any(|a| span_within(span, format!("{}:", a.name).as_bytes())),
-            Scope::Tags(p) => {
-                // Blob keys start with `<alg>:`; a tag prefix that could share
+            Scope::Vars(p) => {
+                // Blob keys start with `<alg>:`; a variable prefix that could share
                 // a key with them does not authorize listing.
                 let clash = algo::REGISTRY.iter().any(|a| {
                     let b = format!("{}:", a.name);
@@ -239,12 +239,12 @@ impl Rules {
     }
 }
 
-/// The policy in `meta` and the tag value it was read from.
+/// The policy in `meta` and the variable value it was read from.
 pub fn load(meta: &dyn Store) -> Result<(Option<Vec<u8>>, Rules)> {
-    let Some(tag) = meta.read(TAG)? else { return Ok((None, Rules::default())) };
-    let r = Ref::parse(std::str::from_utf8(&tag).map_err(|_| Error::Policy("policy tag".into()))?)?;
+    let Some(var) = meta.read(VAR)? else { return Ok((None, Rules::default())) };
+    let r = View::parse(std::str::from_utf8(&var).map_err(|_| Error::Policy("policy variable".into()))?)?;
     let v = Value::deserialize(&read_blob(meta, r.key())?).map_err(Error::Policy)?;
-    Ok((Some(tag), Rules::from_value(&v)?))
+    Ok((Some(var), Rules::from_value(&v)?))
 }
 
 /// Replace the policy in `meta`, only if it is still `old` (from `load`).
@@ -252,14 +252,14 @@ pub fn save(meta: &dyn Store, alg: &'static Algorithm, old: Option<Vec<u8>>, rul
     let r = put(meta, alg, "uni-bin", &rules.to_value().serialize())?;
 
     let expect = old.map_or(Expect::Absent, Expect::Value);
-    meta.write(TAG, r.to_string().as_bytes(), &expect)?;
+    meta.write(VAR, r.to_string().as_bytes(), &expect)?;
     Ok(())
 }
 
-/// The tag value last read and the rules parsed from it.
+/// The variable value last read and the rules parsed from it.
 type Cached = Option<(Vec<u8>, Arc<Rules>)>;
 
-/// The policy as a gate and an authenticator, re-read when its tag moves.
+/// The policy as a gate and an authenticator, re-read when its variable moves.
 /// Any failure to read it denies everything.
 /// Clones share the cache, so one can be the gate and another authenticate.
 #[derive(Clone)]
@@ -274,16 +274,16 @@ impl Access {
     }
 
     fn rules(&self) -> Option<Arc<Rules>> {
-        let tag = self.meta.read(TAG).ok()?;
+        let var = self.meta.read(VAR).ok()?;
         let mut cache = self.cache.lock().unwrap();
-        match (&tag, &*cache) {
+        match (&var, &*cache) {
             (None, _) => return Some(Arc::new(Rules::default())),
             (Some(t), Some((c, r))) if t == c => return Some(Arc::clone(r)),
             _ => {}
         }
-        let (tag, rules) = load(&*self.meta).ok()?;
+        let (var, rules) = load(&*self.meta).ok()?;
         let rules = Arc::new(rules);
-        *cache = tag.map(|t| (t, Arc::clone(&rules)));
+        *cache = var.map(|t| (t, Arc::clone(&rules)));
         Some(rules)
     }
 

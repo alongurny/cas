@@ -1,6 +1,6 @@
 //! The formats this crate reads and writes, identified by the keys of their
 //! format objects (spec/metaformat.md). Aliases such as `dir` are local
-//! names only; blobs and references always carry the id.
+//! names only; blobs and views always carry the id.
 
 use crate::dir::{self, Dir};
 use crate::{Error, Result, malformed};
@@ -13,7 +13,7 @@ pub const METAFORMAT: &str = include_str!("../../spec/metaformat.md");
 
 /// How this crate treats blobs of a format.
 pub enum Kind {
-    /// A directory: named references to other blobs.
+    /// A directory: named views of other blobs.
     Dir(&'static Dir),
     /// A file, with a check that its bytes are valid.
     Leaf(fn(&[u8]) -> std::result::Result<(), String>),

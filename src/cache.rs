@@ -32,7 +32,7 @@ impl CachingStore {
 fn blob_algorithm(key: &str) -> Option<&'static algo::Algorithm> {
     match classify(key)? {
         Parsed::Blob { alg, .. } => algo::lookup(alg),
-        Parsed::Tag => None,
+        Parsed::Var => None,
     }
 }
 

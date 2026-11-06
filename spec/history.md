@@ -12,15 +12,15 @@ a general data format modeled on Uniform's primitive values. A value is a
 string or a map from values to values, and the blob is its canonical
 binary serialization. The same values written as canonical text are a
 different format, `uni-txt` ([formats/uni-txt.md](formats/uni-txt.md)).
-References are strings `<format> <key>`; the format says which fields hold
+Views are strings `<format> <key>`; the format says which fields hold
 them.
 
 ## Naming a history
 
-A history object never changes. The store's mutable values (its tags in
-the core spec, compare-and-set by name) give histories names: the value is
-the text of a reference to the current history object. Recording a version
-writes a new history object and moves the name from the old reference.
+A history object never changes. The store's **variables** (mutable values,
+compare-and-set by name; the core spec calls them tags) give histories names: the value is
+the text of a view of the current history object. Recording a version
+writes a new history object and moves the name from the old view.
 A lost race is a store `conflict`, and the caller retries from the new
 value.
 

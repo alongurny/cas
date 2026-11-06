@@ -2,10 +2,10 @@
 //! ordinary core blobs. The core knows nothing of it.
 //!
 //! Blobs carry no headers. Whoever points at a blob also names how to read
-//! it: a [`Ref`] is a pair (format, key), and a format's id is itself a blob
+//! it: a [`View`] is a pair (format, key), and a format's id is itself a blob
 //! key, that of `format\n` followed by the format's spec text. Directory
-//! formats hold references to their children, so formats nest. A version is
-//! a reference to its root directory. See `spec/version.md`.
+//! formats hold views of their children, so formats nest. A version is
+//! a view of its root directory. See `spec/version.md`.
 
 pub mod access;
 pub mod derived;
@@ -30,27 +30,27 @@ use std::fmt;
 
 /// How to read a blob: the id of its format, and its key.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Ref {
+pub struct View {
     format: String,
     key: String,
 }
 
-impl Ref {
+impl View {
     /// Both parts must be valid blob keys.
-    pub fn new(format: impl Into<String>, key: impl Into<String>) -> Result<Ref> {
+    pub fn new(format: impl Into<String>, key: impl Into<String>) -> Result<View> {
         let (format, key) = (format.into(), key.into());
         for k in [&format, &key] {
             if !is_blob_key(k) {
                 return Err(Error::BadKey(k.clone()));
             }
         }
-        Ok(Ref { format, key })
+        Ok(View { format, key })
     }
 
     /// Parse `<format> <key>`.
-    pub fn parse(s: &str) -> Result<Ref> {
+    pub fn parse(s: &str) -> Result<View> {
         let (f, k) = s.split_once(' ').ok_or_else(|| Error::BadKey(s.to_string()))?;
-        Ref::new(f, k)
+        View::new(f, k)
     }
 
     pub fn format(&self) -> &str {
@@ -71,7 +71,7 @@ impl Ref {
     }
 }
 
-impl fmt::Display for Ref {
+impl fmt::Display for View {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {}", self.format, self.key)
     }
@@ -140,12 +140,12 @@ impl fmt::Display for Path {
 }
 
 /// What a version holds at a path. A directory's contents are separate
-/// paths, so `Dir` carries nothing; any reference whose format is not a
+/// paths, so `Dir` carries nothing; any view whose format is not a
 /// known directory format is a `File`, read with that format.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Node {
     Dir,
-    File(Ref),
+    File(View),
 }
 
 /// One change to apply with [`update`].
@@ -251,14 +251,14 @@ pub fn write_blob(store: &dyn Store, alg: &'static Algorithm, bytes: &[u8]) -> R
     Ok(key)
 }
 
-/// Write `bytes` and return a reference to them in format `alias`, which
+/// Write `bytes` and return a view of them in format `alias`, which
 /// must be a format this crate knows.
-pub fn put(store: &dyn Store, alg: &'static Algorithm, alias: &str, bytes: &[u8]) -> Result<Ref> {
+pub fn put(store: &dyn Store, alg: &'static Algorithm, alias: &str, bytes: &[u8]) -> Result<View> {
     let f = by_alias(alias).ok_or_else(|| Error::UnknownFormat(alias.to_string()))?;
     let key = alg.key(bytes);
     f.check(&key, bytes)?;
     store.write(&key, bytes, &Expect::Absent)?;
-    Ok(Ref { format: f.id().to_string(), key })
+    Ok(View { format: f.id().to_string(), key })
 }
 
 pub(crate) fn malformed(key: &str, reason: impl Into<String>) -> Error {

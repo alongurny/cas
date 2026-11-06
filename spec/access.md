@@ -32,11 +32,11 @@ same way: anything that maps a request to a `who` is an authenticator.
 
 Users and grants live in a store of their own, the meta-store, never in
 the store they govern, so a gate decides from configuration and the op
-alone. The meta-store's tag `policy` holds a reference to a `uni-bin`
+alone. The meta-store's variable `policy` holds a view of a `uni-bin`
 document:
 
-    {'grants': {'*': {'list blobs': {}, 'read blobs': {}, 'read tag:main': {}},
-                'alice': {'write blobs': {}, 'write tag:main': {}}},
+    {'grants': {'*': {'list blobs': {}, 'read blobs': {}, 'read var:main': {}},
+                'alice': {'write blobs': {}, 'write var:main': {}}},
      'users': {'alice': {'token': 'blake3:9f2c...'}}}
 
 - `users` maps a user name (lowercase letters, digits, `-`, `_`) to
@@ -44,12 +44,12 @@ document:
 - `grants` maps a grantee to a set of grants. A grantee is a user name,
   `*` (every caller, signed in or not), or `+` (every signed-in caller).
 
-Changing the policy is a compare-and-set of the `policy` tag, so two
+Changing the policy is a compare-and-set of the `policy` variable, so two
 administrators cannot silently overwrite each other. A server re-reads the
-tag on each request and re-parses the document only when the tag moved, so
+variable on each request and re-parses the document only when the variable moved, so
 changes apply at once, without a restart.
 
-If the tag is absent, nothing is allowed. If the tag or document cannot be
+If the variable is absent, nothing is allowed. If the variable or document cannot be
 read or parsed, everything is denied (fail closed).
 
 ## Grants
@@ -67,7 +67,7 @@ A grant is `<action> <scope>`.
 | --- | --- |
 | `*` | every key |
 | `blobs` | every blob key |
-| `tag:<prefix>` | tags starting with `<prefix>` (`tag:` is every tag) |
+| `var:<prefix>` | variables starting with `<prefix>` (`var:` is every variable) |
 
 An op is allowed when any grant to the caller (by name, `+` or `*`) covers
 it. There are no deny rules; access is the union of grants.
@@ -78,7 +78,7 @@ it, judged from the span bounds alone:
 - `list blobs` covers spans inside one algorithm's range, from `<alg>:` up
   to the first string after all keys starting with it. `has()`, which
   lists a one-key span, needs this grant.
-- `list tag:<p>` covers spans whose `from` starts with `p` and whose `to`
+- `list var:<p>` covers spans whose `from` starts with `p` and whose `to`
   is at most the first string after `p`. A prefix that a blob key could
   share (one that is a prefix of `<alg>:` or starts with it, including the
   empty prefix) never authorizes a list.
@@ -88,14 +88,14 @@ it, judged from the span bounds alone:
 
 Public read, one writer:
 
-    *      read blobs, list blobs, read tag:main
-    alice  write blobs, write tag:main
+    *      read blobs, list blobs, read var:main
+    alice  write blobs, write var:main
 
 A team where everyone signed in can push branches under `team/` and run
-collection (spec/gc.md needs `remove blobs` and `write tag:gc/`):
+collection (spec/gc.md needs `remove blobs` and `write var:gc/`):
 
-    +      read *, list *, write blobs, write tag:team/
-    admin  remove blobs, write tag:gc/
+    +      read *, list *, write blobs, write var:team/
+    admin  remove blobs, write var:gc/
 
 ## Limits
 
@@ -104,5 +104,5 @@ collection (spec/gc.md needs `remove blobs` and `write tag:gc/`):
 - Read access to blobs is all or nothing. A blob is shared by every
   version that contains it, so per-branch read secrecy needs separate
   stores.
-- A reader who may read tags in scope learns the keys they point to; with
+- A reader who may read variables in scope learns the keys they point to; with
   `read blobs` they can then fetch the content.

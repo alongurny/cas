@@ -13,10 +13,10 @@ pub trait Backend: Send + Sync {
     /// Idempotent; durable on return.
     fn remove_blob(&self, key: &str) -> io::Result<()>;
 
-    /// Atomically: if the tag's state equals `expect`, set it to `new`
+    /// Atomically: if the variable's state equals `expect`, set it to `new`
     /// (`None` removes it) and return true; else return false and change
-    /// nothing. Linearizable per tag; durable on return.
-    fn cas_tag(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool>;
+    /// nothing. Linearizable per variable; durable on return.
+    fn cas_var(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool>;
 
     /// Up to `limit` keys in `span`, ascending bytewise.
     fn list(&self, span: &Span, limit: usize) -> io::Result<Vec<String>>;

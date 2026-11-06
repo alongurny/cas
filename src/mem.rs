@@ -33,7 +33,7 @@ impl Backend for MemBackend {
         Ok(())
     }
 
-    fn cas_tag(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool> {
+    fn cas_var(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool> {
         let mut slots = self.slots.lock().unwrap();
         if !expect.matches(slots.get(name.as_bytes()).map(Vec::as_slice)) {
             return Ok(false);

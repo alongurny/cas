@@ -16,4 +16,4 @@ or after it:
 - Separators are exactly `, ` and `: `. There is no other whitespace outside strings.
 
 A value has one `uni-bin` blob and one `uni-txt` blob, with different keys. Converting between
-them is lossless. A reference says which of the two it points to.
+them is lossless. A view says which of the two it points to.

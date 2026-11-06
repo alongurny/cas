@@ -1,4 +1,4 @@
-//! Core of a content-addressed store: opaque byte values in blob and tag
+//! Core of a content-addressed store: opaque byte values in blob and variable
 //! slots, reached through four uniform operations (read, write, remove, list).
 //!
 //! The crate follows the Stage 1 core spec. A [`CoreStore`] validates every op

@@ -16,7 +16,7 @@ absent key means empty).
 
 ## Nodes
 
-A node id is a string: a reference `<format> <key>` to a version, optionally
+A node id is a string: a view `<format> <key>` of a version, optionally
 followed by `#` and a decimal number from 2 up without leading zeros, for a
 version that occurs more than once (`#2` is its second occurrence). The
 version of a node is its id without the suffix. Since a version's key

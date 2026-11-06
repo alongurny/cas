@@ -1,7 +1,7 @@
 # Sync (Stage 7)
 
 Two stores converge using only the core ops. There is no negotiation and no have/want exchange:
-the side doing the sync walks formats from a reference, asks the destination whether it holds
+the side doing the sync walks formats from a view, asks the destination whether it holds
 each key, and writes what is missing. Any store, cache or server can take either role, since
 they all speak the same four ops (the tests run one side over HTTP).
 
@@ -10,14 +10,14 @@ they all speak the same four ops (the tests run one side over HTTP).
 `has(store, key)` lists the one-key span `[key, key + 0x00)`. That answers whether a key is
 present without transferring its value.
 
-## Copying a reference
+## Copying a view
 
 `copy(src, dst, root)` writes everything reachable from `root` that `dst` lacks:
 
 - **Children come from formats.** A directory's children are its entries. A `history`'s are its
   nodes' versions. File formats and unknown formats have none, so their blobs are copied
   without being followed.
-- **Children before parents.** A blob is written only after everything it references. This keeps
+- **Children before parents.** A blob is written only after everything it refers to. This keeps
   the **closure invariant**: if a store holds a blob, it holds everything reachable from it.
 - **Stop at what is there.** Because of the invariant, the walk stops descending at the first blob
   the destination already has. Copying one new node on top of a synced history costs the new blobs

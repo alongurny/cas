@@ -63,7 +63,7 @@ pub fn key_grammar(h: &dyn Harness) {
     assert_eq!(s.read(&long), Err(Error::Invalid(Invalid::Key)));
     // Well formed, but no such algorithm in the registry.
     assert_eq!(refused_reason(s.read("foo:abcd")), "unsupported-algorithm");
-    // Tags may hold ':' after a '/'.
+    // Variables may hold ':' after a '/'.
     let derived = format!("derived/blame/{}", blake3(b"x"));
     s.write(&derived, b"v", &A).unwrap();
     assert_eq!(s.read(&derived).unwrap(), Some(b"v".to_vec()));
@@ -133,8 +133,8 @@ pub fn blob_expect(h: &dyn Harness) {
     assert_eq!(s.read(&k).unwrap(), Some(b"v".to_vec()));
 }
 
-/// Spec 9.6: the tag CAS truth table for write and remove.
-pub fn tag_cas_table(h: &dyn Harness) {
+/// Spec 9.6: the variable CAS truth table for write and remove.
+pub fn var_cas_table(h: &dyn Harness) {
     let currents: [Option<&[u8]>; 2] = [None, Some(b"A")];
     let expects = [A, val(b"A"), val(b"B")];
     for (i, current) in currents.iter().enumerate() {
@@ -225,7 +225,7 @@ pub fn empty_values(h: &dyn Harness) {
 
 /// Spec 9.9: size limits are store policy and refuse with a reason.
 pub fn size_policy(h: &dyn Harness) {
-    let policy = Policy { max_blob_len: Some(4), max_tag_len: Some(2), ..Policy::permissive() };
+    let policy = Policy { max_blob_len: Some(4), max_var_len: Some(2), ..Policy::permissive() };
     let s = h.store(policy, Box::new(AllowAll));
     s.write(&blake3(b"1234"), b"1234", &A).unwrap();
     assert_eq!(refused_reason(s.write(&blake3(b"12345"), b"12345", &A)), "too-large");
@@ -240,15 +240,15 @@ pub fn size_policy(h: &dyn Harness) {
 /// Spec 9.10: list over spans, both kinds, paging.
 pub fn list_spans(h: &dyn Harness) {
     let s = h.store(Policy { list_page: 2, ..Policy::permissive() }, Box::new(AllowAll));
-    let tags = ["a", "refs/heads/main", "refs/heads/x", "refs/tags/v1", "z"];
-    for t in tags {
+    let vars = ["a", "refs/heads/main", "refs/heads/x", "refs/tags/v1", "z"];
+    for t in vars {
         s.write(t, b"v", &A).unwrap();
     }
     let blobs: Vec<String> = (0..3u8).map(|i| blake3(&[i])).collect();
     for (i, b) in blobs.iter().enumerate() {
         s.write(b, &[i as u8], &A).unwrap();
     }
-    let mut everything: Vec<String> = tags.iter().map(|t| t.to_string()).chain(blobs.iter().cloned()).collect();
+    let mut everything: Vec<String> = vars.iter().map(|t| t.to_string()).chain(blobs.iter().cloned()).collect();
     everything.sort();
     assert_eq!(list_all(&*s, &Span::all()).unwrap(), everything);
 
@@ -335,7 +335,7 @@ pub fn model(h: &dyn Harness) {
         Remove(usize, Option<u8>),
         List(usize, usize),
     }
-    // Keys 0..3 are tags, 3..6 blobs of the bytes [0], [1], [2].
+    // Keys 0..3 are variables, 3..6 blobs of the bytes [0], [1], [2].
     fn key(i: usize) -> String {
         if i < 3 { format!("t{i}") } else { blake3(&[(i - 3) as u8]) }
     }
@@ -409,7 +409,7 @@ pub fn model(h: &dyn Harness) {
 macro_rules! conformance_tests {
     ($harness:expr) => {
         $crate::conformance_tests!(@each $harness;
-            key_grammar algorithms hash_mismatch blob_idempotent blob_expect tag_cas_table
+            key_grammar algorithms hash_mismatch blob_idempotent blob_expect var_cas_table
             cas_race empty_values size_policy list_spans outcome_order deny_paths model);
     };
     (@each $harness:expr; $($name:ident)*) => {

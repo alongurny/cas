@@ -5,7 +5,7 @@ use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Error as CoreError, Expect, Policy, Session, Store, Who};
 use cas_version::history::{self, History, NodeId, Step};
 use cas_version::uni::Value;
-use cas_version::{Error, Node, Path, Ref, build, formats, put};
+use cas_version::{Error, Node, Path, View, build, formats, put};
 use proptest::prelude::*;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -97,7 +97,7 @@ fn uni_serialization_examples() {
     assert!(Value::from_text(&"{'': ".repeat(1_000_000)).is_err());
 }
 
-fn version(s: &dyn Store, name: &str) -> Ref {
+fn version(s: &dyn Store, name: &str) -> View {
     let f = put(s, b3(), "raw", name.as_bytes()).unwrap();
     build(s, b3(), formats::by_alias("dir").unwrap(), &BTreeMap::from([(Path::new(name).unwrap(), Node::File(f))]))
         .unwrap()
@@ -112,7 +112,7 @@ fn ok(msg: &str) -> Step {
 }
 
 /// A history given as (node version, [(predecessor, step)]).
-fn hist(nodes: &[(&Ref, &[(&NodeId, Step)])]) -> (History, Vec<NodeId>) {
+fn hist(nodes: &[(&View, &[(&NodeId, Step)])]) -> (History, Vec<NodeId>) {
     let mut h = History::default();
     let mut ids = Vec::new();
     for (v, after) in nodes {

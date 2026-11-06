@@ -96,7 +96,7 @@ pub enum Error {
         reason: String,
         message: Option<String>,
     },
-    /// A tag's current state did not equal `expect`.
+    /// A variable's current state did not equal `expect`.
     Conflict,
     /// Transient failure. For write and remove the outcome is unknown.
     Unavailable(String),

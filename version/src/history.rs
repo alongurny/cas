@@ -4,7 +4,7 @@
 //! store name (a mutable, compare-and-set value) points at the current one.
 
 use crate::uni::Value;
-use crate::{Error, Ref, Result, by_alias, malformed, read_blob, write_blob};
+use crate::{Error, Result, View, by_alias, malformed, read_blob, write_blob};
 use cas_core::algo::Algorithm;
 use cas_core::{Error as CoreError, Expect, Store};
 use std::collections::{BTreeMap, BTreeSet};
@@ -20,7 +20,7 @@ impl NodeId {
             Some((v, n)) => (v, Some(n)),
             None => (s, None),
         };
-        Ref::parse(v).map_err(|_| format!("node id {s:?}: not a reference"))?;
+        View::parse(v).map_err(|_| format!("node id {s:?}: not a view"))?;
         if let Some(n) = n
             && (n.starts_with('0')
                 || n.parse::<u64>().map_or(true, |n| n < 2)
@@ -31,12 +31,12 @@ impl NodeId {
         Ok(NodeId(s.to_string()))
     }
 
-    pub fn of(version: &Ref) -> NodeId {
+    pub fn of(version: &View) -> NodeId {
         NodeId(version.to_string())
     }
 
-    pub fn version(&self) -> Ref {
-        Ref::parse(self.0.rsplit_once('#').map_or(&self.0[..], |(v, _)| v)).unwrap()
+    pub fn version(&self) -> View {
+        View::parse(self.0.rsplit_once('#').map_or(&self.0[..], |(v, _)| v)).unwrap()
     }
 
     pub fn as_str(&self) -> &str {
@@ -267,9 +267,9 @@ impl History {
         old.nodes.iter().all(|(id, n)| self.nodes.get(id).is_some_and(|m| m.after == n.after))
     }
 
-    /// A fresh id for `version`: the plain reference, or `#n` for its n-th
+    /// A fresh id for `version`: the plain view, or `#n` for its n-th
     /// occurrence.
-    pub fn new_id(&self, version: &Ref) -> NodeId {
+    pub fn new_id(&self, version: &View) -> NodeId {
         let base = NodeId::of(version);
         if !self.nodes.contains_key(&base) {
             return base;
@@ -278,7 +278,7 @@ impl History {
     }
 
     /// Add `version` after `after` (each with its step), returning its id.
-    pub fn add(&mut self, version: &Ref, after: BTreeMap<NodeId, Step>, doc: Option<String>) -> Result<NodeId> {
+    pub fn add(&mut self, version: &View, after: BTreeMap<NodeId, Step>, doc: Option<String>) -> Result<NodeId> {
         if let Some(p) = after.keys().find(|p| !self.nodes.contains_key(*p)) {
             return Err(Error::Missing(format!("node {p}")));
         }
@@ -289,7 +289,7 @@ impl History {
 
     /// Add `version` after the single tip (or as the first node), with
     /// `step` from it.
-    pub fn append(&mut self, version: &Ref, step: Step, doc: Option<String>) -> Result<NodeId> {
+    pub fn append(&mut self, version: &View, step: Step, doc: Option<String>) -> Result<NodeId> {
         let after = match (self.nodes.is_empty(), self.tip()) {
             (true, _) => BTreeMap::new(),
             (false, Some(t)) => BTreeMap::from([(t, step)]),
@@ -319,12 +319,12 @@ pub(crate) fn check(bytes: &[u8]) -> std::result::Result<(), String> {
     History::from_value(&Value::deserialize(bytes)?).map(|_| ())
 }
 
-pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<Ref> {
+pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<View> {
     let key = write_blob(store, alg, &h.to_value().serialize())?;
-    Ok(Ref { format: history_format().to_string(), key })
+    Ok(View { format: history_format().to_string(), key })
 }
 
-pub fn read(store: &dyn Store, r: &Ref) -> Result<History> {
+pub fn read(store: &dyn Store, r: &View) -> Result<History> {
     if r.format() != history_format() {
         return Err(Error::UnknownFormat(format!("{} is not the history format", r.format())));
     }
@@ -334,19 +334,19 @@ pub fn read(store: &dyn Store, r: &Ref) -> Result<History> {
 }
 
 /// The history object `name` points at, if `name` is set.
-pub fn head(store: &dyn Store, name: &str) -> Result<Option<Ref>> {
+pub fn head(store: &dyn Store, name: &str) -> Result<Option<View>> {
     match store.read(name)? {
         None => Ok(None),
         Some(v) => {
             let s = String::from_utf8(v).map_err(|_| malformed(name, "value is not UTF-8"))?;
-            Ref::parse(&s).map(Some).map_err(|_| malformed(name, "value is not a reference"))
+            View::parse(&s).map(Some).map_err(|_| malformed(name, "value is not a view"))
         }
     }
 }
 
-/// The history `name` holds (empty if unset) and the reference it was read
+/// The history `name` holds (empty if unset) and the view it was read
 /// from, for [`save`].
-pub fn load(store: &dyn Store, name: &str) -> Result<(Option<Ref>, History)> {
+pub fn load(store: &dyn Store, name: &str) -> Result<(Option<View>, History)> {
     match head(store, name)? {
         None => Ok((None, History::default())),
         Some(r) => Ok((Some(r.clone()), read(store, &r)?)),
@@ -354,7 +354,7 @@ pub fn load(store: &dyn Store, name: &str) -> Result<(Option<Ref>, History)> {
 }
 
 /// Write `h` and move `name` to it, only if `name` still holds `old`.
-pub fn save(store: &dyn Store, alg: &'static Algorithm, name: &str, old: Option<&Ref>, h: &History) -> Result<Ref> {
+pub fn save(store: &dyn Store, alg: &'static Algorithm, name: &str, old: Option<&View>, h: &History) -> Result<View> {
     let new = write(store, alg, h)?;
     let expect = old.map_or(Expect::Absent, |r| Expect::Value(r.to_string().into_bytes()));
     if old != Some(&new) {
@@ -369,7 +369,7 @@ pub fn record<T>(
     alg: &'static Algorithm,
     name: &str,
     mut f: impl FnMut(&mut History) -> Result<T>,
-) -> Result<(Ref, T)> {
+) -> Result<(View, T)> {
     loop {
         let (old, mut h) = load(store, name)?;
         let out = f(&mut h)?;
@@ -385,7 +385,7 @@ pub fn commit(
     store: &dyn Store,
     alg: &'static Algorithm,
     name: &str,
-    version: &Ref,
+    version: &View,
     step: Step,
     doc: Option<String>,
 ) -> Result<NodeId> {

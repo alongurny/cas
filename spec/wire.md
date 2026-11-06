@@ -24,7 +24,7 @@ bytes. Bytes that do not decode to UTF-8 are `invalid` (`key`).
 
 ## Expect frame
 
-`write` and `remove` carry `expect` in the request body, so tag values of any
+`write` and `remove` carry `expect` in the request body, so variable values of any
 size fit:
 
 | Bytes | Meaning |
@@ -75,7 +75,7 @@ answers 413 to a larger one without buffering it. A client reports it as
   bytes never change, but reads are gated, so only caches that run the same
   gate (a CAS cache, the client itself) may keep them. `private` keeps shared
   HTTP caches out.
-- A tag read and every `absent`: `Cache-Control: no-store`. Caches forward tag
+- A variable read and every `absent`: `Cache-Control: no-store`. Caches forward variable
   reads (spec section 7).
 - `list`: `Cache-Control: no-store`.
 
@@ -86,6 +86,6 @@ gate as upstream for the caller it serves:
 
 - `read` of a blob: gate, then answer from the local copy if there is one;
   otherwise forward, verify the bytes hash to the key, keep a copy, return.
-- `read` of a tag, `write`, `remove`, `list`: gate, then forward and return the
+- `read` of a variable, `write`, `remove`, `list`: gate, then forward and return the
   upstream outcome unchanged. A successful blob write also fills the local
   copy; a successful blob remove drops it.

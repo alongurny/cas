@@ -2,7 +2,7 @@
 //! as a version, and check out a version, or only the part under a prefix.
 
 use crate::formats::{Format, git_blob_contents};
-use crate::{Error, Node, Path, Ref, Result, build, put, read_blob, walk};
+use crate::{Error, Node, Path, Result, View, build, put, read_blob, walk};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
 use std::collections::BTreeMap;
@@ -15,7 +15,7 @@ use std::path::Path as FsPath;
 /// Write every file under `dir` as a blob (`raw`, `exec` or `symlink`) and
 /// build a version of them, keeping empty directories. Directories are in
 /// `format`. Names must be valid UTF-8 path names.
-pub fn import(store: &dyn Store, alg: &'static Algorithm, format: &'static Format, dir: &FsPath) -> Result<Ref> {
+pub fn import(store: &dyn Store, alg: &'static Algorithm, format: &'static Format, dir: &FsPath) -> Result<View> {
     let mut entries = BTreeMap::new();
     scan(store, alg, dir, None, &mut entries)?;
     build(store, alg, format, &entries)
@@ -55,7 +55,7 @@ fn scan(
 /// Write what is at or under `prefix` (all for `None`) into `dest`, which
 /// should be empty. Files must be in `raw`, `exec`, `symlink` or
 /// `git-blob`. Returns how many paths were written.
-pub fn checkout(store: &dyn Store, root: &Ref, prefix: Option<&Path>, dest: &FsPath) -> Result<usize> {
+pub fn checkout(store: &dyn Store, root: &View, prefix: Option<&Path>, dest: &FsPath) -> Result<usize> {
     let mut n = 0;
     for item in walk(store, root, prefix) {
         let (path, node) = item?;

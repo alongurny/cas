@@ -3,7 +3,7 @@
 //! Work follows the two diffs from the base, not the size of the tree.
 
 use crate::history::{History, NodeId, Step};
-use crate::{Change, Edit, Error, Node, Path, Ref, Result, by_alias, diff, put, read_blob, update};
+use crate::{Change, Edit, Error, Node, Path, Result, View, by_alias, diff, put, read_blob, update};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,12 +19,12 @@ pub struct Conflict {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Merged {
-    pub version: Ref,
+    pub version: View,
     /// Empty when the merge is clean.
     pub conflicts: Vec<Conflict>,
 }
 
-fn changes(store: &dyn Store, a: &Ref, b: &Ref) -> Result<BTreeMap<Path, Change>> {
+fn changes(store: &dyn Store, a: &View, b: &View) -> Result<BTreeMap<Path, Change>> {
     Ok(diff(store, a, b, None)?.into_iter().map(|c| (c.path.clone(), c)).collect())
 }
 
@@ -36,9 +36,9 @@ fn ancestors(p: &Path) -> impl Iterator<Item = Path> {
 pub fn merge_versions(
     store: &dyn Store,
     alg: &'static Algorithm,
-    base: &Ref,
-    ours: &Ref,
-    theirs: &Ref,
+    base: &View,
+    ours: &View,
+    theirs: &View,
 ) -> Result<Merged> {
     let mine = changes(store, base, ours)?;
     let other = changes(store, base, theirs)?;
@@ -88,12 +88,18 @@ pub fn merge_versions(
 
 /// Line-level three-way merge of text files in the same format (`raw` or
 /// `exec`). `None` when they are not text or their edits overlap.
-fn merge_text(store: &dyn Store, alg: &'static Algorithm, base: &Ref, ours: &Ref, theirs: &Ref) -> Result<Option<Ref>> {
+fn merge_text(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    base: &View,
+    ours: &View,
+    theirs: &View,
+) -> Result<Option<View>> {
     let format = ours.known_format().map(|f| f.alias);
     if !matches!(format, Some("raw" | "exec")) || base.format() != ours.format() || theirs.format() != ours.format() {
         return Ok(None);
     }
-    let read = |r: &Ref| -> Result<Option<String>> { Ok(String::from_utf8(read_blob(store, r.key())?).ok()) };
+    let read = |r: &View| -> Result<Option<String>> { Ok(String::from_utf8(read_blob(store, r.key())?).ok()) };
     let (Some(b), Some(o), Some(t)) = (read(base)?, read(ours)?, read(theirs)?) else { return Ok(None) };
     match diff3(&lines(&b), &lines(&o), &lines(&t)) {
         Some(merged) => Ok(Some(put(store, alg, format.unwrap(), merged.concat().as_bytes())?)),
@@ -172,7 +178,7 @@ fn base_version(
     h: &History,
     a: &NodeId,
     b: &NodeId,
-) -> Result<Option<Ref>> {
+) -> Result<Option<View>> {
     let bases: Vec<NodeId> = h.merge_bases(a, b).into_iter().collect();
     let Some((first, rest)) = bases.split_first() else { return Ok(None) };
     let mut acc = first.clone();
@@ -188,7 +194,7 @@ fn base_version(
     Ok(Some(version))
 }
 
-fn empty_dir(store: &dyn Store, alg: &'static Algorithm) -> Result<Ref> {
+fn empty_dir(store: &dyn Store, alg: &'static Algorithm) -> Result<View> {
     crate::build(store, alg, by_alias("dir").unwrap(), &BTreeMap::new())
 }
 

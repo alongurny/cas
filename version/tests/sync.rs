@@ -7,7 +7,7 @@ use cas_core::server::Server;
 use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Span, Store, Who};
 use cas_version::history::Step;
 use cas_version::sync::{self, Copied, Outcome};
-use cas_version::{Edit, Error, Node, Path, Ref, build, diff, formats, history, put, update, walk};
+use cas_version::{Edit, Error, Node, Path, View, build, diff, formats, history, put, update, walk};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,7 +53,7 @@ impl Store for Flaky {
     }
 }
 
-fn big(s: &dyn Store) -> Ref {
+fn big(s: &dyn Store) -> View {
     let mut m = BTreeMap::new();
     for i in 0..10 {
         m.insert(Path::new(format!("d{i}")).unwrap(), Node::Dir);
@@ -65,7 +65,7 @@ fn big(s: &dyn Store) -> Ref {
     build(s, b3(), formats::by_alias("dir").unwrap(), &m).unwrap()
 }
 
-fn same_tree(a: &dyn Store, b: &dyn Store, root: &Ref) {
+fn same_tree(a: &dyn Store, b: &dyn Store, root: &View) {
     let x: Vec<_> = walk(a, root, None).map(|r| r.unwrap()).collect();
     let y: Vec<_> = walk(b, root, None).map(|r| r.unwrap()).collect();
     assert_eq!(x, y);
@@ -76,7 +76,7 @@ fn same_tree(a: &dyn Store, b: &dyn Store, root: &Ref) {
     }
 }
 
-fn edit(s: &dyn Store, root: &Ref, path: &str, text: &str) -> Ref {
+fn edit(s: &dyn Store, root: &View, path: &str, text: &str) -> View {
     let f = put(s, b3(), "raw", text.as_bytes()).unwrap();
     update(s, b3(), root, &BTreeMap::from([(Path::new(path).unwrap(), Edit::Set(Node::File(f)))])).unwrap()
 }

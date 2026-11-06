@@ -1,13 +1,13 @@
 //! The `dir` format (spec/formats/dir.md): lines of `<format> <key> <name>`,
 //! names strictly ascending. The empty blob is the empty directory.
 
-use crate::{Ref, Result, is_blob_key, malformed, valid_name};
+use crate::{Result, View, is_blob_key, malformed, valid_name};
 
 /// One entry of a directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
     pub name: String,
-    pub child: Ref,
+    pub child: View,
 }
 
 pub struct Dir;
@@ -34,7 +34,7 @@ impl Dir {
                 return Err(malformed(key, format!("bad line {line:?}")));
             };
             if !is_blob_key(f) || !is_blob_key(k) {
-                return Err(malformed(key, format!("bad reference {f:?} {k:?}")));
+                return Err(malformed(key, format!("bad view {f:?} {k:?}")));
             }
             if !valid_name(name) {
                 return Err(malformed(key, format!("bad name {name:?}")));
@@ -42,7 +42,7 @@ impl Dir {
             if items.last().is_some_and(|prev| prev.name.as_str() >= name) {
                 return Err(malformed(key, format!("{name:?} out of order")));
             }
-            items.push(Item { name: name.to_string(), child: Ref { format: f.to_string(), key: k.to_string() } });
+            items.push(Item { name: name.to_string(), child: View { format: f.to_string(), key: k.to_string() } });
         }
         Ok(items)
     }

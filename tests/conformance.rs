@@ -123,7 +123,7 @@ fn counted(corrupt: bool) -> Arc<Upstream> {
 }
 
 #[test]
-fn cache_answers_blob_reads_and_forwards_tag_reads() {
+fn cache_answers_blob_reads_and_forwards_var_reads() {
     let up = counted(false);
     let k = cas_core::algo::lookup("blake3").unwrap().key(b"v");
     up.inner.write(&k, b"v", &Expect::Absent).unwrap();
@@ -137,7 +137,7 @@ fn cache_answers_blob_reads_and_forwards_tag_reads() {
 
     assert_eq!(cache.read("main").unwrap(), Some(b"1".to_vec()));
     up.inner.write("main", b"2", &Expect::Value(b"1".to_vec())).unwrap();
-    assert_eq!(cache.read("main").unwrap(), Some(b"2".to_vec()), "tag reads are never stale");
+    assert_eq!(cache.read("main").unwrap(), Some(b"2".to_vec()), "variable reads are never stale");
 }
 
 #[test]

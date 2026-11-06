@@ -4,7 +4,7 @@
 
 use crate::dir::Item;
 use crate::formats::{Format, Kind};
-use crate::{Change, Edit, Error, Node, Path, Ref, Result, read_blob, write_blob};
+use crate::{Change, Edit, Error, Node, Path, Result, View, read_blob, write_blob};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
 use std::cmp::Ordering;
@@ -13,20 +13,26 @@ use std::collections::BTreeMap;
 /// Entries in canonical order.
 pub type Walk<'s> = Box<dyn Iterator<Item = Result<(Path, Node)>> + 's>;
 
-fn dir_format(r: &Ref) -> Result<&'static Format> {
+fn dir_format(r: &View) -> Result<&'static Format> {
     match r.known_format() {
         Some(f @ Format { kind: Kind::Dir(_), .. }) => Ok(f),
         _ => Err(Error::UnknownFormat(format!("{} is not a directory format", r.format()))),
     }
 }
 
-pub(crate) fn load(store: &dyn Store, r: &Ref) -> Result<Vec<Item>> {
+pub(crate) fn load(store: &dyn Store, r: &View) -> Result<Vec<Item>> {
     let Kind::Dir(d) = &dir_format(r)?.kind else { unreachable!() };
     d.decode(r.key(), &read_blob(store, r.key())?)
 }
 
 /// Write a directory in `format` unless it is `old` already.
-fn put(store: &dyn Store, alg: &'static Algorithm, format: &Format, items: &[Item], old: Option<&Ref>) -> Result<Ref> {
+fn put(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    format: &Format,
+    items: &[Item],
+    old: Option<&View>,
+) -> Result<View> {
     let Kind::Dir(d) = &format.kind else { unreachable!() };
     let bytes = d.encode(items);
     if let Some(old) = old
@@ -35,7 +41,7 @@ fn put(store: &dyn Store, alg: &'static Algorithm, format: &Format, items: &[Ite
     {
         return Ok(old.clone());
     }
-    Ok(Ref { format: format.id().to_string(), key: write_blob(store, alg, &bytes)? })
+    Ok(View { format: format.id().to_string(), key: write_blob(store, alg, &bytes)? })
 }
 
 type Group<'e, T> = Vec<(&'e [&'e str], &'e T)>;
@@ -66,7 +72,7 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
-    fn build_dir(&self, format: &Format, dir: Option<&Path>, pairs: &[(&[&str], &Node)]) -> Result<Ref> {
+    fn build_dir(&self, format: &Format, dir: Option<&Path>, pairs: &[(&[&str], &Node)]) -> Result<View> {
         let mut items = Vec::new();
         for (name, group) in groups(&owned(pairs)) {
             let path = Path::child(dir, name);
@@ -88,9 +94,9 @@ impl Writer<'_> {
         &self,
         format: &'static Format,
         dir: Option<&Path>,
-        node: Option<&Ref>,
+        node: Option<&View>,
         edits: &[(&[&str], &Edit)],
-    ) -> Result<Ref> {
+    ) -> Result<View> {
         let (format, mut items) = match node {
             Some(r) => (dir_format(r)?, load(self.store, r)?),
             None => (format, Vec::new()),
@@ -110,7 +116,7 @@ impl Writer<'_> {
                     cur = Some(r.clone());
                     deeper.clear();
                 }
-                Some(Edit::Set(Node::Dir)) if !cur.as_ref().is_some_and(Ref::is_dir) => {
+                Some(Edit::Set(Node::Dir)) if !cur.as_ref().is_some_and(View::is_dir) => {
                     cur = None;
                     make_dir = true;
                 }
@@ -144,7 +150,7 @@ pub fn build(
     alg: &'static Algorithm,
     format: &'static Format,
     entries: &BTreeMap<Path, Node>,
-) -> Result<Ref> {
+) -> Result<View> {
     if !matches!(format.kind, Kind::Dir(_)) {
         return Err(Error::UnknownFormat(format!("{} is not a directory format", format.alias)));
     }
@@ -155,7 +161,7 @@ pub fn build(
 
 /// Apply `edits` to the version at `root`: all removes, then all sets in
 /// canonical order. New directories take the format of their parent.
-pub fn update(store: &dyn Store, alg: &'static Algorithm, root: &Ref, edits: &BTreeMap<Path, Edit>) -> Result<Ref> {
+pub fn update(store: &dyn Store, alg: &'static Algorithm, root: &View, edits: &BTreeMap<Path, Edit>) -> Result<View> {
     let format = dir_format(root)?;
     let owned = split(edits);
     let pairs: Vec<(&[&str], &Edit)> = owned.iter().map(|(n, e)| (n.as_slice(), *e)).collect();
@@ -165,12 +171,12 @@ pub fn update(store: &dyn Store, alg: &'static Algorithm, root: &Ref, edits: &BT
 /// What a version holds at a path.
 enum At {
     Nothing,
-    File(Ref),
-    Dir(Ref),
+    File(View),
+    Dir(View),
 }
 
 impl At {
-    fn of(r: Ref) -> At {
+    fn of(r: View) -> At {
         if r.is_dir() { At::Dir(r) } else { At::File(r) }
     }
 
@@ -183,7 +189,7 @@ impl At {
     }
 }
 
-fn resolve(store: &dyn Store, root: &Ref, path: Option<&Path>) -> Result<At> {
+fn resolve(store: &dyn Store, root: &View, path: Option<&Path>) -> Result<At> {
     dir_format(root)?;
     let Some(path) = path else { return Ok(At::Dir(root.clone())) };
     let mut at = At::Dir(root.clone());
@@ -198,15 +204,15 @@ fn resolve(store: &dyn Store, root: &Ref, path: Option<&Path>) -> Result<At> {
     Ok(at)
 }
 
-/// The object at `path`: a file's reference or a directory's own.
-pub fn object_at(store: &dyn Store, root: &Ref, path: &Path) -> Result<Option<Ref>> {
+/// The object at `path`: a file's view or a directory's own.
+pub fn object_at(store: &dyn Store, root: &View, path: &Path) -> Result<Option<View>> {
     Ok(match resolve(store, root, Some(path))? {
         At::Nothing => None,
         At::File(r) | At::Dir(r) => Some(r),
     })
 }
 
-pub fn lookup(store: &dyn Store, root: &Ref, path: &Path) -> Result<Option<Node>> {
+pub fn lookup(store: &dyn Store, root: &View, path: &Path) -> Result<Option<Node>> {
     Ok(resolve(store, root, Some(path))?.node())
 }
 
@@ -214,12 +220,12 @@ pub fn lookup(store: &dyn Store, root: &Ref, path: &Path) -> Result<Option<Node>
 struct TreeWalk<'s> {
     store: &'s dyn Store,
     stack: Vec<(Option<Path>, std::vec::IntoIter<Item>)>,
-    pending: Option<(Option<Path>, Ref)>,
+    pending: Option<(Option<Path>, View)>,
     failed: bool,
 }
 
 impl<'s> TreeWalk<'s> {
-    fn new(store: &'s dyn Store, dir: Option<Path>, r: Ref) -> TreeWalk<'s> {
+    fn new(store: &'s dyn Store, dir: Option<Path>, r: View) -> TreeWalk<'s> {
         TreeWalk { store, stack: Vec::new(), pending: Some((dir, r)), failed: false }
     }
 }
@@ -261,7 +267,7 @@ impl Iterator for TreeWalk<'_> {
 
 /// What is at or under `prefix` (all of the version for `None`), in
 /// canonical order, reading only the directories it returns.
-pub fn walk<'s>(store: &'s dyn Store, root: &Ref, prefix: Option<&Path>) -> Walk<'s> {
+pub fn walk<'s>(store: &'s dyn Store, root: &View, prefix: Option<&Path>) -> Walk<'s> {
     let at = match resolve(store, root, prefix) {
         Ok(at) => at,
         Err(e) => return Box::new(std::iter::once(Err(e))),
@@ -273,7 +279,7 @@ pub fn walk<'s>(store: &'s dyn Store, root: &Ref, prefix: Option<&Path>) -> Walk
     }
 }
 
-fn all_under(store: &dyn Store, path: &Path, r: Ref, old: bool, out: &mut Vec<Change>) -> Result<()> {
+fn all_under(store: &dyn Store, path: &Path, r: View, old: bool, out: &mut Vec<Change>) -> Result<()> {
     for item in TreeWalk::new(store, Some(path.clone()), r) {
         let (path, node) = item?;
         let (o, n) = if old { (Some(node), None) } else { (None, Some(node)) };
@@ -324,8 +330,8 @@ fn diff_at(store: &dyn Store, path: Option<&Path>, a: At, b: At, out: &mut Vec<C
 }
 
 /// Differences at or under `prefix`, in canonical order. Descends only into
-/// directories whose references differ.
-pub fn diff(store: &dyn Store, a: &Ref, b: &Ref, prefix: Option<&Path>) -> Result<Vec<Change>> {
+/// directories whose views differ.
+pub fn diff(store: &dyn Store, a: &View, b: &View, prefix: Option<&Path>) -> Result<Vec<Change>> {
     let mut out = Vec::new();
     diff_at(store, prefix, resolve(store, a, prefix)?, resolve(store, b, prefix)?, &mut out)?;
     Ok(out)

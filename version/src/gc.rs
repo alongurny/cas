@@ -1,20 +1,20 @@
 //! Reachability, garbage collection and purging (spec/gc.md).
 //!
-//! The core cannot know what references what, so reachability is computed
-//! here by format walkers, from roots that are tags. Collection is two
+//! The core cannot know what refers to what, so reachability is computed
+//! here by format walkers, from roots that are variables. Collection is two
 //! phase: a blob is removed only when two runs in a row found it
 //! unreachable, so a writer has until the next run to link what it wrote.
 
 use crate::formats::{self, METAFORMAT};
 use crate::sync::children;
 use crate::uni::Value;
-use crate::{Ref, Result, by_alias, is_blob_key, write_blob};
+use crate::{Result, View, by_alias, is_blob_key, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::key::{Parsed, classify};
 use cas_core::{Expect, Span, Store, list_all};
 use std::collections::BTreeSet;
 
-/// The tag holding the blobs the previous run found unreachable.
+/// The variable holding the blobs the previous run found unreachable.
 pub const PENDING: &str = "gc/pending";
 
 fn blake3() -> &'static Algorithm {
@@ -48,14 +48,14 @@ fn spec_of(store: &dyn Store, key: &str) -> Result<Option<String>> {
         .map(String::from))
 }
 
-/// Every blob reachable from the tags in `store`.
+/// Every blob reachable from the variables in `store`.
 pub fn mark(store: &dyn Store) -> Result<BTreeSet<String>> {
     let keys = list_all(store, &Span::all())?;
     let mut marked = BTreeSet::new();
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
-    let mut todo: Vec<Ref> = Vec::new();
+    let mut todo: Vec<View> = Vec::new();
     for k in &keys {
-        if !matches!(classify(k), Some(Parsed::Tag)) {
+        if !matches!(classify(k), Some(Parsed::Var)) {
             continue;
         }
         // A function's object stays alive while its results are cached.
@@ -63,7 +63,7 @@ pub fn mark(store: &dyn Store) -> Result<BTreeSet<String>> {
             raw.push(f.to_string());
         }
         if let Some(v) = store.read(k)?
-            && let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| Ref::parse(s).ok())
+            && let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok())
         {
             todo.push(r);
         }
@@ -106,7 +106,7 @@ fn pending(store: &dyn Store) -> Result<(Option<Vec<u8>>, BTreeSet<String>)> {
     };
     let set = std::str::from_utf8(&v)
         .ok()
-        .and_then(|s| Ref::parse(s).ok())
+        .and_then(|s| View::parse(s).ok())
         .and_then(|r| store.read(r.key()).ok().flatten())
         .and_then(|b| Value::deserialize(&b).ok())
         .and_then(|v| v.as_map().map(|m| m.keys().filter_map(Value::as_str).map(String::from).collect()))
@@ -117,7 +117,7 @@ fn pending(store: &dyn Store) -> Result<(Option<Vec<u8>>, BTreeSet<String>)> {
 /// One collection run: mark, remove what was unreachable this run and the
 /// previous one, and record the rest as pending for the next.
 pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
-    let (old_tag, old) = pending(store)?;
+    let (old_var, old) = pending(store)?;
     let marked = mark(store)?;
     let blobs: Vec<String> = list_all(store, &Span::all())?
         .into_iter()
@@ -132,8 +132,8 @@ pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
     let next: BTreeSet<&String> = unreachable.iter().filter(|k| !old.contains(*k)).collect();
     let set = Value::Map(next.iter().map(|k| (Value::str(k.as_str()), Value::empty())).collect());
     let key = write_blob(store, alg, &set.serialize())?;
-    let r = Ref { format: by_alias("uni-bin").unwrap().id().to_string(), key };
-    let expect = old_tag.map_or(Expect::Absent, Expect::Value);
+    let r = View { format: by_alias("uni-bin").unwrap().id().to_string(), key };
+    let expect = old_var.map_or(Expect::Absent, Expect::Value);
     store.write(PENDING, r.to_string().as_bytes(), &expect)?;
     Ok(Report { reachable: marked.len(), unreachable: unreachable.len(), removed })
 }

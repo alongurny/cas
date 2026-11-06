@@ -9,7 +9,7 @@ pub struct Policy {
     pub algorithms: BTreeSet<String>,
     pub max_key_len: Option<usize>,
     pub max_blob_len: Option<usize>,
-    pub max_tag_len: Option<usize>,
+    pub max_var_len: Option<usize>,
     /// Most keys returned in one `list` answer. Paging is an implementation
     /// detail; callers follow `ListPage::rest`.
     pub list_page: usize,
@@ -22,7 +22,7 @@ impl Policy {
             algorithms: crate::algo::REGISTRY.iter().map(|a| a.name.to_string()).collect(),
             max_key_len: None,
             max_blob_len: None,
-            max_tag_len: None,
+            max_var_len: None,
             list_page: 1000,
         }
     }

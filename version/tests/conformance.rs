@@ -5,7 +5,7 @@ use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Session, Span, Store, Who};
 use cas_version::formats::{self, Format, METAFORMAT, git_blob};
-use cas_version::{Change, Edit, Error, Node, Path, Ref, build, diff, fs, lookup, merge_diff, put, update, walk};
+use cas_version::{Change, Edit, Error, Node, Path, View, build, diff, fs, lookup, merge_diff, put, update, walk};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -62,10 +62,10 @@ fn path_strategy() -> impl Strategy<Value = Path> {
     prop::collection::vec(prop::sample::select(NAMES), 1..4).prop_map(|n| Path::new(n.join("/")).unwrap())
 }
 
-/// A file reference in one of the leaf formats (contents are not read).
+/// A file view in one of the leaf formats (contents are not read).
 fn file(c: u8, alias: &str) -> Node {
     let f = formats::by_alias(alias).unwrap();
-    Node::File(Ref::new(f.id(), b3().key(&[c])).unwrap())
+    Node::File(View::new(f.id(), b3().key(&[c])).unwrap())
 }
 
 fn node_strategy() -> impl Strategy<Value = Node> {
@@ -145,7 +145,7 @@ fn model_diff(a: &Map, b: &Map, prefix: Option<&Path>) -> Vec<Change> {
         .collect()
 }
 
-fn walked(s: &dyn Store, root: &Ref, prefix: Option<&Path>) -> Vec<(Path, Node)> {
+fn walked(s: &dyn Store, root: &View, prefix: Option<&Path>) -> Vec<(Path, Node)> {
     walk(s, root, prefix).map(|r| r.unwrap()).collect()
 }
 
@@ -305,7 +305,7 @@ fn dir_encoding_is_readable_and_canonical() {
     for text in bad {
         let key = b3().key(text.as_bytes());
         s.write(&key, text.as_bytes(), &Expect::Absent).unwrap();
-        let r = Ref::new(dir().id(), key).unwrap();
+        let r = View::new(dir().id(), key).unwrap();
         assert!(matches!(lookup(&s, &r, &Path::new("a").unwrap()), Err(Error::Malformed { .. })), "{text:?}");
         assert!(dir().check(r.key(), text.as_bytes()).is_err());
     }
@@ -333,7 +333,7 @@ fn format_ids_follow_the_metaformat() {
 #[test]
 fn unknown_formats_are_opaque_files() {
     let s = store();
-    let stranger = Ref::new(b3().key(b"some format object"), b3().key(b"x")).unwrap();
+    let stranger = View::new(b3().key(b"some format object"), b3().key(b"x")).unwrap();
     let m = closed(vec![(Path::new("doc.pdf").unwrap(), Node::File(stranger.clone()))]);
     let root = build(&s, b3(), dir(), &m).unwrap();
     assert_eq!(walked(&s, &root, None), as_vec(&m));
@@ -347,13 +347,13 @@ fn unknown_formats_are_opaque_files() {
 #[test]
 fn bad_input() {
     let s = store();
-    let missing = Ref::new(dir().id(), b3().key(b"absent")).unwrap();
+    let missing = View::new(dir().id(), b3().key(b"absent")).unwrap();
     assert_eq!(lookup(&s, &missing, &Path::new("a").unwrap()), Err(Error::Missing(missing.key().into())));
     for bad in ["", "/a", "a/", "a//b", ".", "a/../b", "a\nb"] {
         assert!(Path::new(bad).is_err(), "{bad:?}");
     }
-    assert!(Ref::new("raw", b3().key(b"x")).is_err());
-    assert!(Ref::parse(&format!("{} {}", dir().id(), b3().key(b""))).is_ok());
+    assert!(View::new("raw", b3().key(b"x")).is_err());
+    assert!(View::parse(&format!("{} {}", dir().id(), b3().key(b""))).is_ok());
     assert!(matches!(put(&s, b3(), "symlink", b""), Err(Error::Malformed { .. })));
     assert!(matches!(put(&s, b3(), "git-blob", b"blob 3\0ab"), Err(Error::Malformed { .. })));
     assert!(matches!(put(&s, b3(), "git-blob", b"blob 02\0ab"), Err(Error::Malformed { .. })));

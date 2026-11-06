@@ -19,19 +19,19 @@ to check it.
 
 ## Results
 
-The result of function F over input X is an ordinary blob. The tag
+The result of function F over input X is an ordinary blob. The variable
 
     derived/F/X
 
-where F is the function id and X is the input's key, holds the text of a reference to it.
+where F is the function id and X is the input's key, holds the text of a view of it.
 `derive(F, X)`:
 
-1. reads the tag and returns the reference if it is set;
-2. otherwise computes the result, writes it, and creates the tag with expect-absent;
-3. if the tag was created meanwhile (`conflict`), returns that result instead. Functions are
+1. reads the variable and returns the view if it is set;
+2. otherwise computes the result, writes it, and creates the variable with expect-absent;
+3. if the variable was created meanwhile (`conflict`), returns that result instead. Functions are
    deterministic, so both are the same value.
 
-The tag is an ordinary tag; there is no write-once mechanism. Computation can be eager (after a
+The variable is an ordinary variable; there is no write-once mechanism. Computation can be eager (after a
 commit) or lazy (on first use). Results never change the inputs they describe.
 
 A function may derive from other derived results. `summary` sums its subdirectories' summaries, so

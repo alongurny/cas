@@ -15,7 +15,7 @@ use cas_version::derived::{self, SUMMARY};
 use cas_version::history::{self, History, NodeId, Step};
 use cas_version::merge::{self, Outcome as MergeOutcome};
 use cas_version::uni::Value;
-use cas_version::{Node, Path, Ref, diff, formats, fs, gc, read_blob, sync, walk};
+use cas_version::{Node, Path, View, diff, formats, fs, gc, read_blob, sync, walk};
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -115,7 +115,7 @@ fn e(x: impl std::fmt::Display) -> String {
     x.to_string()
 }
 
-fn load(s: &dyn Store, name: &str) -> Res<(Option<Ref>, History)> {
+fn load(s: &dyn Store, name: &str) -> Res<(Option<View>, History)> {
     history::load(s, name).map_err(e)
 }
 

@@ -33,13 +33,13 @@ fn local_branch() -> Arc<dyn Store> {
 
 #[test]
 fn grants_and_rules_round_trip() {
-    for g in ["read *", "write blobs", "list tag:", "remove tag:gc/"] {
+    for g in ["read *", "write blobs", "list var:", "remove var:gc/"] {
         assert_eq!(Grant::parse(g).unwrap().to_string(), g);
     }
     assert!(Grant::parse("read").is_err() && Grant::parse("fly blobs").is_err() && Grant::parse("read main").is_err());
     let mut r = Rules::default();
     let token = r.add_user("alice").unwrap();
-    grant(&mut r, "alice", "write tag:main");
+    grant(&mut r, "alice", "write var:main");
     grant(&mut r, access::ANYONE, "read blobs");
     assert_eq!(Rules::from_value(&r.to_value()).unwrap(), r);
     assert_eq!(r.user_for_token(&token), Some("alice"));
@@ -52,7 +52,7 @@ fn grants_and_rules_round_trip() {
 #[test]
 fn list_grants_cover_only_spans_inside_their_scope() {
     let mut r = Rules::default();
-    grant(&mut r, access::ANYONE, "list tag:main");
+    grant(&mut r, access::ANYONE, "list var:main");
     grant(&mut r, "bob", "list blobs");
     let span =
         |f: &str, t: Option<&str>| Span { from: Some(f.as_bytes().to_vec()), to: t.map(|t| t.as_bytes().to_vec()) };
@@ -67,8 +67,8 @@ fn list_grants_cover_only_spans_inside_their_scope() {
     let has = Span { from: Some(key.into_bytes()), to: Some(end) };
     assert!(!r.allows(&anon, &Op::List { span: &has }));
     assert!(r.allows(&Who::named("bob"), &Op::List { span: &has }));
-    // A tag prefix that blob keys could share never authorizes a list.
-    grant(&mut r, "carol", "list tag:bla");
+    // A variable prefix that blob keys could share never authorizes a list.
+    grant(&mut r, "carol", "list var:bla");
     assert!(!r.allows(&Who::named("carol"), &Op::List { span: &span("bla", Some("blb")) }));
 }
 
@@ -78,10 +78,10 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
     let mut rules = Rules::default();
     let alice = rules.add_user("alice").unwrap();
     let bob = rules.add_user("bob").unwrap();
-    for g in ["read blobs", "list blobs", "read tag:main"] {
+    for g in ["read blobs", "list blobs", "read var:main"] {
         grant(&mut rules, access::ANYONE, g);
     }
-    for g in ["write blobs", "write tag:main"] {
+    for g in ["write blobs", "write var:main"] {
         grant(&mut rules, "alice", g);
     }
     access::save(&*meta, b3(), None, &rules).unwrap();
@@ -103,7 +103,7 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
     // A wrong token is just anonymous.
     let guess = HttpStore::new(&url).with_token("0123");
     assert_eq!(guess.write("main", b"x", &Expect::Absent), Err(CoreError::Denied));
-    // Alice may not write other tags.
+    // Alice may not write other variables.
     assert_eq!(as_alice.write("other", b"x", &Expect::Absent), Err(CoreError::Denied));
 
     // Changing the policy takes effect on the next request.
@@ -117,7 +117,7 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
 #[test]
 fn an_unreadable_policy_denies_everything() {
     let meta = store();
-    meta.write(access::TAG, b"not a reference", &Expect::Absent).unwrap();
+    meta.write(access::VAR, b"not a view", &Expect::Absent).unwrap();
     let gate = Access::new(meta);
     let s = CoreStore::new(MemBackend::new(), gate, Policy::permissive()).session(Who::anonymous());
     assert_eq!(s.read("main"), Err(CoreError::Denied));

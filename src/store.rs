@@ -34,7 +34,7 @@ pub fn list_all(store: &dyn Store, span: &Span) -> Result<Vec<String>> {
 
 enum Kind {
     Blob(&'static Algorithm),
-    Tag,
+    Var,
 }
 
 pub struct CoreStore {
@@ -69,7 +69,7 @@ impl CoreStore {
             return Err(Error::refused("key-too-long", format!("keys are limited to {max} bytes")));
         }
         match parsed {
-            Parsed::Tag => Ok(Kind::Tag),
+            Parsed::Var => Ok(Kind::Var),
             Parsed::Blob { alg, digest_hex } => {
                 let algorithm =
                     algo::lookup(alg).filter(|a| self.policy.algorithms.contains(a.name)).ok_or_else(|| {
@@ -86,7 +86,7 @@ impl CoreStore {
     fn check_size(&self, kind: &Kind, value: &[u8]) -> Result<()> {
         let max = match kind {
             Kind::Blob(_) => self.policy.max_blob_len,
-            Kind::Tag => self.policy.max_tag_len,
+            Kind::Var => self.policy.max_var_len,
         };
         match max {
             Some(max) if value.len() > max => {
@@ -124,8 +124,8 @@ impl CoreStore {
                 }
                 Ok(self.backend.put_blob(key, value)?)
             }
-            Kind::Tag => {
-                if self.backend.cas_tag(key, expect, Some(value))? {
+            Kind::Var => {
+                if self.backend.cas_var(key, expect, Some(value))? {
                     Ok(())
                 } else {
                     Err(Error::Conflict)
@@ -145,8 +145,8 @@ impl CoreStore {
                 }
                 Ok(self.backend.remove_blob(key)?)
             }
-            Kind::Tag => {
-                if self.backend.cas_tag(key, expect, None)? {
+            Kind::Var => {
+                if self.backend.cas_var(key, expect, None)? {
                     Ok(())
                 } else {
                     Err(Error::Conflict)

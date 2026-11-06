@@ -5,7 +5,7 @@ use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Policy, Session, Who};
 use cas_version::history::{History, NodeId, Step};
 use cas_version::merge::{self, Outcome, diff3, merge_versions};
-use cas_version::{Edit, Node, Path, Ref, build, formats, lookup, put, read_blob, update, walk};
+use cas_version::{Edit, Node, Path, View, build, formats, lookup, put, read_blob, update, walk};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
 
@@ -25,7 +25,7 @@ fn p(s: &str) -> Path {
     Path::new(s).unwrap()
 }
 
-fn tree(s: &Session, entries: &[(&str, &str)]) -> Ref {
+fn tree(s: &Session, entries: &[(&str, &str)]) -> View {
     let empty = build(s, b3(), formats::by_alias("dir").unwrap(), &BTreeMap::new()).unwrap();
     let edits = entries
         .iter()
@@ -34,7 +34,7 @@ fn tree(s: &Session, entries: &[(&str, &str)]) -> Ref {
     update(s, b3(), &empty, &edits).unwrap()
 }
 
-fn edit(s: &Session, v: &Ref, path: &str, text: Option<&str>) -> Ref {
+fn edit(s: &Session, v: &View, path: &str, text: Option<&str>) -> View {
     let e = match text {
         None => Edit::Remove,
         Some("/") => Edit::Set(Node::Dir),
@@ -43,7 +43,7 @@ fn edit(s: &Session, v: &Ref, path: &str, text: Option<&str>) -> Ref {
     update(s, b3(), v, &BTreeMap::from([(p(path), e)])).unwrap()
 }
 
-fn text_at(s: &Session, v: &Ref, path: &str) -> Option<String> {
+fn text_at(s: &Session, v: &View, path: &str) -> Option<String> {
     match lookup(s, v, &p(path)).unwrap()? {
         Node::File(r) => Some(String::from_utf8(read_blob(s, r.key()).unwrap()).unwrap()),
         Node::Dir => Some("/".into()),
@@ -241,7 +241,7 @@ fn edits_strategy() -> impl Strategy<Value = Vec<(String, Option<String>)>> {
     prop::collection::vec((path, what), 0..5)
 }
 
-fn apply(s: &Session, v: &Ref, edits: &[(String, Option<String>)]) -> Ref {
+fn apply(s: &Session, v: &View, edits: &[(String, Option<String>)]) -> View {
     let mut v = v.clone();
     for (path, what) in edits {
         let e = match what.as_deref() {
