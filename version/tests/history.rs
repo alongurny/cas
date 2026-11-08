@@ -270,3 +270,27 @@ fn log_merge_bases_compatibility_and_extension() {
     assert!(h.merge_bases(&m, &other).is_empty());
     let _ = hist;
 }
+
+proptest! {
+    /// merge_bases agrees with the definition: common ancestors that no
+    /// other common ancestor follows.
+    #[test]
+    fn merge_bases_match_the_definition(edges in prop::collection::vec(prop::collection::vec(any::<prop::sample::Index>(), 0..3), 1..25), a in any::<prop::sample::Index>(), b in any::<prop::sample::Index>()) {
+        let s = store();
+        let mut h = History::default();
+        let mut ids: Vec<NodeId> = Vec::new();
+        for (i, preds) in edges.iter().enumerate() {
+            let after: BTreeMap<NodeId, Step> =
+                if ids.is_empty() { BTreeMap::new() } else { preds.iter().map(|p| (ids[p.index(ids.len())].clone(), Step::default())).collect() };
+            ids.push(h.add(&version(&s, &format!("v{i}")), after, None).unwrap());
+        }
+        let (a, b) = (&ids[a.index(ids.len())], &ids[b.index(ids.len())]);
+        let common: BTreeSet<NodeId> = h.ancestors(a).intersection(&h.ancestors(b)).cloned().collect();
+        let want: BTreeSet<NodeId> = common
+            .iter()
+            .filter(|c| !common.iter().any(|d| d != *c && h.follows(d, c)))
+            .cloned()
+            .collect();
+        prop_assert_eq!(h.merge_bases(a, b), want);
+    }
+}

@@ -236,11 +236,24 @@ impl History {
     /// The best common ancestors of `a` and `b`.
     pub fn merge_bases(&self, a: &NodeId, b: &NodeId) -> BTreeSet<NodeId> {
         let common: BTreeSet<NodeId> = self.ancestors(a).intersection(&self.ancestors(b)).cloned().collect();
-        let beaten: BTreeSet<NodeId> = common
-            .iter()
-            .flat_map(|c| self.nodes[c].after.keys().flat_map(|p| self.ancestors(p)).collect::<Vec<_>>())
-            .collect();
-        common.into_iter().filter(|c| !beaten.contains(c)).collect()
+        // Newest first, a common node no kept node precedes is kept, and
+        // everything it follows is beaten. Each node is marked once, so this
+        // is linear in the history (not one ancestor walk per common node).
+        let mut beaten: BTreeSet<&NodeId> = BTreeSet::new();
+        let mut out = BTreeSet::new();
+        for id in self.log() {
+            if !common.contains(&id) || beaten.contains(&id) {
+                continue;
+            }
+            let mut todo: Vec<&NodeId> = self.nodes[&id].after.keys().collect();
+            while let Some(n) = todo.pop() {
+                if beaten.insert(n) {
+                    todo.extend(self.nodes[n].after.keys());
+                }
+            }
+            out.insert(id);
+        }
+        out
     }
 
     /// Whether upgrading from `a` to `b` is compatible: some chain of steps
