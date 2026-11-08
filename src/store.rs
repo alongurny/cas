@@ -173,6 +173,54 @@ pub struct Session {
     who: Who,
 }
 
+/// Chunked transfer (spec/wire.md). Chunks are not keys: they are pieces a
+/// large blob is sent in. Uploading one is gated as a write of the blob key
+/// `blake3:<id>` its bytes would have, so only callers who may write blobs
+/// can add chunks.
+impl Session {
+    /// Whether the store keeps chunks at all.
+    pub fn chunked(&self) -> bool {
+        self.store.backend.chunked()
+    }
+
+    /// Which of `ids` the store lacks.
+    pub fn missing_chunks(&self, ids: &[crate::chunk::Id]) -> Result<Vec<crate::chunk::Id>> {
+        let mut out = Vec::new();
+        for id in ids {
+            if self.store.backend.get_chunk(id)?.is_none() {
+                out.push(*id);
+            }
+        }
+        Ok(out)
+    }
+
+    pub fn put_chunk(&self, id: &crate::chunk::Id, bytes: &[u8]) -> Result<()> {
+        let key = format!("blake3:{}", hex::encode(id));
+        self.store.gate(&self.who, Op::Write { key: &key, value: bytes, expect: &Expect::Absent })?;
+        if bytes.len() > crate::chunk::CHUNK_OVER {
+            return Err(Error::refused("too-large", "a chunk is at most 64 KiB"));
+        }
+        if crate::chunk::id_of(bytes) != *id {
+            return Err(Error::Invalid(Invalid::HashMismatch));
+        }
+        Ok(self.store.backend.put_chunk(id, bytes)?)
+    }
+
+    /// Write blob `key` from chunks the store holds, as an ordinary write
+    /// of their concatenation (same gate, checks and outcome). `None` when
+    /// a chunk is missing.
+    pub fn write_chunks(&self, key: &str, ids: &[crate::chunk::Id], expect: &Expect) -> Result<Option<()>> {
+        let mut value = Vec::new();
+        for id in ids {
+            match self.store.backend.get_chunk(id)? {
+                Some(b) => value.extend(b),
+                None => return Ok(None),
+            }
+        }
+        self.write(key, &value, expect).map(Some)
+    }
+}
+
 impl Store for Session {
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.store.read(&self.who, key)

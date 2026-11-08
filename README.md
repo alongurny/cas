@@ -29,7 +29,7 @@ cargo run -p cas-cli -- log
 ## cas-core
 
 - `CoreStore` runs every op in spec order: gate, key syntax, store policy, content checks, state.
-- Backends: `mem::MemBackend` (volatile, for tests and caches) and `disk::DiskBackend` (durable; temp file + fsync + rename, a lock file around variable CAS).
+- Backends: `mem::MemBackend` (volatile, for tests and caches) and `disk::DiskBackend` (durable; temp file + fsync + rename, a lock file around variable CAS). A new disk store (marker file `format` = `2`) compresses blobs with zstd and stores blobs over 64 KiB as content-defined chunks (FastCDC, `chunk.rs`) shared between blobs; a store made before that stays raw. This is storage only: keys hash the whole value, and reads return it whole.
 - `algo::REGISTRY` maps names to hash algorithms (`blake3`, `sha256`, `sha512`, `sha3-256`, and `sha1`, `md5` marked broken). Which ones a store accepts is `Policy`.
 - `Gate` decides allow/deny from `(who, op, args)` only; `AllowAll` is the default.
 - `server::Server` serves a store over HTTP; `client::HttpStore` is a `Store` that talks to one. `cache::CachingStore` answers blob reads locally and forwards everything else, running the same gate.

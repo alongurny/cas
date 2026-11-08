@@ -14,6 +14,8 @@ md-5 = "0.11.0"
 tiny_http = "0.12.0"
 ureq = "3.5.0"
 percent-encoding = "2.3.2"
+zstd = "0.13"
+fastcdc = "3"
 
 [dev-dependencies]
 proptest = "1.12.0"

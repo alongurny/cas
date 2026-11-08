@@ -38,15 +38,23 @@ Measured with the release build on the Thesis repository (4,532 commits; 105 MB 
 | private history, rebase, publish | 0.1 to 0.2 s each |
 | gc run | 1.5 s |
 
+With the encoded disk store (zstd, and chunking of blobs over 64 KiB):
+
+| operation | result |
+| --- | --- |
+| store size | 246 MB of files (364 MB on disk with 4 KiB blocks), was 844 MB |
+| commit one change | the store grows by 26 KB, was 5.1 MB |
+| import | 34 s (more, smaller files to fsync) |
+
 Findings:
 
 1. Fixed: the disk backend's `list` scanned every key, so `has` (one `list` per blob) made sync
    quadratic. A span whose bounds share `<alg>:<two hex digits>` now reads only that fan-out
    directory.
-2. A history is one blob, so each new node rewrites all of it: cost follows the history's
-   length, not the change. Chunking the history (and very large directories) internally, with
-   the identity still over the whole content, is the next scale step.
-3. Blobs are stored uncompressed and without deltas: about 8 times git's packed size here.
-   Compression in the backend is an implementation detail and would not change any key.
+2. Fixed: a history is one blob, so each new node rewrote all of it. The disk backend now
+   stores big blobs as content-defined chunks, so a new history object costs the chunks that
+   changed; its key still hashes the whole content.
+3. Fixed in part: blobs are compressed now (2.3 times git's packed size, was 8). Git also
+   stores deltas between similar files, which content-defined chunks only partly match.
 4. Submodules have no CAS form yet. A natural one is a view of the submodule's own history (or
    version), which needs a format for it.

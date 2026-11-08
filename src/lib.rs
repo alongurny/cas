@@ -8,6 +8,7 @@
 pub mod algo;
 pub mod backend;
 pub mod cache;
+pub mod chunk;
 pub mod client;
 pub mod disk;
 pub mod gate;

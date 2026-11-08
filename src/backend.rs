@@ -20,4 +20,20 @@ pub trait Backend: Send + Sync {
 
     /// Up to `limit` keys in `span`, ascending bytewise.
     fn list(&self, span: &Span, limit: usize) -> io::Result<Vec<String>>;
+
+    /// Whether this backend keeps chunks (spec/wire.md, chunked transfer).
+    /// The chunk methods below are used only when it does.
+    fn chunked(&self) -> bool {
+        false
+    }
+
+    /// The bytes of chunk `id`, if held.
+    fn get_chunk(&self, _id: &crate::chunk::Id) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    /// Store a verified chunk. Idempotent; durable on return.
+    fn put_chunk(&self, _id: &crate::chunk::Id, _bytes: &[u8]) -> io::Result<()> {
+        Err(io::Error::other("this backend keeps no chunks"))
+    }
 }

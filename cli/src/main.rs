@@ -326,6 +326,11 @@ fn run(a: Args) -> Res<()> {
         Some("gc") => {
             let r = gc::collect(s, b3()).map_err(e)?;
             out!("{} reachable, {} unreachable, {} removed", r.reachable, r.unreachable, r.removed.len());
+            // A local store also drops the chunks no remaining blob uses.
+            if !a.store.starts_with("http://") && !a.store.starts_with("https://") {
+                let n = DiskBackend::open(&a.store).map_err(e)?.sweep_chunks().map_err(e)?;
+                out!("{n} chunks swept");
+            }
         }
         Some("access") => {
             let meta = open(&a.meta, token)?;

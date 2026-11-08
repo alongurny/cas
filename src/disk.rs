@@ -4,7 +4,18 @@
 //! - `blobs/<alg>/<first two hex chars>/<digest hex>`
 //! - `vars/<hex of the variable name's bytes>` (hex keeps bytewise order and any
 //!   name safe as a file name)
+//! - `chunks/<first two hex chars>/<blake3 hex of the chunk>`, pieces of large blobs
 //! - `tmp/` for writes in flight, renamed into place once synced
+//! - `format`, `2` for stores that encode blobs (below); a store without it
+//!   keeps every blob file as its raw bytes, as stores did before
+//!
+//! Encoding (format 2) is invisible above the backend: a blob's key is still
+//! the hash of its whole content. A blob file starts with one byte: `0` raw
+//! bytes follow, `1` zstd-compressed bytes follow, `2` a zstd-compressed
+//! list of 32-byte chunk ids follows. Blobs over [`CHUNK_OVER`] bytes are cut
+//! at content-defined boundaries, so an edit inside a large blob (a history
+//! that gained a node) changes only the chunks around it, and the rest are
+//! shared on disk. Chunk files use the same `0`/`1` header.
 //! - `lock`, held exclusively around every variable CAS, so CAS is atomic across
 //!   threads and processes sharing the root.
 
@@ -21,16 +32,120 @@ pub struct DiskBackend {
     root: PathBuf,
     lock: Mutex<File>,
     tmp_seq: AtomicU64,
+    encoded: bool,
+}
+
+pub use crate::chunk::CHUNK_OVER;
+const RAW: u8 = 0;
+const ZSTD: u8 = 1;
+const CHUNKED: u8 = 2;
+
+/// `bytes` behind a one-byte header, compressed when that is smaller.
+fn pack(bytes: &[u8]) -> io::Result<Vec<u8>> {
+    let z = zstd::bulk::compress(bytes, 3)?;
+    Ok(if z.len() < bytes.len() { [&[ZSTD][..], &z].concat() } else { [&[RAW][..], bytes].concat() })
+}
+
+fn unpack(file: &[u8]) -> io::Result<(u8, Vec<u8>)> {
+    match file.split_first() {
+        Some((&RAW, rest)) => Ok((RAW, rest.to_vec())),
+        Some((&t @ (ZSTD | CHUNKED), rest)) => Ok((t, zstd::stream::decode_all(rest)?)),
+        _ => Err(io::Error::other("unknown blob file encoding")),
+    }
 }
 
 impl DiskBackend {
     pub fn open(root: impl Into<PathBuf>) -> io::Result<DiskBackend> {
         let root = root.into();
-        for dir in ["blobs", "vars", "tmp"] {
+        // A store with no blobs yet starts encoded; an older one stays raw.
+        let marker = root.join("format");
+        let fresh = !root.join("blobs").exists() || fs::read_dir(root.join("blobs"))?.next().is_none();
+        for dir in ["blobs", "vars", "tmp", "chunks"] {
             fs::create_dir_all(root.join(dir))?;
         }
+        let encoded = match fs::read_to_string(&marker) {
+            Ok(v) => v.trim() == "2",
+            Err(_) if fresh => {
+                fs::write(&marker, "2\n")?;
+                true
+            }
+            Err(_) => false,
+        };
         let lock = OpenOptions::new().create(true).truncate(false).write(true).open(root.join("lock"))?;
-        Ok(DiskBackend { root, lock: Mutex::new(lock), tmp_seq: AtomicU64::new(0) })
+        Ok(DiskBackend { root, lock: Mutex::new(lock), tmp_seq: AtomicU64::new(0), encoded })
+    }
+
+    fn chunk_path(&self, id: &str) -> PathBuf {
+        self.root.join("chunks").join(&id[..2]).join(id)
+    }
+
+    /// The bytes of a blob file in this store's encoding.
+    fn encode(&self, value: &[u8]) -> io::Result<Vec<u8>> {
+        if !self.encoded {
+            return Ok(value.to_vec());
+        }
+        if value.len() <= CHUNK_OVER {
+            return pack(value);
+        }
+        let mut ids = Vec::new();
+        for (id, piece) in crate::chunk::split(value) {
+            self.store_chunk(&id, piece)?;
+            ids.extend_from_slice(&id);
+        }
+        let z = zstd::bulk::compress(&ids, 3)?;
+        Ok([&[CHUNKED][..], &z].concat())
+    }
+
+    fn store_chunk(&self, id: &crate::chunk::Id, piece: &[u8]) -> io::Result<()> {
+        let path = self.chunk_path(&hex::encode(id));
+        if path.exists() { Ok(()) } else { self.put_file(&path, &pack(piece)?) }
+    }
+
+    fn decode(&self, file: Vec<u8>) -> io::Result<Vec<u8>> {
+        if !self.encoded {
+            return Ok(file);
+        }
+        match unpack(&file)? {
+            (CHUNKED, ids) => {
+                let mut out = Vec::new();
+                for id in ids.chunks(32) {
+                    let path = self.chunk_path(&hex::encode(id));
+                    let piece =
+                        fs::read(&path).map_err(|e| io::Error::other(format!("chunk {}: {e}", hex::encode(id))))?;
+                    out.extend(unpack(&piece)?.1);
+                }
+                Ok(out)
+            }
+            (_, bytes) => Ok(bytes),
+        }
+    }
+
+    /// Remove chunks no blob file names any more. Removing a blob leaves its
+    /// chunks, which other blobs may share; this sweeps them. Not safe to
+    /// run while another process writes to the store.
+    pub fn sweep_chunks(&self) -> io::Result<usize> {
+        let mut live = std::collections::HashSet::new();
+        for k in self.all_keys()? {
+            if !matches!(classify(&k), Some(Parsed::Blob { .. })) {
+                continue;
+            }
+            if let Some(file) = read_opt(&self.path(&k))?
+                && let (CHUNKED, ids) = unpack(&file)?
+            {
+                live.extend(ids.chunks(32).map(hex::encode));
+            }
+        }
+        let mut removed = 0;
+        for fan in fs::read_dir(self.root.join("chunks"))? {
+            for c in fs::read_dir(fan?.path())? {
+                let c = c?;
+                if !live.contains(&*c.file_name().to_string_lossy()) {
+                    self.remove_file(&c.path())?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -148,7 +263,11 @@ fn read_opt(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 impl Backend for DiskBackend {
     fn get(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
-        read_opt(&self.path(key))
+        let file = read_opt(&self.path(key))?;
+        match (file, classify(key)) {
+            (Some(f), Some(Parsed::Blob { .. })) => self.decode(f).map(Some),
+            (f, _) => Ok(f),
+        }
     }
 
     fn put_blob(&self, key: &str, value: &[u8]) -> io::Result<()> {
@@ -157,11 +276,28 @@ impl Backend for DiskBackend {
             return Ok(());
         }
         // Renaming over a concurrent writer's copy is harmless: same bytes.
-        self.put_file(&dest, value)
+        // Chunks are written (and synced) before the file that names them.
+        let file = self.encode(value)?;
+        self.put_file(&dest, &file)
     }
 
     fn remove_blob(&self, key: &str) -> io::Result<()> {
         self.remove_file(&self.path(key))
+    }
+
+    fn chunked(&self) -> bool {
+        self.encoded
+    }
+
+    fn get_chunk(&self, id: &crate::chunk::Id) -> io::Result<Option<Vec<u8>>> {
+        match read_opt(&self.chunk_path(&hex::encode(id)))? {
+            Some(f) => Ok(Some(unpack(&f)?.1)),
+            None => Ok(None),
+        }
+    }
+
+    fn put_chunk(&self, id: &crate::chunk::Id, bytes: &[u8]) -> io::Result<()> {
+        self.store_chunk(id, bytes)
     }
 
     fn cas_var(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool> {
@@ -223,5 +359,70 @@ mod tests {
         assert!(b.cas_var(&names[2], &Expect::Value(names[2].clone().into_bytes()), None).unwrap());
         assert_eq!(b.get(&names[2]).unwrap(), None);
         assert_eq!(b.list(&Span::all(), 100).unwrap().len(), 3);
+    }
+
+    fn big(seed: u64, n: usize) -> Vec<u8> {
+        let mut x = seed;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect()
+    }
+
+    fn files(dir: &std::path::Path) -> usize {
+        fs::read_dir(dir).unwrap().map(|f| fs::read_dir(f.unwrap().path()).unwrap().count()).sum()
+    }
+
+    #[test]
+    fn big_blobs_share_chunks_and_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = DiskBackend::open(dir.path()).unwrap();
+        assert!(b.chunked());
+        let one = big(1, 300_000);
+        let mut two = one.clone();
+        two.splice(150_000..150_000, b"an edit in the middle".iter().copied());
+        let (k1, k2) = ("blake3:".to_string() + &"1".repeat(64), "blake3:".to_string() + &"2".repeat(64));
+        b.put_blob(&k1, &one).unwrap();
+        let after_one = files(&dir.path().join("chunks"));
+        b.put_blob(&k2, &two).unwrap();
+        let added = files(&dir.path().join("chunks")) - after_one;
+        assert!(added <= 3, "an edit adds a few chunks, not {added}");
+        assert_eq!(b.get(&k1).unwrap().unwrap(), one);
+        assert_eq!(b.get(&k2).unwrap().unwrap(), two);
+        let id = crate::chunk::split(&one)[0].0;
+        assert_eq!(b.get_chunk(&id).unwrap().unwrap(), crate::chunk::split(&one)[0].1);
+        // Small blobs are compressed in place, not chunked.
+        let k3 = "blake3:".to_string() + &"3".repeat(64);
+        b.put_blob(&k3, &[7; 1000]).unwrap();
+        assert!(b.cas_var("v", &Expect::Absent, Some(b"x")).unwrap());
+        assert!(fs::metadata(b.path(&k3)).unwrap().len() < 100);
+        assert_eq!(b.get(&k3).unwrap().unwrap(), vec![7; 1000]);
+        b.remove_blob(&k2).unwrap();
+        assert_eq!(b.sweep_chunks().unwrap(), added);
+        assert_eq!(b.get(&k1).unwrap().unwrap(), one);
+        b.remove_blob(&k1).unwrap();
+        b.sweep_chunks().unwrap();
+        assert_eq!(files(&dir.path().join("chunks")), 0);
+    }
+
+    #[test]
+    fn an_old_raw_store_stays_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let k = "blake3:".to_string() + &"a".repeat(64);
+        let path = dir.path().join("blobs/blake3/aa").join("a".repeat(64));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"plain").unwrap();
+        let b = DiskBackend::open(dir.path()).unwrap();
+        assert!(!b.chunked());
+        assert_eq!(b.get(&k).unwrap().unwrap(), b"plain");
+        let k2 = "blake3:".to_string() + &"b".repeat(64);
+        b.put_blob(&k2, &big(2, 100_000)).unwrap();
+        assert_eq!(fs::read(b.path(&k2)).unwrap(), big(2, 100_000));
+        drop(b);
+        assert!(!DiskBackend::open(dir.path()).unwrap().chunked());
     }
 }
