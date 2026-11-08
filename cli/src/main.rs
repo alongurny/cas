@@ -9,7 +9,7 @@ use cas_core::algo::{self, Algorithm};
 use cas_core::client::HttpStore;
 use cas_core::disk::DiskBackend;
 use cas_core::server::{Request, Server, Tls};
-use cas_core::{AllowAll, CoreStore, Policy, Store, Who};
+use cas_core::{AllowAll, Backend, CoreStore, Policy, Store, Who};
 use cas_version::access::{self, Access, Grant};
 use cas_version::derived::{self, SUMMARY};
 use cas_version::history::{self, History, NodeId, Step};
@@ -350,8 +350,16 @@ fn run(a: Args) -> Res<()> {
             out!("{} reachable, {} unreachable, {} removed", r.reachable, r.unreachable, r.removed.len());
             // A local store also drops the chunks no remaining blob uses.
             if !a.store.starts_with("http://") && !a.store.starts_with("https://") {
-                let n = DiskBackend::open(&a.store).map_err(e)?.sweep_chunks().map_err(e)?;
+                let disk = DiskBackend::open(&a.store).map_err(e)?;
+                let n = disk.sweep_chunks().map_err(e)?;
                 out!("{n} chunks swept");
+                // Like git gc: rewrite into one pack, with deltas against each
+                // path's previous version.
+                if disk.chunked() {
+                    let (order, hints) = gc::delta_hints(s).map_err(e)?;
+                    let r = disk.repack(&order, &hints).map_err(e)?;
+                    out!("repacked: {} deltas, {} whole", r.deltas, r.whole);
+                }
             }
         }
         Some("access") => {

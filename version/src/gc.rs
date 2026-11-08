@@ -6,13 +6,15 @@
 //! unreachable, so a writer has until the next run to link what it wrote.
 
 use crate::formats::{self, METAFORMAT};
+use crate::history::{self, NodeId};
 use crate::sync::children;
+use crate::tree;
 use crate::uni::Value;
 use crate::{Result, View, by_alias, is_blob_key, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::key::{Parsed, classify};
 use cas_core::{Expect, Span, Store, list_all};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// The variable holding the blobs the previous run found unreachable.
 pub const PENDING: &str = "gc/pending";
@@ -136,4 +138,61 @@ pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
     let expect = old_var.map_or(Expect::Absent, Expect::Value);
     store.write(PENDING, r.to_string().as_bytes(), &expect)?;
     Ok(Report { reachable: marked.len(), unreachable: unreachable.len(), removed })
+}
+
+/// Delta hints for a repack (spec/performance.md, step 2): for every
+/// history a variable holds, each node's version is walked beside its
+/// predecessor's, and each directory or file that changed at a path is
+/// hinted to its old self there. Also an order, oldest node first, so that a
+/// base is placed before what is a delta of it.
+pub fn delta_hints(store: &dyn Store) -> Result<(Vec<String>, HashMap<String, String>)> {
+    let mut order = Vec::new();
+    let mut hints = HashMap::new();
+    let mut walked = HashSet::new();
+    for k in list_all(store, &Span::all())? {
+        if !matches!(classify(&k), Some(Parsed::Var)) {
+            continue;
+        }
+        let Some(v) = store.read(&k)? else { continue };
+        let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok()) else { continue };
+        if r.known_format().is_none_or(|f| f.alias != "history") {
+            continue;
+        }
+        let Ok(h) = history::read(store, &r) else { continue };
+        for id in h.log().into_iter().rev() {
+            let new = id.version();
+            let old = h.nodes[&id].after.keys().next().map(NodeId::version);
+            pair(store, old.as_ref(), &new, &mut order, &mut hints, &mut walked)?;
+        }
+    }
+    Ok((order, hints))
+}
+
+/// Record `new` (and, for directories, what changed under it) against `old`.
+fn pair(
+    store: &dyn Store,
+    old: Option<&View>,
+    new: &View,
+    order: &mut Vec<String>,
+    hints: &mut HashMap<String, String>,
+    walked: &mut HashSet<String>,
+) -> Result<()> {
+    if old.is_some_and(|o| o.key() == new.key()) || !walked.insert(new.key().to_string()) {
+        return Ok(());
+    }
+    order.push(new.key().to_string());
+    if let Some(o) = old {
+        hints.entry(new.key().to_string()).or_insert_with(|| o.key().to_string());
+    }
+    if !new.is_dir() {
+        return Ok(());
+    }
+    let olds: HashMap<String, View> = match old.filter(|o| o.is_dir()) {
+        Some(o) => tree::load(store, o)?.into_iter().map(|i| (i.name, i.child)).collect(),
+        None => HashMap::new(),
+    };
+    for item in tree::load(store, new)? {
+        pair(store, olds.get(&item.name), &item.child, order, hints, walked)?;
+    }
+    Ok(())
 }

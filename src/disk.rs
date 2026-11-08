@@ -33,6 +33,8 @@ pub struct DiskBackend {
     lock: Mutex<File>,
     tmp_seq: AtomicU64,
     encoded: bool,
+    /// Pack files (encoded stores only): batches and repacks.
+    packs: Option<crate::pack::Packs>,
 }
 
 pub use crate::chunk::CHUNK_OVER;
@@ -72,7 +74,8 @@ impl DiskBackend {
             Err(_) => false,
         };
         let lock = OpenOptions::new().create(true).truncate(false).write(true).open(root.join("lock"))?;
-        Ok(DiskBackend { root, lock: Mutex::new(lock), tmp_seq: AtomicU64::new(0), encoded })
+        let packs = if encoded { Some(crate::pack::Packs::open(root.join("packs"))?) } else { None };
+        Ok(DiskBackend { root, lock: Mutex::new(lock), tmp_seq: AtomicU64::new(0), encoded, packs })
     }
 
     fn chunk_path(&self, id: &str) -> PathBuf {
@@ -108,7 +111,7 @@ impl DiskBackend {
         let mut ids = Vec::new();
         let mut chunks = Vec::new();
         for (id, piece) in crate::chunk::split(value) {
-            if !self.chunk_path(&hex::encode(id)).exists() {
+            if !self.has_chunk(&hex::encode(id))? {
                 chunks.push((id, pack(piece)?));
             }
             ids.extend_from_slice(&id);
@@ -119,7 +122,7 @@ impl DiskBackend {
 
     fn store_chunk(&self, id: &crate::chunk::Id, piece: &[u8], pending: Option<&mut Pending>) -> io::Result<()> {
         let path = self.chunk_path(&hex::encode(id));
-        if path.exists() { Ok(()) } else { self.put_file_with(&path, &pack(piece)?, pending) }
+        if self.has_chunk(&hex::encode(id))? { Ok(()) } else { self.put_file_with(&path, &pack(piece)?, pending) }
     }
 
     fn decode(&self, file: Vec<u8>) -> io::Result<Vec<u8>> {
@@ -130,9 +133,9 @@ impl DiskBackend {
             (CHUNKED, ids) => {
                 let mut out = Vec::new();
                 for id in ids.chunks(32) {
-                    let path = self.chunk_path(&hex::encode(id));
-                    let piece =
-                        fs::read(&path).map_err(|e| io::Error::other(format!("chunk {}: {e}", hex::encode(id))))?;
+                    let piece = self
+                        .chunk_file(&hex::encode(id))?
+                        .ok_or_else(|| io::Error::other(format!("chunk {} is missing", hex::encode(id))))?;
                     out.extend(unpack(&piece)?.1);
                 }
                 Ok(out)
@@ -150,7 +153,7 @@ impl DiskBackend {
             if !matches!(classify(&k), Some(Parsed::Blob { .. })) {
                 continue;
             }
-            if let Some(file) = read_opt(&self.path(&k))?
+            if let Some(file) = self.blob_file(&k)?
                 && let (CHUNKED, ids) = unpack(&file)?
             {
                 live.extend(ids.chunks(32).map(hex::encode));
@@ -166,7 +169,163 @@ impl DiskBackend {
                 }
             }
         }
+        if let Some(p) = &self.packs {
+            let dead: Vec<String> =
+                p.all()?.into_iter().filter(|n| n.strip_prefix('#').is_some_and(|h| !live.contains(h))).collect();
+            removed += dead.len();
+            p.remove(&dead, &self.root.join("tmp"))?;
+        }
         Ok(removed)
+    }
+
+    /// Rewrite every blob and chunk into one pack, as deltas where `hints`
+    /// names a base (the same path in the predecessor) and the delta is
+    /// smaller. `order` comes first (oldest first, so bases precede what
+    /// depends on them); everything else follows. Old packs and loose
+    /// blob and chunk files are deleted once the new pack is durable. Not
+    /// safe while another process writes to the store, like `sweep_chunks`.
+    pub fn repack(&self, order: &[String], hints: &std::collections::HashMap<String, String>) -> io::Result<Repacked> {
+        use crate::pack::{Entry, MAX_DEPTH, plain_value};
+        let Some(packs) = &self.packs else { return Err(io::Error::other("only encoded stores have packs")) };
+        let old_packs = packs.ids()?;
+        let mut loose_blobs = Vec::new();
+        for k in self.all_keys()? {
+            if matches!(classify(&k), Some(Parsed::Blob { .. })) && self.path(&k).exists() {
+                loose_blobs.push(k);
+            }
+        }
+        let mut loose_chunks = Vec::new();
+        for fan in fs::read_dir(self.root.join("chunks"))? {
+            for c in fs::read_dir(fan?.path())? {
+                loose_chunks.push(format!("#{}", c?.file_name().to_string_lossy()));
+            }
+        }
+        let mut names: Vec<String> = Vec::new();
+        let mut placed = std::collections::HashSet::new();
+        let everything: Vec<String> =
+            packs.all()?.into_iter().chain(loose_blobs.iter().cloned()).chain(loose_chunks.iter().cloned()).collect();
+        let present: std::collections::HashSet<&String> = everything.iter().collect();
+        // A chunked blob brings its chunks just before it, and each chunk it
+        // does not share with its hinted base is hinted to the base's chunk
+        // at the same relative position: an edit's chunks delta against the
+        // chunks they replaced.
+        let mut hints = hints.clone();
+        let chunk_ids = |key: &str| -> io::Result<Option<Vec<String>>> {
+            match self.blob_file(key)? {
+                Some(f) if f.first() == Some(&CHUNKED) => {
+                    Ok(Some(unpack(&f)?.1.chunks(32).map(|c| format!("#{}", hex::encode(c))).collect()))
+                }
+                _ => Ok(None),
+            }
+        };
+        for n in order.iter().chain(everything.iter()) {
+            if !present.contains(n) || placed.contains(n) {
+                continue;
+            }
+            if !n.starts_with('#')
+                && let Some(ids) = chunk_ids(n)?
+            {
+                let base_ids = match hints.get(n) {
+                    Some(b) => chunk_ids(b)?.unwrap_or_default(),
+                    None => Vec::new(),
+                };
+                let shared: std::collections::HashSet<&String> = base_ids.iter().collect();
+                for (i, c) in ids.iter().enumerate() {
+                    if !shared.contains(c) && !base_ids.is_empty() {
+                        let j = i * base_ids.len() / ids.len();
+                        hints.entry(c.clone()).or_insert_with(|| base_ids[j].clone());
+                    }
+                    if present.contains(c) && placed.insert(c.clone()) {
+                        names.push(c.clone());
+                    }
+                }
+            }
+            placed.insert(n.clone());
+            names.push(n.clone());
+        }
+        let file_of = |n: &String| -> io::Result<Vec<u8>> {
+            let f = match n.strip_prefix('#') {
+                Some(h) => self.chunk_file(h)?,
+                None => self.blob_file(n)?,
+            };
+            f.ok_or_else(|| io::Error::other(format!("{n} vanished during repack")))
+        };
+        let mut w = packs.writer(&self.root.join("tmp"))?;
+        let mut depth: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut out = Repacked::default();
+        for group in names.chunks(512) {
+            // Read and try the hinted delta on every core; accept in order.
+            let tried = parallel_map(group, |n| {
+                let file = file_of(n)?;
+                let delta = match hints.get(n) {
+                    Some(base) if present.contains(base) => {
+                        match (plain_value(&file), file_of(base).and_then(|b| plain_value(&b))) {
+                            (Ok(v), Ok(bv)) => Entry::delta(base, &bv, &v, &file)?,
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                Ok((file, delta))
+            })?;
+            for (n, (file, delta)) in group.iter().zip(tried) {
+                let base_depth = delta.as_ref().and_then(|_| depth.get(&hints[n]).copied()).filter(|d| *d < MAX_DEPTH);
+                match (delta, base_depth) {
+                    (Some(d), Some(bd)) => {
+                        w.add(n, &d)?;
+                        depth.insert(n.clone(), bd + 1);
+                        out.deltas += 1;
+                    }
+                    _ => {
+                        if plain_value(&file).is_ok() {
+                            depth.insert(n.clone(), 0);
+                        }
+                        w.add(n, &Entry::File(file))?;
+                        out.whole += 1;
+                    }
+                }
+            }
+        }
+        w.finish()?;
+        packs.drop_packs(&old_packs)?;
+        for k in &loose_blobs {
+            let _ = fs::remove_file(self.path(k));
+        }
+        for c in &loose_chunks {
+            let _ = fs::remove_file(self.chunk_path(&c[1..]));
+        }
+        syncfs_or_dirs(&self.root)?;
+        Ok(out)
+    }
+
+    /// A blob's file bytes, loose or packed.
+    fn blob_file(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
+        match read_opt(&self.path(key))? {
+            Some(f) => Ok(Some(f)),
+            None => match &self.packs {
+                Some(p) => p.file(key),
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn chunk_file(&self, hex: &str) -> io::Result<Option<Vec<u8>>> {
+        match read_opt(&self.chunk_path(hex))? {
+            Some(f) => Ok(Some(f)),
+            None => match &self.packs {
+                Some(p) => p.file(&format!("#{hex}")),
+                None => Ok(None),
+            },
+        }
+    }
+
+    fn has_blob(&self, key: &str) -> io::Result<bool> {
+        Ok(self.path(key).exists() || self.packs.as_ref().map_or(Ok(false), |p| p.contains(key))?)
+    }
+
+    fn has_chunk(&self, hex: &str) -> io::Result<bool> {
+        Ok(self.chunk_path(hex).exists()
+            || self.packs.as_ref().map_or(Ok(false), |p| p.contains(&format!("#{hex}")))?)
     }
 
     fn path(&self, key: &str) -> PathBuf {
@@ -278,6 +437,11 @@ impl DiskBackend {
                 }
             }
         }
+        if let Some(p) = &self.packs {
+            keys.extend(p.all()?.into_iter().filter(|n| !n.starts_with('#')));
+            keys.sort_unstable();
+            keys.dedup();
+        }
         Ok(keys)
     }
 }
@@ -333,6 +497,23 @@ fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> +
     })
 }
 
+/// What a repack wrote.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Repacked {
+    pub deltas: usize,
+    pub whole: usize,
+}
+
+#[cfg(target_os = "linux")]
+fn syncfs_or_dirs(root: &Path) -> io::Result<()> {
+    syncfs(root)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn syncfs_or_dirs(root: &Path) -> io::Result<()> {
+    sync_dir(&root.join("blobs"))
+}
+
 /// Chunks to write: id and packed bytes.
 type PackedChunks = Vec<(crate::chunk::Id, Vec<u8>)>;
 
@@ -362,16 +543,15 @@ fn read_opt(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
 impl Backend for DiskBackend {
     fn get(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let file = read_opt(&self.path(key))?;
-        match (file, classify(key)) {
-            (Some(f), Some(Parsed::Blob { .. })) => self.decode(f).map(Some),
-            (f, _) => Ok(f),
+        match classify(key) {
+            Some(Parsed::Blob { .. }) => self.blob_file(key)?.map(|f| self.decode(f)).transpose(),
+            _ => read_opt(&self.path(key)),
         }
     }
 
     fn put_blob(&self, key: &str, value: &[u8]) -> io::Result<()> {
         let dest = self.path(key);
-        if dest.exists() {
+        if self.has_blob(key)? {
             return Ok(());
         }
         // Renaming over a concurrent writer's copy is harmless: same bytes.
@@ -381,9 +561,34 @@ impl Backend for DiskBackend {
     }
 
     fn put_blobs(&self, blobs: &[(&str, &[u8])]) -> io::Result<()> {
-        let todo: Vec<&(&str, &[u8])> = blobs.iter().filter(|(k, _)| !self.path(k).exists()).collect();
+        let mut todo: Vec<&(&str, &[u8])> = Vec::new();
+        for b in blobs {
+            if !self.has_blob(b.0)? {
+                todo.push(b);
+            }
+        }
         // Compress on every core; then write in order, one sync for all.
         let encoded = parallel_map(&todo, |(_, v)| self.encode_pure(v))?;
+        if let Some(packs) = &self.packs
+            && todo.len() > 1
+        {
+            // One pack for the batch: chunks first, then the files naming them.
+            let mut w = packs.writer(&self.root.join("tmp"))?;
+            let mut chunks_seen = std::collections::HashSet::new();
+            for (_, (_, chunks)) in todo.iter().zip(&encoded) {
+                for (id, packed) in chunks {
+                    let hex = hex::encode(id);
+                    if chunks_seen.insert(hex.clone()) && !self.has_chunk(&hex)? {
+                        w.add(&format!("#{hex}"), &crate::pack::Entry::File(packed.clone()))?;
+                    }
+                }
+            }
+            for ((key, _), (file, _)) in todo.iter().zip(encoded) {
+                w.add(key, &crate::pack::Entry::File(file))?;
+            }
+            w.finish()?;
+            return Ok(());
+        }
         let mut pending = Vec::new();
         for ((key, _), (file, chunks)) in todo.iter().zip(encoded) {
             for (id, packed) in chunks {
@@ -398,7 +603,11 @@ impl Backend for DiskBackend {
     }
 
     fn remove_blob(&self, key: &str) -> io::Result<()> {
-        self.remove_file(&self.path(key))
+        self.remove_file(&self.path(key))?;
+        match &self.packs {
+            Some(p) => p.remove(&[key.to_string()], &self.root.join("tmp")),
+            None => Ok(()),
+        }
     }
 
     fn chunked(&self) -> bool {
@@ -406,7 +615,7 @@ impl Backend for DiskBackend {
     }
 
     fn get_chunk(&self, id: &crate::chunk::Id) -> io::Result<Option<Vec<u8>>> {
-        match read_opt(&self.chunk_path(&hex::encode(id)))? {
+        match self.chunk_file(&hex::encode(id))? {
             Some(f) => Ok(Some(unpack(&f)?.1)),
             None => Ok(None),
         }
@@ -449,6 +658,16 @@ impl Backend for DiskBackend {
             },
             None => self.all_keys()?,
         };
+        // Packed blobs in the span.
+        let mut candidates = candidates;
+        if let Some(p) = &self.packs {
+            // Bounds that are not UTF-8 widen to open ones; the filter below is exact.
+            let from = span.from.as_deref().and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
+            let to = span.to.as_deref().and_then(|b| std::str::from_utf8(b).ok());
+            candidates.extend(p.names_in(from, to)?.into_iter().filter(|n| !n.starts_with('#')));
+            candidates.sort_unstable();
+            candidates.dedup();
+        }
         let mut keys: Vec<String> = candidates.into_iter().filter(|k| span.contains(k.as_bytes())).collect();
         keys.sort_unstable();
         keys.truncate(limit);
@@ -490,7 +709,10 @@ mod tests {
     }
 
     fn files(dir: &std::path::Path) -> usize {
-        fs::read_dir(dir).unwrap().map(|f| fs::read_dir(f.unwrap().path()).unwrap().count()).sum()
+        match fs::read_dir(dir) {
+            Ok(d) => d.map(|f| fs::read_dir(f.unwrap().path()).unwrap().count()).sum(),
+            Err(_) => 0,
+        }
     }
 
     #[test]
@@ -540,5 +762,50 @@ mod tests {
         assert_eq!(fs::read(b.path(&k2)).unwrap(), big(2, 100_000));
         drop(b);
         assert!(!DiskBackend::open(dir.path()).unwrap().chunked());
+    }
+
+    #[test]
+    fn batches_go_to_packs_and_repack_makes_deltas() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = DiskBackend::open(dir.path()).unwrap();
+        let key = |v: &[u8]| crate::algo::lookup("blake3").unwrap().key(v);
+        let base: Vec<u8> =
+            (0..20_000u32).flat_map(|i| format!("line {i} of a file\n").into_bytes()).take(60_000).collect();
+        let mut edited = base.clone();
+        edited.splice(30_000..30_000, b"one edit ".iter().copied());
+        let large = big(9, 200_000);
+        let (k1, k2, k3) = (key(&base), key(&edited), key(&large));
+        b.put_blobs(&[(&k1, &base), (&k2, &edited), (&k3, &large)]).unwrap();
+        // One pack, no loose blob files.
+        assert_eq!(files(&dir.path().join("blobs/blake3")), 0);
+        assert_eq!(fs::read_dir(dir.path().join("packs")).unwrap().count(), 2);
+        // Another process sees it.
+        let other = DiskBackend::open(dir.path()).unwrap();
+        for (k, v) in [(&k1, &base), (&k2, &edited), (&k3, &large)] {
+            assert_eq!(other.get(k).unwrap().as_ref(), Some(v));
+        }
+        assert_eq!(b.list(&Span::prefix("blake3:"), 10).unwrap().len(), 3);
+        // A loose blob, then a repack with a hint: edited is a delta of base.
+        let small = b"small".to_vec();
+        let k4 = key(&small);
+        b.put_blob(&k4, &small).unwrap();
+        let hints = [(k2.clone(), k1.clone())].into_iter().collect();
+        let r = b.repack(&[k1.clone(), k2.clone()], &hints).unwrap();
+        assert_eq!(r.deltas, 1);
+        assert_eq!(files(&dir.path().join("blobs/blake3")), 0);
+        let size: u64 =
+            fs::read_dir(dir.path().join("packs")).unwrap().map(|e| e.unwrap().metadata().unwrap().len()).sum();
+        // The random large blob does not compress; the two text files together cost little.
+        assert!(size < large.len() as u64 + 30_000, "{size} bytes");
+        for (k, v) in [(&k1, &base), (&k2, &edited), (&k3, &large), (&k4, &small)] {
+            assert_eq!(b.get(k).unwrap().as_ref(), Some(v));
+            assert_eq!(DiskBackend::open(dir.path()).unwrap().get(k).unwrap().as_ref(), Some(v));
+        }
+        // Removing from a pack, and sweeping a removed big blob's chunks.
+        b.remove_blob(&k3).unwrap();
+        assert_eq!(b.get(&k3).unwrap(), None);
+        assert!(!other.has_blob(&k3).unwrap());
+        assert!(b.sweep_chunks().unwrap() > 0);
+        assert_eq!(b.get(&k2).unwrap(), Some(edited));
     }
 }

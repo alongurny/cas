@@ -270,6 +270,15 @@ for both tools. Results are recorded per corpus:
   derived index (or a cached parse keyed by the history's key), not a
   change of format.
 
+- 2026-11-08, step 2: packs (`src/pack.rs`). A batch of more than one blob
+  is written as one pack file plus its index, with one durable flush, instead
+  of one loose file each. `cas gc` repacks: it orders every blob by history,
+  takes delta hints from `gc::delta_hints` (the same path in the previous
+  version, and for a chunked file the chunk at the same position), and keeps
+  a zstd-with-dictionary delta when it is smaller, with chains at most 10
+  deep. Thesis store 246 MB → 140 MB after gc (git 96 MB, 90 MB of it PDFs);
+  `import-git` now batches its writes, 27.9 s → 5.4 s.
+
 ## Order of work
 
 Each step comes with its row in the benchmark, measured before and after.

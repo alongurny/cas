@@ -5,9 +5,10 @@
 
 use crate::dir::{DIR, Item};
 use crate::history::{History, NodeId, Step};
-use crate::{Error, Result, View, put};
+use crate::{Error, Result, View, by_alias};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
+use cas_core::store::Put;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path as FsPath;
@@ -80,18 +81,41 @@ struct Importer<'a> {
     store: &'a dyn Store,
     alg: &'static Algorithm,
     cat: CatFile,
+    /// Blobs not written yet, children before parents; written in batches.
+    pending: Vec<Put>,
+    pending_bytes: usize,
     trees: HashMap<String, View>,
     files: HashMap<(String, &'static str), View>,
     n: Imported,
 }
 
 impl Importer<'_> {
+    /// [`crate::put`], batched: the write happens at the next flush.
+    fn put(&mut self, alias: &str, bytes: Vec<u8>) -> Result<View> {
+        let f = by_alias(alias).ok_or_else(|| Error::UnknownFormat(alias.to_string()))?;
+        let key = self.alg.key(&bytes);
+        f.check(&key, &bytes)?;
+        let view = View { format: f.id().to_string(), key: key.clone() };
+        self.pending_bytes += bytes.len();
+        self.pending.push(Put::blob(key, bytes));
+        if self.pending.len() >= 4096 || self.pending_bytes >= 32 << 20 {
+            self.flush()?;
+        }
+        Ok(view)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        let batch = std::mem::take(&mut self.pending);
+        self.pending_bytes = 0;
+        self.store.write_many(&batch).map_err(|(_, e)| Error::from(e))
+    }
+
     fn file(&mut self, id: &str, alias: &'static str) -> Result<View> {
         if let Some(v) = self.files.get(&(id.to_string(), alias)) {
             return Ok(v.clone());
         }
         let bytes = self.cat.get(id)?;
-        let v = put(self.store, self.alg, alias, &bytes)?;
+        let v = self.put(alias, bytes)?;
         self.files.insert((id.to_string(), alias), v.clone());
         self.n.files += 1;
         Ok(v)
@@ -127,7 +151,7 @@ impl Importer<'_> {
         // Git sorts directories as if their names ended in '/'; dir sorts by name.
         items.sort_by(|a, b| a.name.cmp(&b.name));
         // `put` checks the encoding, so names the dir format refuses fail here.
-        let v = put(self.store, self.alg, "dir", &DIR.encode(&items))?;
+        let v = self.put("dir", DIR.encode(&items))?;
         self.trees.insert(id.to_string(), v.clone());
         self.n.trees += 1;
         Ok(v)
@@ -148,6 +172,8 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
         trees: HashMap::new(),
         files: HashMap::new(),
         n: Imported::default(),
+        pending: Vec::new(),
+        pending_bytes: 0,
     };
     let mut h = History::default();
     let mut nodes: BTreeMap<String, NodeId> = BTreeMap::new();
@@ -183,5 +209,6 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
             h.tags.insert(name.to_string(), node.clone());
         }
     }
+    im.flush()?;
     Ok((h, im.n))
 }
