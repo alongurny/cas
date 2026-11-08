@@ -14,6 +14,7 @@ pub mod formats;
 pub mod fs;
 pub mod gc;
 pub mod git;
+pub mod graph;
 pub mod history;
 pub mod merge;
 pub mod sync;

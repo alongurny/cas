@@ -195,10 +195,10 @@ fn resolve(store: &dyn Store, root: &View, path: Option<&Path>) -> Result<At> {
     let mut at = At::Dir(root.clone());
     for name in path.names() {
         let At::Dir(r) = at else { return Ok(At::Nothing) };
-        let items = load(store, &r)?;
-        at = match items.binary_search_by(|it| it.name.as_str().cmp(name)) {
-            Ok(p) => At::of(items[p].child.clone()),
-            Err(_) => return Ok(At::Nothing),
+        let Kind::Dir(d) = &dir_format(&r)?.kind else { unreachable!() };
+        at = match d.find(r.key(), &read_blob(store, r.key())?, name)? {
+            Some(child) => At::of(child),
+            None => return Ok(At::Nothing),
         };
     }
     Ok(at)

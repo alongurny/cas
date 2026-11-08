@@ -11,7 +11,11 @@ pub enum Parsed<'a> {
 /// Classify `key`, or `None` when it breaks the key byte rules or the blob
 /// grammar. Digest length is checked later, once the algorithm is known.
 pub fn classify(key: &str) -> Option<Parsed<'_>> {
-    if key.is_empty() || key.chars().any(|c| c.is_control()) {
+    // Control characters: bytes below 0x20 and 0x7f in ASCII, and U+0080
+    // to U+009F otherwise. The byte scan is the common, all-ASCII case.
+    let controls =
+        if key.is_ascii() { key.bytes().any(|b| b < 0x20 || b == 0x7f) } else { key.chars().any(|c| c.is_control()) };
+    if key.is_empty() || controls {
         return None;
     }
     let Some(colon) = key.find(':') else { return Some(Parsed::Var) };

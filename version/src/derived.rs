@@ -12,15 +12,17 @@ use crate::{Error, Path, Result, View, by_alias, malformed, object_at, read_blob
 use cas_core::algo::{self, Algorithm};
 use cas_core::{Error as CoreError, Expect, Store};
 
-type Compute = fn(&dyn Store, &'static Algorithm, &View) -> Result<Value>;
+type Compute = fn(&dyn Store, &'static Algorithm, &View) -> Result<Vec<u8>>;
 
 pub struct Function {
     pub name: &'static str,
     /// Alias of the format inputs are in.
     pub input: &'static str,
-    /// Results are `uni-bin` values.
+    /// Alias of the format results are in: `uni-bin` unless the spec says
+    /// otherwise.
+    pub output: &'static str,
     pub spec: &'static str,
-    compute: Compute,
+    pub(crate) compute: Compute,
 }
 
 fn blake3() -> &'static Algorithm {
@@ -33,7 +35,7 @@ impl Function {
         Value::map([
             ("input", Value::str(by_alias(self.input).unwrap().id())),
             ("name", Value::str(self.name)),
-            ("output", Value::str(by_alias("uni-bin").unwrap().id())),
+            ("output", Value::str(by_alias(self.output).unwrap().id())),
             ("spec", Value::str(blake3().key(self.spec.as_bytes()))),
         ])
     }
@@ -76,6 +78,15 @@ pub fn cached(store: &dyn Store, f: &Function, input: &View) -> Result<Option<Vi
     }
 }
 
+/// [`cached`], but a store that will not show its cache (a remote that
+/// grants no reads of `derived/`) just has none.
+pub fn readable_cache(store: &dyn Store, f: &Function, input: &View) -> Result<Option<View>> {
+    match cached(store, f, input) {
+        Err(Error::Store(CoreError::Denied)) => Ok(None),
+        r => r,
+    }
+}
+
 /// `f(input)`: the cached result, or else computed, stored, and recorded
 /// under its variable. If another writer recorded a result first, that one is
 /// returned; functions are deterministic, so it is the same value.
@@ -83,9 +94,9 @@ pub fn derive(store: &dyn Store, alg: &'static Algorithm, f: &Function, input: &
     if let Some(r) = cached(store, f, input)? {
         return Ok(r);
     }
-    let value = (f.compute)(store, alg, input)?;
-    let key = write_blob(store, alg, &value.serialize())?;
-    let result = View { format: by_alias("uni-bin").unwrap().id().to_string(), key };
+    let bytes = (f.compute)(store, alg, input)?;
+    let key = write_blob(store, alg, &bytes)?;
+    let result = View { format: by_alias(f.output).unwrap().id().to_string(), key };
     match store.write(&f.var(input), result.to_string().as_bytes(), &Expect::Absent) {
         Ok(()) => Ok(result),
         Err(CoreError::Conflict) => Ok(cached(store, f, input)?.expect("a conflicting tag exists")),
@@ -109,7 +120,7 @@ fn number(v: &Value, field: &str) -> u64 {
 /// `summary`: how many directories and files lie under a directory. Each
 /// subdirectory's summary is itself derived, so after an edit only the
 /// directories on the edited paths are recomputed.
-fn summary(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<Value> {
+fn summary(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<Vec<u8>> {
     let (mut dirs, mut files) = (0, 0);
     for item in tree::load(store, input)? {
         if item.child.is_dir() {
@@ -120,11 +131,16 @@ fn summary(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<V
             files += 1;
         }
     }
-    Ok(Value::map([("dirs", count(dirs)), ("files", count(files))]))
+    Ok(Value::map([("dirs", count(dirs)), ("files", count(files))]).serialize())
 }
 
-pub static SUMMARY: Function =
-    Function { name: "summary", input: "dir", spec: include_str!("../../spec/functions/summary.md"), compute: summary };
+pub static SUMMARY: Function = Function {
+    name: "summary",
+    input: "dir",
+    output: "uni-bin",
+    spec: include_str!("../../spec/functions/summary.md"),
+    compute: summary,
+};
 
 /// The nodes of `h` whose step changed `path` (or anything under it),
 /// newest first in log order. A node counts when what lies at `path`
@@ -229,13 +245,14 @@ impl Heads {
     }
 }
 
-fn heads_value(store: &dyn Store, _: &'static Algorithm, input: &View) -> Result<Value> {
-    Ok(Heads::of(&crate::history::read(store, input)?).to_value())
+fn heads_value(store: &dyn Store, _: &'static Algorithm, input: &View) -> Result<Vec<u8>> {
+    Ok(Heads::of(&crate::history::read(store, input)?).to_value().serialize())
 }
 
 pub static HEADS: Function = Function {
     name: "heads",
     input: "history",
+    output: "uni-bin",
     spec: include_str!("../../spec/functions/heads.md"),
     compute: heads_value,
 };
@@ -245,7 +262,7 @@ pub static HEADS: Function = Function {
 /// store that refuses the record (a read-only remote) still gets an answer.
 pub fn heads(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<Heads> {
     let parse = |r: &View| Heads::from_value(&value(store, r)?).map_err(|e| malformed(r.key(), e));
-    if let Some(r) = cached(store, &HEADS, input)? {
+    if let Some(r) = readable_cache(store, &HEADS, input)? {
         return parse(&r);
     }
     match derive(store, alg, &HEADS, input) {
@@ -255,10 +272,16 @@ pub fn heads(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result
     }
 }
 
+/// Record `bytes` as `f(input)`, computed by the caller. Best effort: a
+/// refusal leaves the next reader to compute it.
+pub fn record(store: &dyn Store, alg: &'static Algorithm, f: &Function, input: &View, bytes: &[u8]) {
+    let Ok(key) = write_blob(store, alg, bytes) else { return };
+    let result = View { format: by_alias(f.output).unwrap().id().to_string(), key };
+    let _ = store.write(&f.var(input), result.to_string().as_bytes(), &Expect::Absent);
+}
+
 /// Record the heads of `h`, just written at `input`, so readers need not
-/// parse it. Best effort: a refusal leaves the next reader to compute them.
+/// parse it.
 pub fn record_heads(store: &dyn Store, alg: &'static Algorithm, input: &View, h: &History) {
-    let Ok(key) = write_blob(store, alg, &Heads::of(h).to_value().serialize()) else { return };
-    let result = View { format: by_alias("uni-bin").unwrap().id().to_string(), key };
-    let _ = store.write(&HEADS.var(input), result.to_string().as_bytes(), &Expect::Absent);
+    record(store, alg, &HEADS, input, &Heads::of(h).to_value().serialize());
 }

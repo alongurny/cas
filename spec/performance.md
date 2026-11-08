@@ -294,6 +294,26 @@ for both tools. Results are recorded per corpus:
     is the alternative. `log` and `path-log` still read the whole history:
     the graph index with Bloom filters is next.
 
+- 2026-11-08, step 3 continued: the function `graph`
+  (spec/functions/graph.md), cas's commit-graph. It holds every node in log
+  order with predecessors by position, notes, and a changed-path Bloom
+  filter per step (git's 10 bits per entry and 7 hashes; up to 8,192 paths
+  rather than git's 512, so big merges keep a filter). `path-log` builds it
+  once and then reads trees only where a filter says the path may have
+  changed; `log` uses it when cached. A save notes which history it
+  replaced, so the next graph reuses the old one's filters and diffs only
+  the new steps.
+  - Packs are memory-mapped; directory lookups scan without allocating.
+  - git.git: `path-log Makefile` 64 s → 6 to 9 s (git 0.56 s) after a
+    one-time 78 s build; `log` 2.0 → 0.5 s. The remaining cost is about
+    27,000 reads of the 85 KB root directory, each chunked (over 64 KiB),
+    across 449 packs, and verified by hash. Next: a multi-pack index, a
+    cache of decoded directories and delta bases (git's p0003), and a more
+    compact directory encoding.
+  - A commit on git.git takes 2.8 s, because it rewrites the whole history
+    object. The fix belongs to the same step: a history format that can
+    grow by a node without rewriting the rest.
+
 ## Order of work
 
 Each step comes with its row in the benchmark, measured before and after.

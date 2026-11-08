@@ -27,7 +27,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::time::SystemTime;
@@ -47,6 +47,48 @@ static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 struct Loc {
     pack: usize,
     offset: u64,
+}
+
+/// A pack file mapped read-only. Packs never change once renamed into
+/// place, and a mapping outlives the file's removal, so reads need no
+/// system call.
+struct Map {
+    ptr: *const u8,
+    len: usize,
+}
+
+// The mapping is read-only and owned here.
+unsafe impl Send for Map {}
+unsafe impl Sync for Map {}
+
+impl Map {
+    fn open(path: &Path) -> io::Result<Map> {
+        use std::os::fd::AsRawFd;
+        let f = File::open(path)?;
+        let len = f.metadata()?.len() as usize;
+        if len == 0 {
+            return Err(bad("empty pack"));
+        }
+        // SAFETY: a fresh read-only private mapping of a whole file we opened.
+        let ptr =
+            unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_PRIVATE, f.as_raw_fd(), 0) };
+        if ptr == libc::MAP_FAILED {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Map { ptr: ptr as *const u8, len })
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: the mapping lives as long as self and is never written.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl Drop for Map {
+    fn drop(&mut self) {
+        // SAFETY: unmapping what open mapped.
+        unsafe { libc::munmap(self.ptr as *mut libc::c_void, self.len) };
+    }
 }
 
 /// One pack's index, in its file's (version 2) bytes.
@@ -138,9 +180,10 @@ fn encode_idx(mut entries: Vec<(String, u64)>) -> Vec<u8> {
 
 #[derive(Default)]
 struct State {
-    /// Pack ids, in load order; `Loc::pack` indexes this and `idx`.
+    /// Pack ids, in load order; `Loc::pack` indexes this, `idx` and `maps`.
     packs: Vec<String>,
     idx: Vec<Idx>,
+    maps: Vec<std::sync::OnceLock<std::sync::Arc<Map>>>,
     removed: BTreeSet<String>,
     seen_mtime: Option<SystemTime>,
 }
@@ -294,6 +337,7 @@ impl Packs {
         for id in ids.into_iter().filter(|i| !known.contains(i)) {
             let idx = Idx::parse(&id, fs::read(self.dir.join(format!("{id}.idx")))?)?;
             st.idx.push(idx);
+            st.maps.push(std::sync::OnceLock::new());
             st.packs.push(id);
         }
         st.removed = match fs::read_to_string(self.dir.join("removed")) {
@@ -315,6 +359,23 @@ impl Packs {
         Ok(st.get(name).map(|l| (st.packs[l.pack].clone(), l)))
     }
 
+    /// Where `name` is, with the mapping of its pack (taken under the same
+    /// look at the state, which a refresh may replace).
+    fn locate_mapped(&self, name: &str) -> io::Result<Option<(Loc, std::sync::Arc<Map>)>> {
+        self.refresh()?;
+        let st = self.state.read().unwrap();
+        if st.removed.contains(name) {
+            return Ok(None);
+        }
+        let Some(loc) = st.get(name) else { return Ok(None) };
+        let cell = &st.maps[loc.pack];
+        if let Some(m) = cell.get() {
+            return Ok(Some((loc, m.clone())));
+        }
+        let m = std::sync::Arc::new(Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack])))?);
+        Ok(Some((loc, cell.get_or_init(|| m).clone())))
+    }
+
     pub fn contains(&self, name: &str) -> io::Result<bool> {
         Ok(self.locate(name)?.is_some())
     }
@@ -328,21 +389,17 @@ impl Packs {
         if depth > MAX_DEPTH + 1 {
             return Err(bad(format!("delta chain too long at {name}")));
         }
-        let Some((id, loc)) = self.locate(name)? else { return Ok(None) };
-        let mut f = File::open(self.dir.join(format!("{id}.pack")))?;
-        f.seek(SeekFrom::Start(loc.offset))?;
-        let mut head = [0u8; 3];
-        f.read_exact(&mut head)?;
-        let mut skip = vec![0; u16::from_be_bytes([head[1], head[2]]) as usize];
-        f.read_exact(&mut skip)?;
-        let mut len = [0u8; 4];
-        f.read_exact(&mut len)?;
-        let mut data = vec![0; u32::from_be_bytes(len) as usize];
-        f.read_exact(&mut data)?;
-        match head[0] {
-            FILE => Ok(Some(data)),
+        let Some((loc, map)) = self.locate_mapped(name)? else { return Ok(None) };
+        let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
+        let kind = take(&mut b, 1)?[0];
+        let n = take_u16(&mut b)?;
+        take(&mut b, n)?;
+        let n = take_u32(&mut b)?;
+        let data = take(&mut b, n)?;
+        match kind {
+            FILE => Ok(Some(data.to_vec())),
             DELTA => {
-                let mut b = &data[..];
+                let mut b = data;
                 let n = take_u16(&mut b)?;
                 let base = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?.to_string();
                 let size = take_u32(&mut b)?;

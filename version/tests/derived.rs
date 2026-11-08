@@ -170,3 +170,41 @@ fn heads_are_recorded_and_answer_without_the_history() {
     // A node that is neither a tip nor tagged needs the history.
     assert_eq!(hd.resolve(a.as_str()), None);
 }
+
+/// A graph is built from the graph of the history its history replaced:
+/// the old nodes keep their filters, and only new steps are diffed.
+#[test]
+fn graphs_are_built_from_the_replaced_historys_graph() {
+    use cas_version::graph::{Graph, graph};
+    use cas_version::history;
+    let s = store();
+    let mut v = build(&s, b3(), formats::by_alias("dir").unwrap(), &BTreeMap::new()).unwrap();
+    let edit = |v: &View, p: &str, t: &str| {
+        let f = put(&s, b3(), "raw", t.as_bytes()).unwrap();
+        update(&s, b3(), v, &BTreeMap::from([(Path::new(p).unwrap(), Edit::Set(Node::File(f)))])).unwrap()
+    };
+    for i in 0..5 {
+        v = edit(&v, &format!("d/f{}", i % 2), &format!("{i}"));
+        history::commit(&s, b3(), "main", &v, Step::default(), None).unwrap();
+    }
+    let first = graph(&s, b3(), &history::head(&s, "main").unwrap().unwrap()).unwrap();
+    v = edit(&v, "e", "new");
+    history::commit(&s, b3(), "main", &v, Step::default(), None).unwrap();
+    let head = history::head(&s, "main").unwrap().unwrap();
+    let before = cas_version::graph::replaced(&s, &head).expect("the save noted the history it replaced");
+    assert!(cas_version::derived::cached(&s, &cas_version::graph::GRAPH, &before).unwrap().is_some());
+    let g = graph(&s, b3(), &head).unwrap();
+    let h = history::read(&s, &head).unwrap();
+    assert_eq!(g, Graph::build(&s, &h, None, 1).unwrap(), "the same graph as one built from nothing");
+    let old: Vec<_> = g.nodes[1..].iter().map(|r| (&r.id, &r.filter)).collect();
+    assert_eq!(old, first.nodes.iter().map(|r| (&r.id, &r.filter)).collect::<Vec<_>>(), "old records follow the new");
+    let e = g.path_log(&s, &Path::new("e").unwrap()).unwrap();
+    let f0 = g.path_log(&s, &Path::new("d/f0").unwrap()).unwrap();
+    assert_eq!(e, vec![0]);
+    let want: Vec<usize> = cas_version::derived::path_log(&s, &h, &Path::new("d/f0").unwrap())
+        .unwrap()
+        .iter()
+        .map(|id| g.nodes.iter().position(|r| &r.id == id).unwrap())
+        .collect();
+    assert_eq!(f0, want);
+}

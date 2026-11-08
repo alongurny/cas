@@ -12,6 +12,7 @@ use cas_core::server::{Request, Server, Tls};
 use cas_core::{AllowAll, Backend, CoreStore, Policy, Store, Who};
 use cas_version::access::{self, Access, Grant};
 use cas_version::derived::{self, SUMMARY};
+use cas_version::graph;
 use cas_version::history::{self, History, NodeId, Step};
 use cas_version::merge::{self, Outcome as MergeOutcome};
 use cas_version::uni::Value;
@@ -227,21 +228,23 @@ fn run(a: Args) -> Res<()> {
             out!("{}", id);
         }
         Some("log") => {
-            let h = load(s, name)?.1;
+            // From the graph when one is cached (path-log builds it), which
+            // spares parsing the whole history.
+            let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
+            let heads = derived::heads(s, b3(), &v).map_err(e)?;
+            let g = graph::graph_or_order(s, &v).map_err(e)?;
             let mut tags: BTreeMap<&NodeId, Vec<&str>> = BTreeMap::new();
-            for (t, n) in &h.tags {
+            for (t, n) in &heads.tags {
                 tags.entry(n).or_default().push(t);
             }
-            for id in h.log() {
-                let n = &h.nodes[&id];
-                let after: Vec<String> = n
+            for r in &g.nodes {
+                let after: Vec<String> = r
                     .after
                     .iter()
-                    .map(|(p, st)| format!("{}{}", short(p.version().key()), if st.compatible { "~" } else { "" }))
+                    .map(|&(p, c)| format!("{}{}", short(g.nodes[p].id.version().key()), if c { "~" } else { "" }))
                     .collect();
-                let notes: Vec<&str> = n.after.values().filter_map(|st| st.changelog.as_deref()).collect();
-                let t = tags.get(&id).map(|t| format!(" ({})", t.join(", "))).unwrap_or_default();
-                out!("{}{t}  [{}]  {}", short(id.version().key()), after.join(" "), notes.join(" / "));
+                let t = tags.get(&r.id).map(|t| format!(" ({})", t.join(", "))).unwrap_or_default();
+                out!("{}{t}  [{}]  {}", short(r.id.version().key()), after.join(" "), r.notes);
             }
         }
         Some("ls") => {
@@ -273,10 +276,10 @@ fn run(a: Args) -> Res<()> {
         }
         Some("path-log") => {
             let p = Path::new(arg(1, "PATH")?).map_err(e)?;
-            let h = load(s, name)?.1;
-            for id in derived::path_log(s, &h, &p).map_err(e)? {
-                let notes: Vec<&str> = h.nodes[&id].after.values().filter_map(|st| st.changelog.as_deref()).collect();
-                out!("{}  {}", short(id.version().key()), notes.join(" / "));
+            let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
+            let g = graph::graph(s, b3(), &v).map_err(e)?;
+            for i in g.path_log(s, &p).map_err(e)? {
+                out!("{}  {}", short(g.nodes[i].id.version().key()), g.nodes[i].notes);
             }
         }
         Some("tag") => {

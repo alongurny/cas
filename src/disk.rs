@@ -48,10 +48,19 @@ fn pack(bytes: &[u8]) -> io::Result<Vec<u8>> {
     Ok(if z.len() < bytes.len() { [&[ZSTD][..], &z].concat() } else { [&[RAW][..], bytes].concat() })
 }
 
+/// One zstd frame: in one call when the frame states its size (ours do),
+/// streamed otherwise.
+fn unzstd(z: &[u8]) -> io::Result<Vec<u8>> {
+    match zstd::zstd_safe::get_frame_content_size(z) {
+        Ok(Some(n)) if n <= 1 << 32 => zstd::bulk::decompress(z, n as usize),
+        _ => zstd::stream::decode_all(z),
+    }
+}
+
 fn unpack(file: &[u8]) -> io::Result<(u8, Vec<u8>)> {
     match file.split_first() {
         Some((&RAW, rest)) => Ok((RAW, rest.to_vec())),
-        Some((&t @ (ZSTD | CHUNKED), rest)) => Ok((t, zstd::stream::decode_all(rest)?)),
+        Some((&t @ (ZSTD | CHUNKED), rest)) => Ok((t, unzstd(rest)?)),
         _ => Err(io::Error::other("unknown blob file encoding")),
     }
 }
