@@ -144,3 +144,29 @@ fn path_log() {
     assert!(log("zzz").is_empty());
     let _ = (m, View::parse);
 }
+
+/// Saving a history records its heads, which answer `latest`, tags and the
+/// step into a tip without the history.
+#[test]
+fn heads_are_recorded_and_answer_without_the_history() {
+    use cas_version::derived::{HEADS, Heads, heads};
+    let s = store();
+    let v1 = put(&s, b3(), "raw", b"one").unwrap();
+    let v2 = put(&s, b3(), "raw", b"two").unwrap();
+    let a = cas_version::history::commit(&s, b3(), "main", &v1, Default::default(), None).unwrap();
+    let b = cas_version::history::commit(&s, b3(), "main", &v2, Default::default(), None).unwrap();
+    cas_version::history::record(&s, b3(), "main", |h| {
+        h.tags.insert("first".into(), a.clone());
+        Ok(())
+    })
+    .unwrap();
+    let head = cas_version::history::head(&s, "main").unwrap().unwrap();
+    assert!(derived::cached(&s, &HEADS, &head).unwrap().is_some(), "recorded on save");
+    let hd = heads(&s, b3(), &head).unwrap();
+    assert_eq!(hd, Heads::of(&cas_version::history::read(&s, &head).unwrap()));
+    assert_eq!(hd.resolve("latest"), Some(b.clone()));
+    assert_eq!(hd.resolve("first"), Some(a.clone()));
+    assert_eq!(hd.tips[&b], vec![a.clone()]);
+    // A node that is neither a tip nor tagged needs the history.
+    assert_eq!(hd.resolve(a.as_str()), None);
+}

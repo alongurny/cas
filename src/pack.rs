@@ -13,15 +13,19 @@
 //! - `<id>.pack`: `CASPACK1`, then frames `kind u8, name len u16, name,
 //!   data len u32, data`. Kind 0 is file bytes; kind 1 is a delta, whose data
 //!   is `base name len u16, base name, value len u32, zstd bytes`.
-//! - `<id>.idx`: `CASIDX01`, then `name len u16, name, offset u64` for each
-//!   frame. A pack counts only once its index exists; both are synced before
-//!   the index is renamed into place.
+//! - `<id>.idx`: `CASIDX02`, a count `n u32`, then `n` records `name start
+//!   u32, name len u16, offset u64` sorted by name, then the names. A lookup
+//!   is a binary search in the file's bytes, as in git's pack index, so
+//!   opening a store does not read every name into a map. (`CASIDX01`, an
+//!   unsorted list `name len u16, name, offset u64`, is still read.) A pack
+//!   counts only once its index exists; both are synced before the index is
+//!   renamed into place.
 //! - `removed`: names removed from packs, one per line, replaced atomically.
 //!
 //! Every process sharing the root sees new packs and removals: a lookup
 //! re-reads the indexes when the directory's modification time changed.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -29,7 +33,9 @@ use std::sync::RwLock;
 use std::time::SystemTime;
 
 const PACK_MAGIC: &[u8; 8] = b"CASPACK1";
-const IDX_MAGIC: &[u8; 8] = b"CASIDX01";
+const IDX_MAGIC_V1: &[u8; 8] = b"CASIDX01";
+const IDX_MAGIC: &[u8; 8] = b"CASIDX02";
+const REC: usize = 14;
 const FILE: u8 = 0;
 const DELTA: u8 = 1;
 /// Longest chain of deltas `repack` builds.
@@ -43,13 +49,107 @@ struct Loc {
     offset: u64,
 }
 
+/// One pack's index, in its file's (version 2) bytes.
+struct Idx {
+    bytes: Vec<u8>,
+    n: usize,
+}
+
+impl Idx {
+    fn parse(id: &str, bytes: Vec<u8>) -> io::Result<Idx> {
+        let magic = bytes.get(..8).ok_or_else(|| bad(format!("{id}.idx: truncated")))?;
+        if magic == IDX_MAGIC_V1 {
+            let mut b = &bytes[8..];
+            let mut entries = Vec::new();
+            while !b.is_empty() {
+                let n = take_u16(&mut b)?;
+                let name = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?.to_string();
+                entries.push((name, u64::from_be_bytes(take(&mut b, 8)?.try_into().unwrap())));
+            }
+            return Idx::parse(id, encode_idx(entries));
+        }
+        if magic != IDX_MAGIC {
+            return Err(bad(format!("{id}.idx: not an index")));
+        }
+        let n = u32::from_be_bytes(bytes.get(8..12).ok_or_else(|| bad("idx truncated"))?.try_into().unwrap()) as usize;
+        let idx = Idx { bytes, n };
+        if idx.bytes.len() < 12 + n * REC {
+            return Err(bad(format!("{id}.idx: truncated")));
+        }
+        Ok(idx)
+    }
+
+    /// Record `i`'s name bytes; a record pointing outside the file reads
+    /// as empty (and so never matches).
+    fn name_bytes(&self, i: usize) -> &[u8] {
+        let r = &self.bytes[12 + i * REC..12 + (i + 1) * REC];
+        let start = u32::from_be_bytes(r[..4].try_into().unwrap()) as usize;
+        let len = u16::from_be_bytes(r[4..6].try_into().unwrap()) as usize;
+        self.bytes.get(start..start + len).unwrap_or_default()
+    }
+
+    fn name(&self, i: usize) -> io::Result<&str> {
+        std::str::from_utf8(self.name_bytes(i)).map_err(bad)
+    }
+
+    fn offset(&self, i: usize) -> u64 {
+        let r = &self.bytes[12 + i * REC..12 + (i + 1) * REC];
+        u64::from_be_bytes(r[6..].try_into().unwrap())
+    }
+
+    /// The first record whose name is not less than `name`.
+    fn lower_bound(&self, name: &str) -> usize {
+        let (mut lo, mut hi) = (0, self.n);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if self.name_bytes(mid) < name.as_bytes() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        lo
+    }
+
+    fn get(&self, name: &str) -> Option<u64> {
+        let i = self.lower_bound(name);
+        (i < self.n && self.name_bytes(i) == name.as_bytes()).then(|| self.offset(i))
+    }
+}
+
+/// A version 2 index of `entries` (name, frame offset).
+fn encode_idx(mut entries: Vec<(String, u64)>) -> Vec<u8> {
+    entries.sort();
+    entries.dedup_by(|a, b| a.0 == b.0);
+    let mut out = IDX_MAGIC.to_vec();
+    out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+    let mut at = 12 + entries.len() * REC;
+    for (name, off) in &entries {
+        out.extend_from_slice(&(at as u32).to_be_bytes());
+        out.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        out.extend_from_slice(&off.to_be_bytes());
+        at += name.len();
+    }
+    for (name, _) in &entries {
+        out.extend_from_slice(name.as_bytes());
+    }
+    out
+}
+
 #[derive(Default)]
 struct State {
-    /// Pack ids, in load order; `Loc::pack` indexes this.
+    /// Pack ids, in load order; `Loc::pack` indexes this and `idx`.
     packs: Vec<String>,
-    names: BTreeMap<String, Loc>,
+    idx: Vec<Idx>,
     removed: BTreeSet<String>,
     seen_mtime: Option<SystemTime>,
+}
+
+impl State {
+    fn get(&self, name: &str) -> Option<Loc> {
+        // Newest pack first.
+        (0..self.packs.len()).rev().find_map(|pack| self.idx[pack].get(name).map(|offset| Loc { pack, offset }))
+    }
 }
 
 pub struct Packs {
@@ -106,13 +206,12 @@ pub struct PackWriter<'a> {
     tmp: PathBuf,
     out: io::BufWriter<File>,
     offset: u64,
-    idx: Vec<u8>,
+    idx: Vec<(String, u64)>,
 }
 
 impl PackWriter<'_> {
     pub fn add(&mut self, name: &str, e: &Entry) -> io::Result<()> {
-        put_name(&mut self.idx, name);
-        self.idx.extend_from_slice(&self.offset.to_be_bytes());
+        self.idx.push((name.to_string(), self.offset));
         let mut frame = Vec::new();
         let data_len;
         match e {
@@ -150,7 +249,7 @@ impl PackWriter<'_> {
         fs::rename(tmp.join(format!("{id}.pack")), packs.dir.join(format!("{id}.pack")))?;
         let t = tmp.join(format!("{id}.idx"));
         let mut f = File::create(&t)?;
-        f.write_all(&idx)?;
+        f.write_all(&encode_idx(idx))?;
         f.sync_all()?;
         fs::rename(&t, packs.dir.join(format!("{id}.idx")))?;
         File::open(&packs.dir)?.sync_all()?;
@@ -193,18 +292,8 @@ impl Packs {
         }
         let known: BTreeSet<String> = st.packs.iter().cloned().collect();
         for id in ids.into_iter().filter(|i| !known.contains(i)) {
-            let pack = st.packs.len();
-            let bytes = fs::read(self.dir.join(format!("{id}.idx")))?;
-            let mut b = &bytes[..];
-            if take(&mut b, 8)? != IDX_MAGIC {
-                return Err(bad(format!("{id}.idx: not an index")));
-            }
-            while !b.is_empty() {
-                let n = take_u16(&mut b)?;
-                let name = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?.to_string();
-                let offset = u64::from_be_bytes(take(&mut b, 8)?.try_into().unwrap());
-                st.names.insert(name, Loc { pack, offset });
-            }
+            let idx = Idx::parse(&id, fs::read(self.dir.join(format!("{id}.idx")))?)?;
+            st.idx.push(idx);
             st.packs.push(id);
         }
         st.removed = match fs::read_to_string(self.dir.join("removed")) {
@@ -223,7 +312,7 @@ impl Packs {
         if st.removed.contains(name) {
             return Ok(None);
         }
-        Ok(st.names.get(name).map(|l| (st.packs[l.pack].clone(), *l)))
+        Ok(st.get(name).map(|l| (st.packs[l.pack].clone(), l)))
     }
 
     pub fn contains(&self, name: &str) -> io::Result<bool> {
@@ -271,11 +360,19 @@ impl Packs {
     pub fn names_in(&self, from: &str, to: Option<&str>) -> io::Result<Vec<String>> {
         self.refresh()?;
         let st = self.state.read().unwrap();
-        let range = st.names.range::<str, _>((
-            std::ops::Bound::Included(from),
-            to.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
-        ));
-        Ok(range.map(|(k, _)| k.clone()).filter(|k| !st.removed.contains(k)).collect())
+        let mut out = BTreeSet::new();
+        for idx in &st.idx {
+            for i in idx.lower_bound(from)..idx.n {
+                let k = idx.name(i)?;
+                if to.is_some_and(|t| k >= t) {
+                    break;
+                }
+                if !st.removed.contains(k) {
+                    out.insert(k.to_string());
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
     }
 
     /// Start a pack; temp files go in `tmp`.
@@ -294,7 +391,7 @@ impl Packs {
             tmp: tmp.to_path_buf(),
             out,
             offset: PACK_MAGIC.len() as u64,
-            idx: IDX_MAGIC.to_vec(),
+            idx: Vec::new(),
         })
     }
 
@@ -316,7 +413,7 @@ impl Packs {
         let mut removed = self.state.read().unwrap().removed.clone();
         let before = removed.len();
         for n in names {
-            if self.state.read().unwrap().names.contains_key(n) {
+            if self.state.read().unwrap().get(n).is_some() {
                 removed.insert(n.clone());
             }
         }
@@ -366,5 +463,30 @@ pub fn plain_value(file: &[u8]) -> io::Result<Vec<u8>> {
         Some((0, rest)) => Ok(rest.to_vec()),
         Some((1, rest)) => zstd::stream::decode_all(rest),
         _ => Err(bad("delta base is not a plain file")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_version_1_index_is_still_read() {
+        let mut v1 = IDX_MAGIC_V1.to_vec();
+        for (name, off) in [("zz", 30u64), ("a", 8), ("m", 20)] {
+            put_name(&mut v1, name);
+            v1.extend_from_slice(&off.to_be_bytes());
+        }
+        let idx = Idx::parse("x", v1).unwrap();
+        assert_eq!((idx.get("a"), idx.get("m"), idx.get("zz"), idx.get("b")), (Some(8), Some(20), Some(30), None));
+        assert_eq!(idx.name(idx.lower_bound("b")).unwrap(), "m");
+    }
+
+    #[test]
+    fn a_damaged_index_is_refused_or_matches_nothing() {
+        assert!(Idx::parse("x", b"CASIDX02\0\0\0\x05".to_vec()).is_err());
+        let mut bytes = encode_idx(vec![("k".into(), 8)]);
+        bytes[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert_eq!(Idx::parse("x", bytes).unwrap().get("k"), None);
     }
 }

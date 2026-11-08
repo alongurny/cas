@@ -209,7 +209,15 @@ fn run(a: Args) -> Res<()> {
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     let name = a.history.as_str();
     let step = Step { changelog: a.message.clone(), compatible: a.compatible };
-    let at = || -> Res<NodeId> { node(&load(s, name)?.1, &a.node, name) };
+    // The node -n names: from the history's heads when they answer, which
+    // spares reading the whole history.
+    let at = || -> Res<NodeId> {
+        let Some(v) = history::head(s, name).map_err(e)? else { return Err(format!("no history {name}")) };
+        match derived::heads(s, b3(), &v).map_err(e)?.resolve(&a.node) {
+            Some(id) => Ok(id),
+            None => node(&history::read(s, &v).map_err(e)?, &a.node, name),
+        }
+    };
     match a.rest.first().map(String::as_str) {
         Some("commit") => {
             let dir = arg(1, "DIR")?;
@@ -243,9 +251,13 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some("diff") => {
-            let h = load(s, name)?.1;
-            let id = node(&h, &a.node, name)?;
-            let Some(pred) = h.nodes[&id].after.keys().next() else { return Err("the node has no predecessor".into()) };
+            let id = at()?;
+            let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
+            let preds = match derived::heads(s, b3(), &v).map_err(e)?.tips.remove(&id) {
+                Some(p) => p,
+                None => history::read(s, &v).map_err(e)?.nodes[&id].after.keys().cloned().collect(),
+            };
+            let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
             for c in diff(s, &pred.version(), &id.version(), None).map_err(e)? {
                 out!("{:8} -> {:8} {}", node_text(&c.old), node_text(&c.new), c.path);
             }

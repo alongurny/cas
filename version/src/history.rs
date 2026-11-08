@@ -360,6 +360,7 @@ pub fn load(store: &dyn Store, name: &str) -> Result<(Option<View>, History)> {
 /// Write `h` and move `name` to it, only if `name` still holds `old`.
 pub fn save(store: &dyn Store, alg: &'static Algorithm, name: &str, old: Option<&View>, h: &History) -> Result<View> {
     let new = write(store, alg, h)?;
+    crate::derived::record_heads(store, alg, &new, h);
     let expect = old.map_or(Expect::Absent, |r| Expect::Value(r.to_string().into_bytes()));
     if old != Some(&new) {
         store.write(name, new.to_string().as_bytes(), &expect)?;

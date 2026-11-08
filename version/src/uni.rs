@@ -13,9 +13,39 @@ pub enum Value {
 }
 
 /// Bytewise order of serializations, which is the order of map entries.
+/// Computed without serializing: a serialization is a tag, a LEB128
+/// length and the content, and serializations are prefix-free, so
+/// comparing two maps entry by entry gives the order of their bytes.
 impl Ord for Value {
     fn cmp(&self, other: &Value) -> Ordering {
-        self.serialize().cmp(&other.serialize())
+        let len = |n: usize| {
+            let mut b = [0u8; 10];
+            let mut v = Vec::new();
+            leb128(&mut v, n);
+            b[..v.len()].copy_from_slice(&v);
+            (b, v.len())
+        };
+        let lens = |a: usize, b: usize| {
+            if a == b {
+                return Ordering::Equal;
+            }
+            let ((x, i), (y, j)) = (len(a), len(b));
+            x[..i].cmp(&y[..j])
+        };
+        match (self, other) {
+            (Value::Str(_), Value::Map(_)) => Ordering::Less,
+            (Value::Map(_), Value::Str(_)) => Ordering::Greater,
+            (Value::Str(a), Value::Str(b)) => lens(a.len(), b.len()).then_with(|| a.as_bytes().cmp(b.as_bytes())),
+            (Value::Map(a), Value::Map(b)) => lens(a.len(), b.len()).then_with(|| {
+                for ((ka, va), (kb, vb)) in a.iter().zip(b) {
+                    let o = ka.cmp(kb).then_with(|| va.cmp(vb));
+                    if o != Ordering::Equal {
+                        return o;
+                    }
+                }
+                Ordering::Equal
+            }),
+        }
     }
 }
 
@@ -204,7 +234,7 @@ fn de(b: &[u8], at: &mut usize, depth: usize) -> Result<Value, String> {
             if depth >= MAX_DEPTH {
                 return Err(format!("maps nested deeper than {MAX_DEPTH} at {}", *at - 1));
             }
-            let mut m = BTreeMap::new();
+            let mut m = Vec::with_capacity(len.min(b.len()));
             let mut prev: Option<&[u8]> = None;
             for _ in 0..len {
                 let start = *at;
@@ -215,9 +245,10 @@ fn de(b: &[u8], at: &mut usize, depth: usize) -> Result<Value, String> {
                 }
                 prev = Some(kb);
                 let v = de(b, at, depth + 1)?;
-                m.insert(k, v);
+                m.push((k, v));
             }
-            Ok(Value::Map(m))
+            // Already in order: the bulk build makes no reordering.
+            Ok(Value::Map(m.into_iter().collect()))
         }
         t => Err(format!("unknown tag {t}")),
     }

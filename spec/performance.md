@@ -279,6 +279,21 @@ for both tools. Results are recorded per corpus:
   deep. Thesis store 246 MB → 140 MB after gc (git 96 MB, 90 MB of it PDFs);
   `import-git` now batches its writes, 27.9 s → 5.4 s.
 
+- 2026-11-08, step 3 begun, on git.git (82,725 nodes), each command was
+  2 s: the whole history was parsed for the tip. Now:
+  - The function `heads` (spec/functions/heads.md): tips, the nodes each
+    follows, and tags, recorded whenever a history is saved. `ls`, `diff`,
+    `checkout` and `summary` resolve `-n` through it and fall back to the
+    whole history only for other nodes.
+  - Pack indexes are sorted tables searched in place (`CASIDX02`), as in
+    git, instead of a map of every name built at open.
+  - `uni-bin` values compare without serializing.
+  - git.git: `ls` 2.1 → 0.06 s, `diff` 1.9 → 0.03 s, checkout 2.2 → 0.66 s
+    (git: 0.006, 0.004, 0.28). The store measured has 449 packs, and a
+    lookup searches each; gc makes one, and a multi-pack index (git's midx)
+    is the alternative. `log` and `path-log` still read the whole history:
+    the graph index with Bloom filters is next.
+
 ## Order of work
 
 Each step comes with its row in the benchmark, measured before and after.
