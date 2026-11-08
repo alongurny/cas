@@ -87,6 +87,14 @@ row "push one new commit" \
   "rm -rf cp wcp; cp -r c cp; $CAS --store cp checkout wcp; echo x >> wcp/$F; $CAS --store cp commit wcp" \
   "$CAS --store cp push $U"
 rm -rf cp wcp gp.git wgp g4 one g3.git
+N=$("$CAS" --store c log | grep -oE '^[0-9a-f]{12}(  | \()' | cut -c1-12 | sed -n 101p)
+row "list every object (p1006 cat-file --batch-all-objects)" \
+  : "git -C g.git cat-file --batch-all-objects --batch-check" : "$CAS --store c objects"
+row "merge-base of the tip and a node 100 back (p6010)" \
+  : "git -C g.git merge-base HEAD HEAD~100" : "$CAS --store c merge-base latest $N"
+row "last-modified of the root's entries (p8020)" \
+  : - : "$CAS --store c last-modified"
+row "fsck (p1450)" : "git -C g.git fsck --no-dangling" : "$CAS --store c fsck"
 row "fast-import (p9300) / import-git" \
   "rm -rf gi.git; git init -q --bare gi.git; git -C g.git fast-export --all > export" "git -C gi.git fast-import --quiet < export" \
   "rm -rf ci" "$CAS --store ci import-git $SRC"

@@ -27,6 +27,10 @@ measure.
 | (cas) | push one new commit | `push` |
 | p9300-fast-import-export | `fast-import` of `fast-export --all` | `import-git` |
 | p5600-partial-clone | `gc` | `gc` |
+| p1006-cat-file | list every object (`--batch-all-objects`) | `objects` |
+| p6010-merge-base | merge-base of the tip and a node 100 back | `merge-base` |
+| p8020-last-modified | the last change of each root entry (git 2.43 lacks the command) | `last-modified` |
+| p1450-fsck | `fsck` | `fsck` |
 
 Both tools' network rows go over plain TCP on localhost, so neither pays for
 TLS: git through `git daemon` (`git://`), cas through a benchmark build that
@@ -53,12 +57,9 @@ durable.
     name-hash, multi-pack reuse), p5304-prune, p0071-sort, p0100-globbing.
   - These come back as cas internal benchmarks when the pack backend lands
     (step 2).
-- **Needs a CLI command cas lacks so far:**
-  - p1006-cat-file (list every object), p1450 and p1451 (fsck),
-    p6010-merge-base and p6011, p1500-graph-walks.
-  - p0001's `--objects` walks.
-  - p8020-last-modified.
-  - Each has a library counterpart (gc's mark, `merge_bases`, path_log).
+- **Needs a CLI command cas lacks so far:** p1451 (fsck of skip lists),
+  p6011 (merge-base of many refs), p1500-graph-walks, and p0001's
+  `--objects` walks.
 - **Not comparable as written:** p0009-diff-pathspec (diffs the working
   tree, which cas does not track), p3400-rebase (needs branches;
   cas rebases private histories).

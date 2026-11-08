@@ -18,3 +18,4 @@ bench-insecure = ["cas-core/bench-insecure"]
 [dev-dependencies]
 cas-core = { path = "..", features = ["test-tls"] }
 tempfile = "3.27.0"
+blake3 = "1.8.7"

@@ -182,3 +182,33 @@ fn private_history_rebase_publish_merge_and_gc() {
     cas(&store, &["checkout", out.to_str().unwrap(), "notes"]);
     assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
 }
+
+#[test]
+fn last_modified_merge_base_objects_and_fsck() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("README"), "hi\n").unwrap();
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let w = work.to_str().unwrap();
+    let first = cas(&store, &["commit", w, "-m", "first"]);
+    std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
+    let second = cas(&store, &["commit", w, "-m", "second"]);
+    let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
+    let (a, b) = (short(&first), short(&second));
+
+    assert_eq!(cas(&store, &["last-modified"]), format!("{a}  README\n{b}  src\n"));
+    assert_eq!(cas(&store, &["last-modified", "src"]), format!("{b}  src/lib.rs\n"));
+    assert_eq!(cas(&store, &["merge-base", &a, &b]), first);
+
+    let objects = cas(&store, &["objects"]);
+    assert!(objects.lines().all(|k| k.starts_with("blake3:")));
+    assert!(cas(&store, &["fsck"]).ends_with(", 0 missing, 0 bad\n"));
+
+    // Lose the blob of the old src/lib.rs: fsck names it and fails.
+    let key = blake3::hash(b"fn a() {}\n").to_hex().to_string();
+    std::fs::remove_file(store.join("blobs/blake3").join(&key[..2]).join(&key)).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).arg("fsck").output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8(out.stdout).unwrap().contains(&format!("missing blake3:{key}")));
+}

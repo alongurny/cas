@@ -236,10 +236,19 @@ impl Graph {
         Ok(Graph { nodes })
     }
 
+    /// The newest node whose step changed `path`: git's `last-modified`.
+    pub fn last_change(&self, store: &dyn Store, path: &Path) -> Result<Option<usize>> {
+        self.changes(store, path, true).map(|v| v.first().copied())
+    }
+
     /// The nodes whose step changed `path` (or anything under it), newest
     /// first: the same answer as [`derived::path_log`], reading the trees
     /// only of nodes whose filter may contain `path`.
     pub fn path_log(&self, store: &dyn Store, path: &Path) -> Result<Vec<usize>> {
+        self.changes(store, path, false)
+    }
+
+    fn changes(&self, store: &dyn Store, path: &Path, first_only: bool) -> Result<Vec<usize>> {
         // Each version is looked at as a node and again as its successor's
         // predecessor; remember the answers by version key.
         let memo = std::cell::RefCell::new(HashMap::new());
@@ -272,6 +281,9 @@ impl Graph {
             };
             if hit {
                 out.push(i);
+                if first_only {
+                    break;
+                }
             }
         }
         Ok(out)

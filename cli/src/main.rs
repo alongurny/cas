@@ -46,6 +46,10 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   path-log PATH                 nodes whose step changed PATH
   tag NAME                      tag a node (-n) in the history
   compatible FROM TO            whether upgrading FROM to TO is compatible
+  merge-base A B                best common ancestors of nodes A and B
+  last-modified [PREFIX]        each entry under PREFIX with the node that last changed it
+  objects                       every blob key in the store
+  fsck                          check every reachable blob: readable, valid, complete
   show KEY                      print a blob: uni-bin as text, else raw
   push STORE [--as NAME]        send the history (fast-forward only)
   pull STORE [--as NAME]        fetch history NAME (fast-forward only)
@@ -290,6 +294,59 @@ fn run(a: Args) -> Res<()> {
                 Ok(())
             })
             .map_err(e)?;
+        }
+        Some("merge-base") => {
+            let h = load(s, name)?.1;
+            let (x, y) = (node(&h, &arg(1, "A")?, name)?, node(&h, &arg(2, "B")?, name)?);
+            for b in h.merge_bases(&x, &y) {
+                out!("{b}");
+            }
+        }
+        Some("last-modified") => {
+            let dir = prefix(1)?;
+            let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
+            let g = graph::graph(s, b3(), &v).map_err(e)?;
+            let tip = at()?.version();
+            let entries: Vec<Path> = walk(s, &tip, dir.as_ref())
+                .filter_map(|item| match item {
+                    Ok((p, _)) if p.parent() == dir => Some(Ok(p)),
+                    Ok(_) => None,
+                    Err(x) => Some(Err(x)),
+                })
+                .collect::<Result<_, _>>()
+                .map_err(e)?;
+            for p in entries {
+                match g.last_change(s, &p).map_err(e)? {
+                    Some(i) => out!("{}  {p}", short(g.nodes[i].id.version().key())),
+                    None => out!("-  {p}"),
+                }
+            }
+        }
+        Some("objects") => {
+            for k in cas_core::list_all(s, &cas_core::Span::all()).map_err(e)? {
+                if matches!(cas_core::key::classify(&k), Some(cas_core::key::Parsed::Blob { .. })) {
+                    out!("{k}");
+                }
+            }
+        }
+        Some("fsck") => {
+            let r = cas_version::fsck::fsck(s).map_err(e)?;
+            for (holder, k) in &r.missing {
+                out!("missing {k} (named by {holder})");
+            }
+            for (k, why) in &r.bad {
+                out!("bad {k}: {why}");
+            }
+            out!(
+                "{} checked, {} unreachable, {} missing, {} bad",
+                r.checked,
+                r.unreachable,
+                r.missing.len(),
+                r.bad.len()
+            );
+            if !r.ok() {
+                return Err("the store has problems".into());
+            }
         }
         Some("compatible") => {
             let h = load(s, name)?.1;

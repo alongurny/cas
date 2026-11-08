@@ -12,6 +12,7 @@ pub mod derived;
 pub mod dir;
 pub mod formats;
 pub mod fs;
+pub mod fsck;
 pub mod gc;
 pub mod git;
 pub mod graph;
