@@ -1,6 +1,8 @@
 //! Sync (Stage 7, spec/sync.md): two stores converge with plain core ops.
 //! Tooling walks formats from a view and writes what the other store
-//! lacks; there is no negotiation.
+//! lacks. The walk goes breadth first, one batch per depth: a round asks
+//! the destination which keys it has and reads the rest from the source,
+//! so the round trips follow the depth of the trees, not their size.
 //!
 //! Copies keep the closure invariant: a blob is written only after
 //! everything it refers to, so a store that has a blob has all of it, and
@@ -10,7 +12,9 @@ use crate::dir::Item;
 use crate::formats::{self, Kind};
 use crate::history;
 use crate::{Error, Result, View, is_blob_key, read_blob, tree};
+use cas_core::store::Put;
 use cas_core::{Error as CoreError, Expect, Span, Store};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Whether `store` holds the blob `key`, without reading it.
 pub fn has(store: &dyn Store, key: &str) -> Result<bool> {
@@ -69,30 +73,84 @@ fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -
     Ok(())
 }
 
+/// The views inside `bytes`, the value of `r`, if its format holds any.
+/// `None` for formats that hold no views (files, unknown formats).
+fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
+    match r.known_format().map(|f| (&f.kind, f.alias)) {
+        Some((Kind::Dir(d), _)) => {
+            Ok(Some(d.decode(r.key(), bytes)?.into_iter().map(|Item { child, .. }| child).collect()))
+        }
+        Some((_, "history")) => Ok(Some(history::parse(r.key(), bytes)?.nodes.keys().map(|id| id.version()).collect())),
+        _ => Ok(None),
+    }
+}
+
 /// Copy everything reachable from `root` that `dst` lacks, children before
-/// parents. Stops descending at blobs `dst` already has.
+/// parents (the closure invariant). Breadth first: each depth is one
+/// `has_many` on `dst` and one `read_many` on `src`. Files are written as
+/// they arrive; containers (directories, histories) are held and written
+/// last, children first, once everything below them is in.
 pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
     let mut n = Copied::default();
-    let mut formats_seen = std::collections::BTreeSet::new();
-    // An explicit stack of (view, children pushed yet).
-    let mut stack = vec![(root.clone(), false)];
-    while let Some((r, expanded)) = stack.pop() {
-        if formats_seen.insert(r.format().to_string()) {
-            copy_format(src, dst, r.format(), &mut n)?;
+    let mut formats_seen = BTreeSet::new();
+    let mut seen = HashSet::new();
+    let mut containers: HashMap<String, (Vec<u8>, Vec<View>)> = HashMap::new();
+    let mut frontier = vec![root.clone()];
+    while !frontier.is_empty() {
+        let mut level: Vec<View> = Vec::new();
+        for r in frontier.drain(..) {
+            if formats_seen.insert(r.format().to_string()) {
+                copy_format(src, dst, r.format(), &mut n)?;
+            }
+            if seen.insert(r.key().to_string()) {
+                level.push(r);
+            }
+        }
+        let keys: Vec<String> = level.iter().map(|r| r.key().to_string()).collect();
+        let present = dst.has_many(&keys)?;
+        let mut want = Vec::new();
+        for (r, p) in level.into_iter().zip(present) {
+            if p {
+                n.present += 1;
+            } else {
+                want.push(r);
+            }
+        }
+        let keys: Vec<String> = want.iter().map(|r| r.key().to_string()).collect();
+        let mut files = Vec::new();
+        for (r, value) in want.into_iter().zip(src.read_many(&keys)) {
+            let bytes = value?.ok_or_else(|| Error::Missing(r.key().to_string()))?;
+            match children_of(&r, &bytes)? {
+                None => files.push(Put::blob(r.key(), bytes)),
+                Some(kids) => {
+                    frontier.extend(kids.iter().cloned());
+                    containers.insert(r.key().to_string(), (bytes, kids));
+                }
+            }
+        }
+        n.blobs += files.len();
+        dst.write_many(&files).map_err(|(_, e)| Error::from(e))?;
+    }
+    // Containers in post-order from the root, so each follows its children.
+    let mut order = Vec::new();
+    let mut done = HashSet::new();
+    let mut stack = vec![(root.key().to_string(), false)];
+    while let Some((k, expanded)) = stack.pop() {
+        if !containers.contains_key(&k) || (!expanded && !done.insert(k.clone())) {
+            continue;
         }
         if expanded {
-            copy_blob(src, dst, r.key(), &mut n)?;
+            let (bytes, _) = containers.remove(&k).expect("held");
+            order.push(Put::blob(k, bytes));
             continue;
         }
-        if has(dst, r.key())? {
-            n.present += 1;
-            continue;
-        }
-        stack.push((r.clone(), true));
-        for c in children(src, &r)? {
-            stack.push((c, false));
+        stack.push((k.clone(), true));
+        for c in &containers[&k].1 {
+            stack.push((c.key().to_string(), false));
         }
     }
+    n.blobs += order.len();
+    dst.write_many(&order).map_err(|(_, e)| Error::from(e))?;
     Ok(n)
 }
 

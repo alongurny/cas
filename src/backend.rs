@@ -10,6 +10,13 @@ pub trait Backend: Send + Sync {
     /// Store a verified blob. Idempotent; durable on return.
     fn put_blob(&self, key: &str, value: &[u8]) -> io::Result<()>;
 
+    /// [`Backend::put_blob`] of each, in order: on return all are durable,
+    /// and none is visible before the ones it follows. Backends override
+    /// this to make the batch durable at once.
+    fn put_blobs(&self, blobs: &[(&str, &[u8])]) -> io::Result<()> {
+        blobs.iter().try_for_each(|(k, v)| self.put_blob(k, v))
+    }
+
     /// Idempotent; durable on return.
     fn remove_blob(&self, key: &str) -> io::Result<()>;
 

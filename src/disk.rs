@@ -80,7 +80,7 @@ impl DiskBackend {
     }
 
     /// The bytes of a blob file in this store's encoding.
-    fn encode(&self, value: &[u8]) -> io::Result<Vec<u8>> {
+    fn encode(&self, value: &[u8], mut pending: Option<&mut Pending>) -> io::Result<Vec<u8>> {
         if !self.encoded {
             return Ok(value.to_vec());
         }
@@ -89,16 +89,37 @@ impl DiskBackend {
         }
         let mut ids = Vec::new();
         for (id, piece) in crate::chunk::split(value) {
-            self.store_chunk(&id, piece)?;
+            self.store_chunk(&id, piece, pending.as_deref_mut())?;
             ids.extend_from_slice(&id);
         }
         let z = zstd::bulk::compress(&ids, 3)?;
         Ok([&[CHUNKED][..], &z].concat())
     }
 
-    fn store_chunk(&self, id: &crate::chunk::Id, piece: &[u8]) -> io::Result<()> {
+    /// [`DiskBackend::encode`] without writing: the blob file, and the
+    /// packed chunks it names that may need writing.
+    fn encode_pure(&self, value: &[u8]) -> io::Result<(Vec<u8>, Vec<(crate::chunk::Id, Vec<u8>)>)> {
+        if !self.encoded {
+            return Ok((value.to_vec(), Vec::new()));
+        }
+        if value.len() <= CHUNK_OVER {
+            return Ok((pack(value)?, Vec::new()));
+        }
+        let mut ids = Vec::new();
+        let mut chunks = Vec::new();
+        for (id, piece) in crate::chunk::split(value) {
+            if !self.chunk_path(&hex::encode(id)).exists() {
+                chunks.push((id, pack(piece)?));
+            }
+            ids.extend_from_slice(&id);
+        }
+        let z = zstd::bulk::compress(&ids, 3)?;
+        Ok(([&[CHUNKED][..], &z].concat(), chunks))
+    }
+
+    fn store_chunk(&self, id: &crate::chunk::Id, piece: &[u8], pending: Option<&mut Pending>) -> io::Result<()> {
         let path = self.chunk_path(&hex::encode(id));
-        if path.exists() { Ok(()) } else { self.put_file(&path, &pack(piece)?) }
+        if path.exists() { Ok(()) } else { self.put_file_with(&path, &pack(piece)?, pending) }
     }
 
     fn decode(&self, file: Vec<u8>) -> io::Result<Vec<u8>> {
@@ -160,6 +181,12 @@ impl DiskBackend {
     /// Write `value` to `dest` atomically and durably: temp file, fsync,
     /// rename, fsync the directory.
     fn put_file(&self, dest: &Path, value: &[u8]) -> io::Result<()> {
+        self.put_file_with(dest, value, None)
+    }
+
+    /// [`DiskBackend::put_file`], or with `pending` only the unsynced temp
+    /// file, renamed later by [`DiskBackend::commit`].
+    fn put_file_with(&self, dest: &Path, value: &[u8], pending: Option<&mut Pending>) -> io::Result<()> {
         let dir = dest.parent().expect("slot paths have a parent");
         fs::create_dir_all(dir)?;
         let tmp = self.root.join("tmp").join(format!(
@@ -169,10 +196,49 @@ impl DiskBackend {
         ));
         let mut f = File::create(&tmp)?;
         f.write_all(value)?;
+        if let Some(p) = pending {
+            p.push((tmp, dest.to_path_buf()));
+            return Ok(());
+        }
         f.sync_all()?;
         drop(f);
         fs::rename(&tmp, dest)?;
         sync_dir(dir)
+    }
+
+    /// Make a batch's temp files durable, rename them into place in order,
+    /// and make the renames durable: two file-system syncs for the whole
+    /// batch instead of two per file.
+    fn commit(&self, pending: Pending) -> io::Result<()> {
+        if pending.is_empty() {
+            return Ok(());
+        }
+        self.sync_all_files(&pending)?;
+        for (tmp, dest) in &pending {
+            fs::rename(tmp, dest)?;
+        }
+        let dirs: std::collections::BTreeSet<&Path> = pending.iter().filter_map(|(_, d)| d.parent()).collect();
+        self.sync_dirs(dirs)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_all_files(&self, _: &Pending) -> io::Result<()> {
+        syncfs(&self.root)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn sync_all_files(&self, pending: &Pending) -> io::Result<()> {
+        pending.iter().try_for_each(|(tmp, _)| File::open(tmp)?.sync_all())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_dirs(&self, _: std::collections::BTreeSet<&Path>) -> io::Result<()> {
+        syncfs(&self.root)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn sync_dirs(&self, dirs: std::collections::BTreeSet<&Path>) -> io::Result<()> {
+        dirs.into_iter().try_for_each(sync_dir)
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
@@ -249,6 +315,36 @@ fn var_names(dir: &Path, prefix: String, keys: &mut Vec<String>) -> io::Result<(
     Ok(())
 }
 
+/// `f` over `items` on up to one thread per core, results in order.
+fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> + Sync) -> io::Result<Vec<U>> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len().max(1));
+    if threads <= 1 {
+        return items.iter().map(&f).collect();
+    }
+    let per = items.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> =
+            items.chunks(per).map(|part| s.spawn(|| part.iter().map(&f).collect::<io::Result<Vec<U>>>())).collect();
+        let mut out = Vec::with_capacity(items.len());
+        for h in handles {
+            out.extend(h.join().expect("encoder panicked")?);
+        }
+        Ok(out)
+    })
+}
+
+/// Temp files written but not yet synced or renamed, and where each goes.
+type Pending = Vec<(PathBuf, PathBuf)>;
+
+/// Flush every file system buffer of the file system holding `path`.
+#[cfg(target_os = "linux")]
+fn syncfs(path: &Path) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let dir = File::open(path)?;
+    // SAFETY: a valid open file descriptor.
+    if unsafe { libc::syncfs(dir.as_raw_fd()) } == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+}
+
 fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
@@ -277,8 +373,25 @@ impl Backend for DiskBackend {
         }
         // Renaming over a concurrent writer's copy is harmless: same bytes.
         // Chunks are written (and synced) before the file that names them.
-        let file = self.encode(value)?;
+        let file = self.encode(value, None)?;
         self.put_file(&dest, &file)
+    }
+
+    fn put_blobs(&self, blobs: &[(&str, &[u8])]) -> io::Result<()> {
+        let todo: Vec<&(&str, &[u8])> = blobs.iter().filter(|(k, _)| !self.path(k).exists()).collect();
+        // Compress on every core; then write in order, one sync for all.
+        let encoded = parallel_map(&todo, |(_, v)| self.encode_pure(v))?;
+        let mut pending = Vec::new();
+        for ((key, _), (file, chunks)) in todo.iter().zip(encoded) {
+            for (id, packed) in chunks {
+                let path = self.chunk_path(&hex::encode(id));
+                if !path.exists() {
+                    self.put_file_with(&path, &packed, Some(&mut pending))?;
+                }
+            }
+            self.put_file_with(&self.path(key), &file, Some(&mut pending))?;
+        }
+        self.commit(pending)
     }
 
     fn remove_blob(&self, key: &str) -> io::Result<()> {
@@ -297,7 +410,7 @@ impl Backend for DiskBackend {
     }
 
     fn put_chunk(&self, id: &crate::chunk::Id, bytes: &[u8]) -> io::Result<()> {
-        self.store_chunk(id, bytes)
+        self.store_chunk(id, bytes, None)
     }
 
     fn cas_var(&self, name: &str, expect: &Expect, new: Option<&[u8]>) -> io::Result<bool> {

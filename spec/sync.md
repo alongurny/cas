@@ -1,8 +1,8 @@
 # Sync (Stage 7)
 
-Two stores converge using only the core ops. There is no negotiation and no have/want exchange:
-the side doing the sync walks formats from a view, asks the destination whether it holds
-each key, and writes what is missing. Any store, cache or server can take either role, since
+Two stores converge using only the core ops and their batches (wire.md, "Batches"). There is
+no have/want exchange with the server: the side doing the sync walks formats from a view, asks
+the destination which keys it holds, and writes what is missing. Any store, cache or server can take either role, since
 they all speak the same four ops (the tests run one side over HTTPS).
 
 ## Existence
@@ -12,20 +12,25 @@ present without transferring its value.
 
 ## Copying a view
 
-`copy(src, dst, root)` writes everything reachable from `root` that `dst` lacks:
+`copy(src, dst, root)` writes everything reachable from `root` that `dst` lacks. It walks
+breadth first: each depth is one `has_many` on the destination and one `read_many` on the
+source, so a clone costs round trips in proportion to the depth of its trees, not their size
+(Thesis: 32,145 blobs in about a dozen rounds).
 
 - **Children come from formats.** A directory's children are its entries. A `history`'s are its
   nodes' versions. File formats and unknown formats have none, so their blobs are copied
   without being followed.
 - **Children before parents.** A blob is written only after everything it refers to. This keeps
   the **closure invariant**: if a store holds a blob, it holds everything reachable from it.
+  Files (which refer to nothing) are written in batches as they arrive; directories and
+  histories are held until the walk ends and written in post-order from the root.
 - **Stop at what is there.** Because of the invariant, the walk stops descending at the first blob
   the destination already has. Copying one new node on top of a synced history costs the new blobs
   (one per changed directory, plus files and the history), not the size of the repository.
 - **Formats travel too.** For each format seen, its format object and spec are copied as well, so
   the destination can describe what it holds.
-- **Interruptions are safe.** An interrupted copy leaves only complete subtrees behind, and
-  running it again resumes where it stopped.
+- **Interruptions are safe.** An interrupted copy leaves only complete subtrees behind (often
+  just files), and running it again resumes where it stopped.
 
 The invariant holds for stores written by this tooling. A store that receives blobs some other way
 must keep it too, or a sync may skip a subtree it believes is present.

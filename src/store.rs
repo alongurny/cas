@@ -16,6 +16,53 @@ pub trait Store: Send + Sync {
     fn remove(&self, key: &str, expect: &Expect) -> Result<()>;
     /// The first part of `span`; `ListPage::rest` holds what is left.
     fn list(&self, span: &Span) -> Result<ListPage>;
+
+    // Batches (spec/wire.md, "Batches"): the same ops on many keys at once,
+    // each decided as if made alone. Stores that can do better (one round
+    // trip, one fsync) override these.
+
+    /// Whether the store holds each of `keys`: a `list` of a span holding
+    /// only that key, so it is gated as that list.
+    fn has_many(&self, keys: &[String]) -> Result<Vec<bool>> {
+        keys.iter().map(|k| has_by_list(self, k)).collect()
+    }
+
+    /// `read` of each key, in order.
+    fn read_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>>> {
+        keys.iter().map(|k| self.read(k)).collect()
+    }
+
+    /// `write` of each, in order, stopping at the first that fails: the
+    /// writes before it are done, it and the rest are not.
+    fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
+        for (i, p) in puts.iter().enumerate() {
+            self.write(&p.key, &p.value, &p.expect).map_err(|e| (i, e))?;
+        }
+        Ok(())
+    }
+}
+
+/// One write of a batch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Put {
+    pub key: String,
+    pub value: Vec<u8>,
+    pub expect: Expect,
+}
+
+impl Put {
+    /// A blob write (expect absent).
+    pub fn blob(key: impl Into<String>, value: Vec<u8>) -> Put {
+        Put { key: key.into(), value, expect: Expect::Absent }
+    }
+}
+
+/// Whether `store` holds `key`, by listing the span `[key, key + "\0")`.
+pub fn has_by_list<S: Store + ?Sized>(store: &S, key: &str) -> Result<bool> {
+    let mut end = key.as_bytes().to_vec();
+    end.push(0);
+    let page = store.list(&Span { from: Some(key.as_bytes().to_vec()), to: Some(end) })?;
+    Ok(page.keys.iter().any(|k| k == key))
 }
 
 /// Every key in `span`, following continuations.
@@ -133,6 +180,60 @@ impl CoreStore {
         }
     }
 
+    /// Check a blob write as `write` would, without storing it.
+    fn check_blob_write(&self, who: &Who, key: &str, value: &[u8], expect: &Expect) -> Result<bool> {
+        self.gate(who, Op::Write { key, value, expect })?;
+        let kind = self.check_key(key)?;
+        self.check_size(&kind, value)?;
+        match kind {
+            Kind::Blob(a) => {
+                if a.key(value) != key {
+                    return Err(Error::Invalid(Invalid::HashMismatch));
+                }
+                if let Expect::Value(e) = expect
+                    && e.as_slice() != value
+                {
+                    return Err(Error::Invalid(Invalid::Expect));
+                }
+                Ok(true)
+            }
+            Kind::Var => Ok(false),
+        }
+    }
+
+    /// `write` of each, in order. Runs of blob writes go to the backend as
+    /// one durable batch; a variable write first flushes the blobs before it.
+    fn write_many(&self, who: &Who, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
+        // The pending run of blobs and the index of its first; a failed
+        // flush is reported there, as nothing in the run is known written.
+        let mut run: Vec<(&str, &[u8])> = Vec::new();
+        let mut start = 0;
+        let flush = |run: &mut Vec<(&str, &[u8])>, start: usize| -> std::result::Result<(), (usize, Error)> {
+            let r = self.backend.put_blobs(run).map_err(|e| (start, Error::from(e)));
+            run.clear();
+            r
+        };
+        for (i, p) in puts.iter().enumerate() {
+            match self.check_blob_write(who, &p.key, &p.value, &p.expect) {
+                Ok(true) => {
+                    if run.is_empty() {
+                        start = i;
+                    }
+                    run.push((&p.key, &p.value));
+                }
+                Ok(false) => {
+                    flush(&mut run, start)?;
+                    self.write(who, &p.key, &p.value, &p.expect).map_err(|e| (i, e))?;
+                }
+                Err(e) => {
+                    flush(&mut run, start)?;
+                    return Err((i, e));
+                }
+            }
+        }
+        flush(&mut run, start)
+    }
+
     fn remove(&self, who: &Who, key: &str, expect: &Expect) -> Result<()> {
         self.gate(who, Op::Remove { key, expect })?;
         match self.check_key(key)? {
@@ -240,6 +341,10 @@ impl Store for Session {
 
     fn list(&self, span: &Span) -> Result<ListPage> {
         self.store.list(&self.who, span)
+    }
+
+    fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
+        self.store.write_many(&self.who, puts)
     }
 }
 

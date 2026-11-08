@@ -1,6 +1,6 @@
 //! A [`Store`] that speaks the wire protocol to a remote server.
 
-use crate::store::Store;
+use crate::store::{Put, Store};
 use crate::types::{Error, Expect, Invalid, ListPage, Result, Span};
 use crate::wire;
 use ureq::Agent;
@@ -160,6 +160,55 @@ impl HttpStore {
     }
 }
 
+/// Keys per batch request, and batch requests in flight at once.
+const BATCH_KEYS: usize = 512;
+const BATCH_WORKERS: usize = 4;
+/// Bytes of values per `batch/write` request, below the default server bound.
+const BATCH_BYTES: usize = 8 << 20;
+
+impl HttpStore {
+    fn post(&self, path: &str, body: &[u8]) -> Result<Response<ureq::Body>> {
+        self.auth(self.agent.post(format!("{}{path}", self.base)))
+            .header("Content-Type", "application/octet-stream")
+            .send(body)
+            .map_err(transport)
+    }
+
+    /// Run `f` on groups of at most [`BATCH_KEYS`] keys, [`BATCH_WORKERS`]
+    /// at a time, and join the answers in order.
+    fn in_groups<T: Send>(&self, keys: &[String], f: impl Fn(&[String]) -> Result<Vec<T>> + Sync) -> Result<Vec<T>> {
+        let groups: Vec<&[String]> = keys.chunks(BATCH_KEYS).collect();
+        let mut out = Vec::with_capacity(keys.len());
+        for wave in groups.chunks(BATCH_WORKERS) {
+            let answers: Vec<Result<Vec<T>>> = std::thread::scope(|s| {
+                let handles: Vec<_> = wave.iter().map(|g| s.spawn(|| f(g))).collect();
+                handles.into_iter().map(|h| h.join().expect("batch worker panicked")).collect()
+            });
+            for a in answers {
+                out.extend(a?);
+            }
+        }
+        Ok(out)
+    }
+
+    fn write_batch(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
+        let resp = self.post("/batch/write", &wire::encode_puts(puts)).map_err(|e| (0, e))?;
+        match resp.status().as_u16() {
+            204 => Ok(()),
+            // Too big for this server: halve and retry.
+            413 if puts.len() > 1 => {
+                let mid = puts.len() / 2;
+                self.write_batch(&puts[..mid])?;
+                self.write_batch(&puts[mid..]).map_err(|(i, e)| (i + mid, e))
+            }
+            _ => {
+                let at = header(&resp, "CAS-Batch-Index").and_then(|i| i.parse().ok()).unwrap_or(0);
+                Err((at, outcome(resp)))
+            }
+        }
+    }
+}
+
 impl Store for HttpStore {
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let mut resp = self
@@ -200,6 +249,74 @@ impl Store for HttpStore {
             .send(&payload[..])
             .map_err(transport)?;
         if resp.status().as_u16() == 204 { Ok(()) } else { Err(outcome(resp)) }
+    }
+
+    fn has_many(&self, keys: &[String]) -> Result<Vec<bool>> {
+        self.in_groups(keys, |g| {
+            let mut resp = self.post("/batch/has", &wire::encode_keys(g))?;
+            if resp.status().as_u16() != 200 {
+                return Err(outcome(resp));
+            }
+            let b = body(&mut resp)?;
+            if b.len() != g.len() {
+                return Err(Error::Unavailable("bad batch/has answer".into()));
+            }
+            Ok(b.into_iter().map(|x| x != 0).collect())
+        })
+    }
+
+    fn read_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>>> {
+        let all = self.in_groups(keys, |g| {
+            let mut resp = self.post("/batch/read", &wire::encode_keys(g))?;
+            if resp.status().as_u16() != 200 {
+                return Err(outcome(resp));
+            }
+            let answers = wire::decode_reads(&body(&mut resp)?)
+                .filter(|a| a.len() == g.len())
+                .ok_or_else(|| Error::Unavailable("bad batch/read answer".into()))?;
+            // Blob bytes are checked here, as a single read's are by the caller's store.
+            Ok(answers
+                .into_iter()
+                .zip(g)
+                .map(|(a, k)| match (a, crate::key::classify(k)) {
+                    (Ok(Some(v)), Some(crate::key::Parsed::Blob { alg, .. }))
+                        if crate::algo::lookup(alg).is_some_and(|a| a.key(&v) != *k) =>
+                    {
+                        Err(Error::Unavailable(format!("server sent wrong bytes for {k}")))
+                    }
+                    (a, _) => a,
+                })
+                .collect())
+        });
+        match all {
+            Ok(v) => v,
+            Err(e) => keys.iter().map(|_| Err(e.clone())).collect(),
+        }
+    }
+
+    fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
+        // Big blobs go alone, by chunks; the rest in batches of bounded size.
+        let mut i = 0;
+        while i < puts.len() {
+            let p = &puts[i];
+            if p.value.len() > crate::chunk::CHUNK_OVER {
+                self.write(&p.key, &p.value, &p.expect).map_err(|e| (i, e))?;
+                i += 1;
+                continue;
+            }
+            let mut j = i;
+            let mut bytes = 0;
+            while j < puts.len()
+                && puts[j].value.len() <= crate::chunk::CHUNK_OVER
+                && (j == i || bytes + puts[j].value.len() <= BATCH_BYTES)
+            {
+                bytes += puts[j].value.len();
+                j += 1;
+            }
+            self.write_batch(&puts[i..j]).map_err(|(k, e)| (i + k, e))?;
+            i = j;
+        }
+        Ok(())
     }
 
     fn list(&self, span: &Span) -> Result<ListPage> {

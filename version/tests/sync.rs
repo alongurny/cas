@@ -153,8 +153,13 @@ fn an_interrupted_copy_resumes() {
                 let formats::Kind::Dir(d) = &formats::by_alias("dir").unwrap().kind else { unreachable!() };
                 let items = d.decode(v.key(), &src.read(v.key()).unwrap().unwrap()).unwrap();
                 let present: Vec<_> = items.iter().filter(|i| sync::has(&*dst, i.child.key()).unwrap()).collect();
+                // Breadth first, files arrive before the directories naming them.
                 if budget == 40 {
-                    assert!(!present.is_empty());
+                    let files = walk(&*src, &v, None).filter_map(|r| match r.unwrap().1 {
+                        Node::File(f) => Some(f),
+                        _ => None,
+                    });
+                    assert!(files.filter(|f| sync::has(&*dst, f.key()).unwrap()).count() > 0);
                 }
                 for i in present {
                     assert_eq!(walk(&*dst, &i.child, None).filter(|r| r.is_err()).count(), 0);

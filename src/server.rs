@@ -472,6 +472,31 @@ fn handle(store: &Session, req: &Request) -> Response {
             Ok(()) => Response::new(204),
             Err(e) => respond_error(e),
         }
+    } else if let Some(op) = path.strip_prefix("/batch/") {
+        if method != "POST" {
+            return Response::new(405);
+        }
+        match op {
+            "has" => {
+                let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
+                match store.has_many(&keys) {
+                    Ok(has) => Response::data(has.into_iter().map(u8::from).collect::<Vec<u8>>()),
+                    Err(e) => respond_error(e),
+                }
+            }
+            "read" => {
+                let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
+                Response::data(wire::encode_reads(&store.read_many(&keys))).with("Cache-Control", "no-store")
+            }
+            "write" => {
+                let Some(puts) = wire::decode_puts(&req.body) else { return bad_request() };
+                match store.write_many(&puts) {
+                    Ok(()) => Response::new(204),
+                    Err((i, e)) => respond_error(e).with("CAS-Batch-Index", &i.to_string()),
+                }
+            }
+            _ => Response::new(404),
+        }
     } else if path == "/list" && method == "GET" {
         let mut span = Span::all();
         for pair in query.split('&').filter(|p| !p.is_empty()) {

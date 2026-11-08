@@ -168,6 +168,7 @@ dependencies = [
  "cas-core",
  "fastcdc",
  "hex",
+ "libc",
  "md-5",
  "percent-encoding",
  "proptest",

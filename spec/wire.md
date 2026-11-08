@@ -85,6 +85,32 @@ come before `denied`. So can 413: a server bounds the request bodies it reads
 answers 413 to a larger one without buffering it. A client reports it as
 `refused` with reason `too-large`.
 
+## Batches
+
+The same ops on many keys in one request, each decided exactly as the single op
+would be (same gate, checks and outcome). A frame is a u64 big-endian length and
+that many bytes.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /batch/has` | key frames | 200, one byte per key: 1 present, 0 absent |
+| `POST /batch/read` | key frames | 200, per key: `0` absent, `1` + value frame, or `2` + outcome frame |
+| `POST /batch/write` | per write: key frame, expect frame, value frame | 204, or the first failure's answer with `CAS-Batch-Index: {i}` |
+
+- `has` of a key is gated as `list` of the span `[key, key + 0x00)`; one denied key
+  answers the whole request `denied`.
+- A read outcome frame is a letter and details: `D` denied, `I{reason}`
+  invalid, `R` + reason frame + message refused, `C` conflict, `U{message}`
+  unavailable.
+- Writes apply in order and stop at the first failure: the writes before index
+  `i` are done, `i` and the rest are not (outcome unknown only for
+  `unavailable`). A writer that sends children before parents keeps the closure
+  invariant. A store may make a run of blob writes durable together (the disk
+  store syncs twice per batch, not twice per blob); none is acknowledged before
+  all of the run is durable.
+- A client keeps write bodies under the server's bound and splits on 413;
+  reads and has-checks go in groups of 512 keys, four requests in flight.
+
 ## Chunked transfer
 
 An optimization for writing big blobs; a server may leave it out (it answers

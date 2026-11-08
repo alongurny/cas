@@ -18,6 +18,7 @@ fastcdc = "3"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
 rustls-pki-types = { version = "1", features = ["std"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem"], optional = true }
+libc = "0.2"
 
 [dev-dependencies]
 cas-core = { path = ".", features = ["test-tls"] }

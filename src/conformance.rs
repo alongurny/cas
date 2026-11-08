@@ -347,6 +347,53 @@ fn overlaps(a: &Span, b: &Span) -> bool {
     }
 }
 
+/// Batches (wire.md, "Batches"): each item is decided as the single op
+/// would be, and a batch write stops at its first failure.
+pub fn batches(h: &dyn Harness) {
+    use crate::store::Put;
+    let gate = |_: &crate::gate::Who, op: &Op<'_>| match op {
+        Op::Write { key, .. } | Op::Remove { key, .. } => !key.starts_with("ro/"),
+        Op::Read { key } => !key.starts_with("secret/"),
+        Op::List { span } => !overlaps(span, &Span::prefix("secret/")),
+    };
+    let s = h.store(Policy::permissive(), Box::new(gate));
+    let (x, y, z) = (b"x".to_vec(), b"y".to_vec(), vec![b'z'; 100_000]);
+    let ok = vec![
+        Put::blob(blake3(&x), x.clone()),
+        Put::blob(blake3(&z), z.clone()),
+        Put { key: "public/v".into(), value: view(&x), expect: A },
+    ];
+    s.write_many(&ok).unwrap();
+    s.write("secret/v", &view(&y), &A).unwrap();
+    let keys: Vec<String> = [blake3(&x), blake3(&y), blake3(&z), "public/v".into(), "secret/v".into(), "nope".into()]
+        .map(String::from)
+        .to_vec();
+    let want: Vec<_> = keys.iter().map(|k| s.read(k)).collect();
+    assert_eq!(s.read_many(&keys), want);
+    assert_eq!(want[3], Ok(Some(view(&x))));
+    assert_eq!(want[4], Err(Error::Denied));
+    let has: Vec<String> = keys[..4].to_vec();
+    assert_eq!(s.has_many(&has).unwrap(), [true, false, true, true]);
+    assert_eq!(s.has_many(&["secret/v".to_string()]), Err(Error::Denied));
+    // Stops at the first failure: y is written, ro/ is denied, the rest is not.
+    let w = blake3(b"w");
+    let batch = vec![
+        Put::blob(blake3(&y), y.clone()),
+        Put { key: "public/v".into(), value: view(&y), expect: A },
+        Put::blob(w.clone(), b"w".to_vec()),
+    ];
+    assert_eq!(s.write_many(&batch), Err((1, Error::Conflict)));
+    assert_eq!(s.read(&blake3(&y)).unwrap(), Some(y.clone()));
+    assert_eq!(s.read(&w).unwrap(), None);
+    let batch = vec![Put::blob(w.clone(), b"w".to_vec()), Put { key: "ro/v".into(), value: view(&y), expect: A }];
+    assert_eq!(s.write_many(&batch), Err((1, Error::Denied)));
+    assert_eq!(s.read(&w).unwrap(), Some(b"w".to_vec()));
+    let bad = vec![Put::blob(blake3(b"q"), b"not q".to_vec())];
+    assert_eq!(s.write_many(&bad), Err((0, Error::Invalid(crate::types::Invalid::HashMismatch))));
+    assert_eq!(s.read_many(&[]), vec![]);
+    assert_eq!(s.write_many(&[]), Ok(()));
+}
+
 /// Spec 9.13: random op sequences match a reference model.
 pub fn model(h: &dyn Harness) {
     use proptest::prelude::*;
@@ -440,7 +487,7 @@ macro_rules! conformance_tests {
     ($harness:expr) => {
         $crate::conformance_tests!(@each $harness;
             key_grammar algorithms hash_mismatch blob_idempotent blob_expect var_cas_table
-            cas_race empty_values size_policy list_spans outcome_order deny_paths model);
+            cas_race empty_values size_policy list_spans outcome_order deny_paths batches model);
     };
     (@each $harness:expr; $($name:ident)*) => {
         $(

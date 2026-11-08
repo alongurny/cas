@@ -254,6 +254,14 @@ for both tools. Results are recorded per corpus:
 - the Linux kernel
 - a synthetic large-directory repository, for the prolly-tree case
 
+## Progress
+
+- 2026-11-08, step 1 in part: the batches and the breadth-first copy. Thesis
+  clone over HTTPS 48 s → 9.5 s, push of one commit 0.67 s → 0.37 s. Samples
+  of the clone show the client's time in creating, writing and renaming
+  about 60,000 loose files (blobs and chunks): that is step 2. The local diff
+  walk for push is still to do.
+
 ## Order of work
 
 Each step comes with its row in the benchmark, measured before and after.

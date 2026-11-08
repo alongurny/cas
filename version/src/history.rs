@@ -328,9 +328,13 @@ pub fn read(store: &dyn Store, r: &View) -> Result<History> {
     if r.format() != history_format() {
         return Err(Error::UnknownFormat(format!("{} is not the history format", r.format())));
     }
-    let bytes = read_blob(store, r.key())?;
-    let value = Value::deserialize(&bytes).map_err(|e| malformed(r.key(), e))?;
-    History::from_value(&value).map_err(|e| malformed(r.key(), e))
+    parse(r.key(), &read_blob(store, r.key())?)
+}
+
+/// The history in `bytes`, the value of blob `key`.
+pub fn parse(key: &str, bytes: &[u8]) -> Result<History> {
+    let value = Value::deserialize(bytes).map_err(|e| malformed(key, e))?;
+    History::from_value(&value).map_err(|e| malformed(key, e))
 }
 
 /// The history object `name` points at, if `name` is set.
