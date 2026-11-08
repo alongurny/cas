@@ -314,6 +314,14 @@ for both tools. Results are recorded per corpus:
     object. The fix belongs to the same step: a history format that can
     grow by a node without rewriting the rest.
 
+- 2026-11-08, step 4 and compaction (aef38de):
+  - `commit DIR` keeps a stat cache in `DIR/.cas-index`, and checkout
+    writes it. Commit of an unchanged Thesis tree: 0.018 s, git 0.126 s.
+  - Batched writes merge the newest packs geometrically (as `git repack
+    --geometric=2`), so a store keeps O(log n) packs. git.git clone went
+    588 s (thousands of packs) → 200 s; the store ends with 4 packs.
+  - Results in [perf-port.md](perf-port.md).
+
 ## Order of work
 
 Each step comes with its row in the benchmark, measured before and after.

@@ -66,9 +66,9 @@ durable.
 
 ## Results
 
-Both rerun on 2026-11-08 after packs (c4864d4) and with both tools over plain
-TCP (d4e00b1). Times in seconds. The earlier run (45b0692, cas over HTTPS
-against git over a pipe, loose files) is in this file's history.
+Rerun on 2026-11-08 at aef38de: packs, heads, the graph index, the stat
+cache and pack compaction, both tools over plain TCP. Times in seconds.
+Earlier runs are in this file's history.
 
 ### Thesis
 
@@ -76,65 +76,68 @@ against git over a pipe, loose files) is in this file's history.
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.038 | 0.097 | 2.6 |
-| rev-list -- PATH, most-changed file (p0001) | 0.050 | 0.598 | 12.0 |
-| count commits (p5600) | 0.036 | 0.121 | 3.4 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.003 | 0.088 | 29.3 |
-| diff of the last step (p4000) | 0.003 | 0.108 | 36.0 |
-| checkout the tip into an empty dir (p0006) | 0.141 | 0.205 | 1.5 |
-| commit, nothing changed (p0005 status) | 0.124 | 0.056 | 0.5 |
-| commit 500 new files (p0008 odb-fsync) | 0.179 | 0.299 | 1.7 |
-| clone over the network (p5601) | 2.581 | 6.289 | 2.4 |
-| clone without blobs (p5600) | 0.295 | - | - |
-| fetch one file, no clone (cas only) | 0.165 | 0.091 | 0.6 |
-| push one new commit | 0.112 | 0.596 | 5.3 |
-| fast-import (p9300) / import-git | 32.876 | 5.390 | 0.2 |
-| gc (p5600) | 0.645 | 6.957 | 10.8 |
-
-Against the earlier run: clone 10.8 → 6.3 s, push 0.98 → 0.60 s, import
-27.9 → 5.4 s (import now writes packs), gc 2.7 → 7.0 s (gc now repacks with
-deltas: store 246 → 140 MB, git's is 96 MB).
+| rev-list --all (p0001) | 0.039 | 0.078 | 2.0 |
+| rev-list -- PATH, most-changed file (p0001) | 0.052 | 0.078 | 1.5 |
+| count commits (p5600) | 0.040 | 0.039 | 1.0 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.004 | 0.007 | 1.8 |
+| diff of the last step (p4000) | 0.004 | 0.005 | 1.2 |
+| checkout the tip into an empty dir (p0006) | 0.149 | 0.121 | 0.8 |
+| commit, nothing changed (p0005 status) | 0.126 | 0.018 | 0.1 |
+| commit 500 new files (p0008 odb-fsync) | 0.213 | 0.378 | 1.8 |
+| clone over the network (p5601) | 2.501 | 9.018 | 3.6 |
+| clone without blobs (p5600) | 0.301 | - | - |
+| fetch one file, no clone (cas only) | 0.159 | 0.005 | 0.0 |
+| push one new commit | 0.114 | 0.496 | 4.4 |
+| list every object (p1006 cat-file --batch-all-objects) | 0.044 | 0.565 | 12.8 |
+| merge-base of the tip and a node 100 back (p6010) | 0.004 | 0.076 | 19.0 |
+| last-modified of the root's entries (p8020) | - | 0.026 | - |
+| fsck (p1450) | 2.818 | 3.560 | 1.3 |
+| fast-import (p9300) / import-git | 32.982 | 7.398 | 0.2 |
+| gc (p5600) | 0.672 | 7.000 | 10.4 |
 
 ### git.git
 
-82,725 commits, git 2.43.0, one run each (REPEAT=1).
+82,725 commits, git 2.43.0, one run each (REPEAT=1), so a first run pays
+one-time work: path-log includes building the graph (about 35 s).
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.648 | 3.035 | 4.7 |
-| rev-list -- PATH, most-changed file (p0001) | 0.611 | 64.130 | 105.0 |
-| count commits (p5600) | 0.581 | 2.985 | 5.1 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.006 | 1.996 | 332.7 |
-| diff of the last step (p4000) | 0.004 | 1.928 | 482.0 |
-| checkout the tip into an empty dir (p0006) | 0.280 | 2.238 | 8.0 |
-| commit, nothing changed (p0005 status) | 0.198 | 0.406 | 2.1 |
-| commit 500 new files (p0008 odb-fsync) | 0.379 | 0.674 | 1.8 |
-| clone over the network (p5601) | 17.830 | 165.414 | 9.3 |
-| clone without blobs (p5600) | 6.880 | - | - |
-| fetch one file, no clone (cas only) | 0.193 | 1.939 | 10.0 |
-| push one new commit | 0.126 | 9.852 | 78.2 |
-| fast-import (p9300) / import-git | 77.515 | 206.613 | 2.7 |
-| gc (p5600) | 11.528 | 493.454 | 42.8 |
-
-Against the earlier run: clone 316 → 165 s (it completes now), push 17.0 →
-9.9 s, import 500 → 207 s, gc 274 → 493 s (repack added). Commit got slower
-(0.10 → 0.41 s): lookups now also probe the pack indexes.
+| rev-list --all (p0001) | 0.630 | 2.609 | 4.1 |
+| rev-list -- PATH, most-changed file (p0001) | 0.604 | 41.661 | 69.0 |
+| count commits (p5600) | 0.700 | 0.853 | 1.2 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.007 | 0.037 | 5.3 |
+| diff of the last step (p4000) | 0.005 | 0.033 | 6.6 |
+| checkout the tip into an empty dir (p0006) | 0.394 | 0.329 | 0.8 |
+| commit, nothing changed (p0005 status) | 0.104 | 0.130 | 1.2 |
+| commit 500 new files (p0008 odb-fsync) | 0.266 | 0.421 | 1.6 |
+| clone over the network (p5601) | 18.132 | 199.880 | 11.0 |
+| clone without blobs (p5600) | 7.380 | - | - |
+| fetch one file, no clone (cas only) | 0.183 | 0.006 | 0.0 |
+| push one new commit | 0.138 | 6.079 | 44.1 |
+| list every object (p1006 cat-file --batch-all-objects) | 0.600 | 68.589 | 114.3 |
+| merge-base of the tip and a node 100 back (p6010) | 0.009 | 3.341 | 371.2 |
+| last-modified of the root's entries (p8020) | - | 72.806 | - |
+| fsck (p1450) | 26.519 | 299.173 | 11.3 |
+| fast-import (p9300) / import-git | 78.618 | 257.338 | 3.3 |
+| gc (p5600) | 9.660 | 512.567 | 53.1 |
 
 ## What the numbers say
 
-- **cas is ahead or even** where the work is local and small: import on
-  both corpora's scale relative to git is 0.2 (Thesis) and 2.7 (git.git),
-  commit and checkout on Thesis, and fetching one file on Thesis.
-- **The history object does not scale.** On git.git every command that
-  reads the history parses one object holding all 82,725 nodes, about 2 s
-  each. That is the whole cost of `ls`, `diff` and checkout there (2 s
-  against git's milliseconds). Git reads one commit. The history index
-  (step 3) is next.
-- **Path history** (105 times git) is git's changed-path Bloom filters
-  against a full walk, plus the history parse; step 3.
-- **Push of one commit** (78 times git on git.git) still read and checked
-  the remote's whole history in this run; the local diff walk (marking the
-  remote history's versions present without asking) comes in the next
-  commit, and the history index removes the parses.
-- **gc** repacks everything each time; git's gc reuses existing deltas. An
-  incremental repack (only loose objects and small packs) is the fix.
+- **Thesis is at git's speed or better** for everyday commands: log,
+  path history, ls, diff, merge-base and fsck are within 2 times git;
+  checkout, commit and import are faster; fetching one file without a
+  clone takes 5 ms.
+- **git.git still pays for the size of one history object.** Every
+  command that needs more than the heads reads and parses all 82,725
+  nodes: rev-list (2.6 s), merge-base (3.3 s), push (6.1 s), and a commit
+  rewrites it. The fix is a history format that grows by a node without
+  rewriting the rest (step 3, still open).
+- **Tree reads are the next cost.** path-log after the graph build and
+  last-modified read thousands of 85 KB root directories, each chunked and
+  verified. A cache of decoded directories and delta bases (git's p0003)
+  and a compact directory encoding are next.
+- **Clone** is 11 times git (200 s, 18 s for git): after compaction the
+  time is per-object requests and writes, not packs.
+- **gc** rewrites every pack each time (git reuses existing deltas); an
+  incremental repack is the fix. Listing objects and fsck walk the whole
+  store through paged listing, 114 and 11 times git.
