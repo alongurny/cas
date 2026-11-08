@@ -20,6 +20,17 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+/// `println!` that ends the process quietly when stdout is closed, as when
+/// piped into `head`.
+macro_rules! out {
+    ($($t:tt)*) => {{
+        use std::io::Write;
+        if writeln!(std::io::stdout(), $($t)*).is_err() {
+            std::process::exit(0);
+        }
+    }};
+}
+
 const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--meta DIR] COMMAND
 History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
 prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
@@ -38,6 +49,8 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   rebase ONTO                   replay this history's own nodes onto history ONTO
   publish PUBLIC                add this history's tip to history PUBLIC as one node
   merge [OTHER]                 merge history OTHER in (or the two tips) as one node
+  import-git REPO [REV]         import a git repository's commits (default HEAD)
+                                as history -H (refused if it exists)
   gc                            one collection run (two-phase)
   serve ADDR [--open] [--max-body BYTES]
                                 serve the store over HTTP, under the access
@@ -133,11 +146,11 @@ fn node_text(n: &Option<Node>) -> String {
 
 fn report(outcome: MergeOutcome) -> Res<()> {
     match outcome {
-        MergeOutcome::UpToDate => println!("UpToDate"),
-        MergeOutcome::Done(id) => println!("Done {}", short(id.version().key())),
+        MergeOutcome::UpToDate => out!("UpToDate"),
+        MergeOutcome::Done(id) => out!("Done {}", short(id.version().key())),
         MergeOutcome::Conflicts(m) => {
             for c in &m.conflicts {
-                println!(
+                out!(
                     "conflict {:8} {:8} {:8} {}",
                     node_text(&c.base),
                     node_text(&c.ours),
@@ -170,7 +183,7 @@ fn run(a: Args) -> Res<()> {
             let root = fs::import(s, b3(), formats::by_alias("dir").unwrap(), dir.as_ref()).map_err(e)?;
             formats::publish(s).map_err(e)?;
             let id = history::commit(s, b3(), name, &root, step, a.doc.clone()).map_err(e)?;
-            println!("{}", id);
+            out!("{}", id);
         }
         Some("log") => {
             let h = load(s, name)?.1;
@@ -187,13 +200,13 @@ fn run(a: Args) -> Res<()> {
                     .collect();
                 let notes: Vec<&str> = n.after.values().filter_map(|st| st.changelog.as_deref()).collect();
                 let t = tags.get(&id).map(|t| format!(" ({})", t.join(", "))).unwrap_or_default();
-                println!("{}{t}  [{}]  {}", short(id.version().key()), after.join(" "), notes.join(" / "));
+                out!("{}{t}  [{}]  {}", short(id.version().key()), after.join(" "), notes.join(" / "));
             }
         }
         Some("ls") => {
             for item in walk(s, &at()?.version(), prefix(1)?.as_ref()) {
                 let (p, n) = item.map_err(e)?;
-                println!("{:8} {p}", node_text(&Some(n)));
+                out!("{:8} {p}", node_text(&Some(n)));
             }
         }
         Some("diff") => {
@@ -201,24 +214,24 @@ fn run(a: Args) -> Res<()> {
             let id = node(&h, &a.node, name)?;
             let Some(pred) = h.nodes[&id].after.keys().next() else { return Err("the node has no predecessor".into()) };
             for c in diff(s, &pred.version(), &id.version(), None).map_err(e)? {
-                println!("{:8} -> {:8} {}", node_text(&c.old), node_text(&c.new), c.path);
+                out!("{:8} -> {:8} {}", node_text(&c.old), node_text(&c.new), c.path);
             }
         }
         Some("checkout") => {
             let dest = arg(1, "DEST")?;
             let n = fs::checkout(s, &at()?.version(), prefix(2)?.as_ref(), dest.as_ref()).map_err(e)?;
-            println!("{n} paths written to {dest}");
+            out!("{n} paths written to {dest}");
         }
         Some("summary") => {
             let r = derived::derive(s, b3(), &SUMMARY, &at()?.version()).map_err(e)?;
-            println!("{}", derived::value(s, &r).map_err(e)?);
+            out!("{}", derived::value(s, &r).map_err(e)?);
         }
         Some("path-log") => {
             let p = Path::new(arg(1, "PATH")?).map_err(e)?;
             let h = load(s, name)?.1;
             for id in derived::path_log(s, &h, &p).map_err(e)? {
                 let notes: Vec<&str> = h.nodes[&id].after.values().filter_map(|st| st.changelog.as_deref()).collect();
-                println!("{}  {}", short(id.version().key()), notes.join(" / "));
+                out!("{}  {}", short(id.version().key()), notes.join(" / "));
             }
         }
         Some("tag") => {
@@ -233,12 +246,12 @@ fn run(a: Args) -> Res<()> {
         Some("compatible") => {
             let h = load(s, name)?.1;
             let (x, y) = (node(&h, &arg(1, "FROM")?, name)?, node(&h, &arg(2, "TO")?, name)?);
-            println!("{}", if h.compatible(&x, &y) { "compatible" } else { "breaking" });
+            out!("{}", if h.compatible(&x, &y) { "compatible" } else { "breaking" });
         }
         Some("show") => {
             let bytes = read_blob(s, &arg(1, "KEY")?).map_err(e)?;
             match Value::deserialize(&bytes) {
-                Ok(v) => println!("{v}"),
+                Ok(v) => out!("{v}"),
                 Err(_) => print!("{}", String::from_utf8_lossy(&bytes)),
             }
         }
@@ -251,7 +264,7 @@ fn run(a: Args) -> Res<()> {
                 sync::push(&*other, s, &remote, name)
             }
             .map_err(e)?;
-            println!("{outcome:?}: {} blobs copied, {} already present", n.blobs, n.present);
+            out!("{outcome:?}: {} blobs copied, {} already present", n.blobs, n.present);
         }
         Some("rebase") => {
             let onto = arg(1, "ONTO")?;
@@ -292,9 +305,27 @@ fn run(a: Args) -> Res<()> {
             }
             report(outcome)?;
         }
+        Some("import-git") => {
+            let repo = arg(1, "REPO")?;
+            let rev = a.rest.get(2).cloned().unwrap_or_else(|| "HEAD".into());
+            let start = std::time::Instant::now();
+            let (h, n) = cas_version::git::import(s, b3(), repo.as_ref(), &rev).map_err(e)?;
+            formats::publish(s).map_err(e)?;
+            history::save(s, b3(), name, None, &h).map_err(|x| format!("{name}: {x}"))?;
+            out!(
+                "{} commits, {} trees, {} files, {} submodules skipped, {} nodes, {} tags in {:.1}s",
+                n.commits,
+                n.trees,
+                n.files,
+                n.skipped,
+                h.nodes.len(),
+                h.tags.len(),
+                start.elapsed().as_secs_f64()
+            );
+        }
         Some("gc") => {
             let r = gc::collect(s, b3()).map_err(e)?;
-            println!("{} reachable, {} unreachable, {} removed", r.reachable, r.unreachable, r.removed.len());
+            out!("{} reachable, {} unreachable, {} removed", r.reachable, r.unreachable, r.removed.len());
         }
         Some("access") => {
             let meta = open(&a.meta, token)?;
@@ -302,18 +333,18 @@ fn run(a: Args) -> Res<()> {
             match a.rest.get(1).map(String::as_str) {
                 Some("show") => {
                     for n in rules.users.keys() {
-                        println!("user  {n}");
+                        out!("user  {n}");
                     }
                     for (w, gs) in &rules.grants {
                         let gs: Vec<String> = gs.iter().map(Grant::to_string).collect();
-                        println!("grant {w}: {}", gs.join(", "));
+                        out!("grant {w}: {}", gs.join(", "));
                     }
                     return Ok(());
                 }
                 Some("user") => {
                     let t = rules.add_user(&arg(2, "NAME")?).map_err(e)?;
                     access::save(&*meta, b3(), old, &rules).map_err(e)?;
-                    println!("{t}");
+                    out!("{t}");
                     return Ok(());
                 }
                 Some(op @ ("grant" | "revoke")) => {
@@ -361,7 +392,7 @@ fn run(a: Args) -> Res<()> {
                 Server::start_with_max_body(core, &addr, 8, gate.authenticate(), max_body)
             }
             .map_err(e)?;
-            println!("serving {} at {}", a.store, server.url());
+            out!("serving {} at {}", a.store, server.url());
             loop {
                 std::thread::park();
             }

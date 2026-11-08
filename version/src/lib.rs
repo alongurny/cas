@@ -13,6 +13,7 @@ pub mod dir;
 pub mod formats;
 pub mod fs;
 pub mod gc;
+pub mod git;
 pub mod history;
 pub mod merge;
 pub mod sync;

@@ -128,11 +128,7 @@ impl CoreStore {
                 if !is_view(value) {
                     return Err(Error::Invalid(Invalid::View));
                 }
-                if self.backend.cas_var(key, expect, Some(value))? {
-                    Ok(())
-                } else {
-                    Err(Error::Conflict)
-                }
+                if self.backend.cas_var(key, expect, Some(value))? { Ok(()) } else { Err(Error::Conflict) }
             }
         }
     }
