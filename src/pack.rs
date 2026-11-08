@@ -253,6 +253,14 @@ pub struct PackWriter<'a> {
 }
 
 impl PackWriter<'_> {
+    /// Copy a whole frame (as stored in another pack) under `name`.
+    fn add_frame(&mut self, name: &str, frame: &[u8]) -> io::Result<()> {
+        self.idx.push((name.to_string(), self.offset));
+        self.out.write_all(frame)?;
+        self.offset += frame.len() as u64;
+        Ok(())
+    }
+
     pub fn add(&mut self, name: &str, e: &Entry) -> io::Result<()> {
         self.idx.push((name.to_string(), self.offset));
         let mut frame = Vec::new();
@@ -329,9 +337,17 @@ impl Packs {
         }
         ids.sort();
         let mut st = self.state.write().unwrap();
-        let known: BTreeSet<&String> = st.packs.iter().collect();
-        if !known.iter().all(|k| ids.binary_search(k).is_ok()) {
-            *st = State::default();
+        // Forget packs that went away (merged or dropped), keeping the
+        // indexes already read for the rest.
+        if !st.packs.iter().all(|k| ids.binary_search(k).is_ok()) {
+            let old = std::mem::take(&mut *st);
+            for ((id, idx), map) in old.packs.into_iter().zip(old.idx).zip(old.maps) {
+                if ids.binary_search(&id).is_ok() {
+                    st.packs.push(id);
+                    st.idx.push(idx);
+                    st.maps.push(map);
+                }
+            }
         }
         let known: BTreeSet<String> = st.packs.iter().cloned().collect();
         for id in ids.into_iter().filter(|i| !known.contains(i)) {
@@ -372,8 +388,20 @@ impl Packs {
         if let Some(m) = cell.get() {
             return Ok(Some((loc, m.clone())));
         }
-        let m = std::sync::Arc::new(Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack])))?);
-        Ok(Some((loc, cell.get_or_init(|| m).clone())))
+        match Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack]))) {
+            Ok(m) => Ok(Some((loc, cell.get_or_init(|| std::sync::Arc::new(m)).clone()))),
+            // Merged away by a compaction since the last look: look again.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                drop(st);
+                self.state.write().unwrap().seen_mtime = None;
+                self.refresh()?;
+                let st = self.state.read().unwrap();
+                let Some(loc) = st.get(name) else { return Ok(None) };
+                let m = Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack])))?;
+                Ok(Some((loc, st.maps[loc.pack].get_or_init(|| std::sync::Arc::new(m)).clone())))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     pub fn contains(&self, name: &str) -> io::Result<bool> {
@@ -415,21 +443,89 @@ impl Packs {
 
     /// Names held in packs, in `[from, to)` (`to` open when `None`).
     pub fn names_in(&self, from: &str, to: Option<&str>) -> io::Result<Vec<String>> {
+        self.names_in_limited(from, to, usize::MAX)
+    }
+
+    /// The first `limit` names held in packs in `[from, to)`: each pack
+    /// gives at most `limit`, so a page costs its size, not the store's.
+    pub fn names_in_limited(&self, from: &str, to: Option<&str>, limit: usize) -> io::Result<Vec<String>> {
         self.refresh()?;
         let st = self.state.read().unwrap();
         let mut out = BTreeSet::new();
         for idx in &st.idx {
+            let mut taken = 0;
             for i in idx.lower_bound(from)..idx.n {
                 let k = idx.name(i)?;
-                if to.is_some_and(|t| k >= t) {
+                if to.is_some_and(|t| k >= t) || taken >= limit {
                     break;
                 }
                 if !st.removed.contains(k) {
                     out.insert(k.to_string());
+                    taken += 1;
                 }
             }
         }
-        Ok(out.into_iter().collect())
+        Ok(out.into_iter().take(limit).collect())
+    }
+
+    /// Keep the number of packs logarithmic, like git's geometric repack
+    /// (`git repack --geometric=2`): packs are in age order, and the newest
+    /// ones are merged into one while the pack before them holds at most
+    /// twice as many entries as they do together. Each entry is then
+    /// copied O(log n) times in all, and a lookup searches O(log n) packs.
+    /// Frames are copied as they are, deltas included. Best effort: another
+    /// process compacting at the same time makes this one skip.
+    pub fn compact(&self, tmp: &Path) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let lock = File::create(self.dir.join("compact.lock"))?;
+        // SAFETY: flock on a descriptor we own; released when it closes.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Ok(());
+        }
+        self.refresh()?;
+        let (ids, sizes): (Vec<String>, Vec<usize>) = {
+            let st = self.state.read().unwrap();
+            st.packs.iter().cloned().zip(st.idx.iter().map(|i| i.n)).unzip()
+        };
+        let Some(last) = ids.len().checked_sub(1) else { return Ok(()) };
+        let (mut first, mut acc) = (last, sizes[last]);
+        while first > 0 && sizes[first - 1] <= 2 * acc {
+            first -= 1;
+            acc += sizes[first];
+        }
+        if first == last {
+            return Ok(());
+        }
+        let merge = &ids[first..];
+        let mut w = self.writer(tmp)?;
+        let mut seen = std::collections::HashSet::new();
+        for id in merge {
+            let idx = Idx::parse(id, fs::read(self.dir.join(format!("{id}.idx")))?)?;
+            let map = Map::open(&self.dir.join(format!("{id}.pack")))?;
+            for i in 0..idx.n {
+                let name = idx.name(i)?;
+                if !seen.insert(name.to_string()) {
+                    continue;
+                }
+                let mut b = map.bytes().get(idx.offset(i) as usize..).ok_or_else(|| bad("offset past the pack"))?;
+                let start = b.len();
+                take(&mut b, 1)?;
+                let n = take_u16(&mut b)?;
+                take(&mut b, n)?;
+                let n = take_u32(&mut b)?;
+                take(&mut b, n)?;
+                let len = start - b.len();
+                let at = idx.offset(i) as usize;
+                w.add_frame(name, &map.bytes()[at..at + len])?;
+            }
+        }
+        w.finish()?;
+        for id in merge {
+            let _ = fs::remove_file(self.dir.join(format!("{id}.idx")));
+            let _ = fs::remove_file(self.dir.join(format!("{id}.pack")));
+        }
+        File::open(&self.dir)?.sync_all()?;
+        self.refresh()
     }
 
     /// Start a pack; temp files go in `tmp`.
@@ -537,6 +633,29 @@ mod tests {
         let idx = Idx::parse("x", v1).unwrap();
         assert_eq!((idx.get("a"), idx.get("m"), idx.get("zz"), idx.get("b")), (Some(8), Some(20), Some(30), None));
         assert_eq!(idx.name(idx.lower_bound("b")).unwrap(), "m");
+    }
+
+    #[test]
+    fn compaction_keeps_the_pack_count_logarithmic_and_every_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let p = Packs::open(dir.path().join("packs")).unwrap();
+        let mut names = Vec::new();
+        for i in 0..64 {
+            let name = format!("blake3:{i:064x}");
+            p.write(&[(name.clone(), Entry::File(format!("\0value {i}").into_bytes()))], &tmp).unwrap();
+            p.compact(&tmp).unwrap();
+            names.push(name);
+        }
+        let n = p.ids().unwrap().len();
+        assert!(n <= 7, "{n} packs for 64 writes");
+        let other = Packs::open(dir.path().join("packs")).unwrap();
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(other.file(name).unwrap(), Some(format!("\0value {i}").into_bytes()));
+            assert_eq!(p.file(name).unwrap(), Some(format!("\0value {i}").into_bytes()));
+        }
+        assert_eq!(other.all().unwrap(), names);
     }
 
     #[test]

@@ -37,7 +37,8 @@ A URL is https:// (the only protocol); --ca trusts the CA certificates in FILE
 instead of the public ones.
 History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
 prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
-  commit DIR                    add DIR as a new node after the tip
+  commit DIR                    add DIR as a new node after the tip (DIR/.cas-index
+                                caches stat data, so unchanged files are not rehashed)
   log                           nodes, newest first, with tags and changelogs
   ls [PREFIX]                   paths of a node's version
   diff                          changes from a node's predecessor
@@ -226,7 +227,9 @@ fn run(a: Args) -> Res<()> {
     match a.rest.first().map(String::as_str) {
         Some("commit") => {
             let dir = arg(1, "DIR")?;
-            let root = fs::import(s, b3(), formats::by_alias("dir").unwrap(), dir.as_ref()).map_err(e)?;
+            // The stat cache in DIR spares rehashing unchanged files.
+            let root = fs::import_indexed(s, b3(), formats::by_alias("dir").unwrap(), dir.as_ref(), Some(&a.store))
+                .map_err(e)?;
             formats::publish(s).map_err(e)?;
             let id = history::commit(s, b3(), name, &root, step, a.doc.clone()).map_err(e)?;
             out!("{}", id);
@@ -271,7 +274,8 @@ fn run(a: Args) -> Res<()> {
         }
         Some("checkout") => {
             let dest = arg(1, "DEST")?;
-            let n = fs::checkout(s, &at()?.version(), prefix(2)?.as_ref(), dest.as_ref()).map_err(e)?;
+            let n = fs::checkout_indexed(s, &at()?.version(), prefix(2)?.as_ref(), dest.as_ref(), Some(&a.store))
+                .map_err(e)?;
             out!("{n} paths written to {dest}");
         }
         Some("summary") => {

@@ -596,6 +596,7 @@ impl Backend for DiskBackend {
                 w.add(key, &crate::pack::Entry::File(file))?;
             }
             w.finish()?;
+            packs.compact(&self.root.join("tmp"))?;
             return Ok(());
         }
         let mut pending = Vec::new();
@@ -673,7 +674,9 @@ impl Backend for DiskBackend {
             // Bounds that are not UTF-8 widen to open ones; the filter below is exact.
             let from = span.from.as_deref().and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
             let to = span.to.as_deref().and_then(|b| std::str::from_utf8(b).ok());
-            candidates.extend(p.names_in(from, to)?.into_iter().filter(|n| !n.starts_with('#')));
+            // Chunks (`#…`) sort before every key; start past them.
+            let from = from.max("$");
+            candidates.extend(p.names_in_limited(from, to, limit)?.into_iter().filter(|n| !n.starts_with('#')));
             candidates.sort_unstable();
             candidates.dedup();
         }
@@ -787,7 +790,13 @@ mod tests {
         b.put_blobs(&[(&k1, &base), (&k2, &edited), (&k3, &large)]).unwrap();
         // One pack, no loose blob files.
         assert_eq!(files(&dir.path().join("blobs/blake3")), 0);
-        assert_eq!(fs::read_dir(dir.path().join("packs")).unwrap().count(), 2);
+        let packs = |d: &Path| {
+            fs::read_dir(d.join("packs"))
+                .unwrap()
+                .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pack" || x == "idx"))
+                .count()
+        };
+        assert_eq!(packs(dir.path()), 2);
         // Another process sees it.
         let other = DiskBackend::open(dir.path()).unwrap();
         for (k, v) in [(&k1, &base), (&k2, &edited), (&k3, &large)] {

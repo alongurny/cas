@@ -17,6 +17,7 @@ pub mod gc;
 pub mod git;
 pub mod graph;
 pub mod history;
+pub mod index;
 pub mod merge;
 pub mod sync;
 mod tree;
