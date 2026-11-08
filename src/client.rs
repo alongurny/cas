@@ -73,6 +73,55 @@ fn outcome(mut resp: Response<ureq::Body>) -> Error {
     }
 }
 
+impl HttpStore {
+    /// Write a big blob by sending only the chunks the server lacks
+    /// (spec/wire.md, chunked transfer). `None` when the server does not
+    /// take chunks, or a chunk went missing meanwhile: send it whole.
+    fn write_chunks(&self, key: &str, value: &[u8], expect: &Expect) -> Result<Option<Result<()>>> {
+        let pieces = crate::chunk::split(value);
+        let ids: Vec<u8> = pieces.iter().flat_map(|(id, _)| *id).collect();
+        let mut resp = self
+            .auth(self.agent.post(format!("{}/chunks/missing", self.base)))
+            .header("Content-Type", "application/octet-stream")
+            .send(&ids[..])
+            .map_err(transport)?;
+        if resp.status().as_u16() != 200 {
+            return Ok(None);
+        }
+        let missing: std::collections::HashSet<Vec<u8>> = body(&mut resp)?.chunks(32).map(<[u8]>::to_vec).collect();
+        let mut sent = std::collections::HashSet::new();
+        for (id, piece) in &pieces {
+            if !missing.contains(&id[..]) || !sent.insert(*id) {
+                continue;
+            }
+            let resp = self
+                .auth(self.agent.put(format!("{}/chunk/{}", self.base, hex::encode(id))))
+                .header("Content-Type", "application/octet-stream")
+                .send(*piece)
+                .map_err(transport)?;
+            if resp.status().as_u16() != 204 {
+                return Ok(None);
+            }
+        }
+        let mut payload = Vec::with_capacity(ids.len() + 9);
+        wire::encode_expect(expect, &mut payload);
+        payload.extend_from_slice(&ids);
+        let resp = self
+            .auth(self.agent.put(format!("{}/k/{}", self.base, wire::encode_key(key))))
+            .header("Content-Type", wire::WRITE_CHUNKS)
+            .send(&payload[..])
+            .map_err(transport)?;
+        match resp.status().as_u16() {
+            204 => Ok(Some(Ok(()))),
+            404 => Ok(None),
+            _ => match outcome(resp) {
+                Error::Refused { reason, .. } if reason == "chunks-missing" => Ok(None),
+                e => Ok(Some(Err(e))),
+            },
+        }
+    }
+}
+
 impl Store for HttpStore {
     fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let mut resp = self
@@ -87,6 +136,12 @@ impl Store for HttpStore {
     }
 
     fn write(&self, key: &str, value: &[u8], expect: &Expect) -> Result<()> {
+        if value.len() > crate::chunk::CHUNK_OVER
+            && matches!(crate::key::classify(key), Some(crate::key::Parsed::Blob { .. }))
+            && let Some(done) = self.write_chunks(key, value, expect)?
+        {
+            return done;
+        }
         let mut payload = Vec::with_capacity(value.len() + 9);
         wire::encode_expect(expect, &mut payload);
         payload.extend_from_slice(value);

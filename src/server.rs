@@ -1,8 +1,9 @@
 //! Serve a [`CoreStore`] over HTTP (spec/wire.md).
 
+use crate::chunk;
 use crate::gate::Who;
 use crate::key::{Parsed, classify};
-use crate::store::{CoreStore, Store};
+use crate::store::{CoreStore, Session, Store};
 use crate::types::{Error, Span};
 use crate::wire;
 use std::io::Read;
@@ -131,7 +132,15 @@ fn too_large(req: Request, max: usize) {
     );
 }
 
-fn handle(store: &dyn Store, mut req: Request, max_body: usize) {
+/// A body of concatenated 32-byte chunk ids.
+fn chunk_ids(body: &[u8]) -> Option<Vec<chunk::Id>> {
+    if !body.len().is_multiple_of(32) {
+        return None;
+    }
+    Some(body.chunks(32).map(|c| c.try_into().unwrap()).collect())
+}
+
+fn handle(store: &Session, mut req: Request, max_body: usize) {
     let url = req.url().to_string();
     let (path, query) = url.split_once('?').unwrap_or((&url, ""));
     let method = req.method().clone();
@@ -162,8 +171,23 @@ fn handle(store: &dyn Store, mut req: Request, max_body: usize) {
                     Body::Broken => return bad_request(req),
                 };
                 let Some((expect, value)) = wire::decode_expect(&body) else { return bad_request(req) };
-                match store.write(&key, value, &expect) {
-                    Ok(()) => drop(req.respond(empty(204))),
+                let by_chunks = req
+                    .headers()
+                    .iter()
+                    .any(|h| h.field.equiv("Content-Type") && h.value.as_str() == wire::WRITE_CHUNKS);
+                if !by_chunks {
+                    return match store.write(&key, value, &expect) {
+                        Ok(()) => drop(req.respond(empty(204))),
+                        Err(e) => respond_error(req, e),
+                    };
+                }
+                let Some(ids) = chunk_ids(value) else { return bad_request(req) };
+                if !store.chunked() {
+                    return drop(req.respond(empty(404)));
+                }
+                match store.write_chunks(&key, &ids, &expect) {
+                    Ok(Some(())) => drop(req.respond(empty(204))),
+                    Ok(None) => respond_error(req, Error::refused("chunks-missing", "upload the missing chunks first")),
                     Err(e) => respond_error(req, e),
                 }
             }
@@ -188,6 +212,39 @@ fn handle(store: &dyn Store, mut req: Request, max_body: usize) {
                 Err(e) => respond_error(req, e),
             },
             _ => bad_request(req),
+        }
+    } else if path == "/chunks/missing" && method == Method::Post {
+        if !store.chunked() {
+            return drop(req.respond(empty(404)));
+        }
+        let body = match read_body(&mut req, max_body) {
+            Body::Read(body) => body,
+            Body::TooLarge => return too_large(req, max_body),
+            Body::Broken => return bad_request(req),
+        };
+        let Some(ids) = chunk_ids(&body) else { return bad_request(req) };
+        match store.missing_chunks(&ids) {
+            Ok(missing) => drop(req.respond(Response::from_data(missing.concat()))),
+            Err(e) => respond_error(req, e),
+        }
+    } else if let Some(seg) = path.strip_prefix("/chunk/") {
+        if method != Method::Put {
+            return drop(req.respond(empty(405)));
+        }
+        if !store.chunked() {
+            return drop(req.respond(empty(404)));
+        }
+        let Some(id) = hex::decode(seg).ok().and_then(|b| chunk::Id::try_from(b).ok()) else {
+            return bad_request(req);
+        };
+        let body = match read_body(&mut req, max_body) {
+            Body::Read(body) => body,
+            Body::TooLarge => return too_large(req, max_body),
+            Body::Broken => return bad_request(req),
+        };
+        match store.put_chunk(&id, &body) {
+            Ok(()) => drop(req.respond(empty(204))),
+            Err(e) => respond_error(req, e),
         }
     } else if path == "/list" && method == Method::Get {
         let mut span = Span::all();

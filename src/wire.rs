@@ -6,6 +6,9 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_perc
 /// Everything but `A-Z a-z 0-9 - . _ ~`.
 const KEY_SET: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
+/// The Content-Type of a blob write whose value is a list of chunk ids.
+pub const WRITE_CHUNKS: &str = "application/vnd.cas.write-chunks";
+
 pub fn encode_key(key: &str) -> String {
     utf8_percent_encode(key, KEY_SET).to_string()
 }

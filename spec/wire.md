@@ -69,6 +69,33 @@ come before `denied`. So can 413: a server bounds the request bodies it reads
 answers 413 to a larger one without buffering it. A client reports it as
 `refused` with reason `too-large`.
 
+## Chunked transfer
+
+An optimization for writing big blobs; a server may leave it out (it answers
+404 to these requests), and a client then sends the value whole. Reads are
+unchanged: `GET /k/{key}` returns the whole value, so fetching one object
+stays one request.
+
+A chunk is a piece of a blob value, named by the blake3 hash of its bytes (32
+bytes, lowercase hex in URLs). Chunks are cut by FastCDC (minimum 4 KiB,
+average 16 KiB, maximum 64 KiB), so both ends agree on the cuts and an edit
+moves only the chunks around it. A client uses this for blob values over
+64 KiB:
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /chunks/missing` | chunk ids, concatenated | 200, the ids of those the server lacks, concatenated |
+| `PUT /chunk/{id}` | the chunk's bytes, at most 64 KiB | 204; 400 `hash-mismatch` if they do not hash to `id` |
+| `PUT /k/{key}` with `Content-Type: application/vnd.cas.write-chunks` | expect frame, then the value's chunk ids in order | as a write of the concatenation |
+
+Chunks are not keys: they are not listed, read or removed over the wire. The
+gate decides asking about and uploading chunk `id` as a write of blob key
+`blake3:{id}`, so only callers who may write blobs learn which chunks a
+server holds or add any. The last request assembles the value and then is an
+ordinary write of it, with the same gate, checks and answers (its key is
+checked against the whole value). If a chunk named there is gone, the answer
+is 422 `chunks-missing`, and the client sends the value whole.
+
 ### Caching headers
 
 - A blob read: `Cache-Control: private, max-age=31536000, immutable`. The

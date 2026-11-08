@@ -184,9 +184,13 @@ impl Session {
     }
 
     /// Which of `ids` the store lacks.
+    /// Asking is gated like uploading, so it reveals nothing to a caller
+    /// who could not add the chunks.
     pub fn missing_chunks(&self, ids: &[crate::chunk::Id]) -> Result<Vec<crate::chunk::Id>> {
         let mut out = Vec::new();
         for id in ids {
+            let key = format!("blake3:{}", hex::encode(id));
+            self.store.gate(&self.who, Op::Write { key: &key, value: &[], expect: &Expect::Absent })?;
             if self.store.backend.get_chunk(id)?.is_none() {
                 out.push(*id);
             }
