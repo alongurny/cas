@@ -87,71 +87,140 @@ fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
 
 /// Copy everything reachable from `root` that `dst` lacks, children before
 /// parents (the closure invariant). Breadth first: each depth is one
-/// `has_many` on `dst` and one `read_many` on `src`. Files are written as
-/// they arrive; containers (directories, histories) are held and written
-/// last, children first, once everything below them is in.
+/// `has_many` on `dst` and one `read_many` on `src`. A blob is written as
+/// soon as everything under it is in the destination, so only containers
+/// still waiting on their subtrees are held in memory. A history's nodes
+/// are copied in groups of [`ROOTS_PER_ROUND`], oldest first, which bounds
+/// that to a group's subtrees: later groups find most of their trees
+/// present already.
 pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
-    let mut n = Copied::default();
-    let mut formats_seen = BTreeSet::new();
-    let mut seen = HashSet::new();
-    let mut containers: HashMap<String, (Vec<u8>, Vec<View>)> = HashMap::new();
-    let mut frontier = vec![root.clone()];
-    while !frontier.is_empty() {
-        let mut level: Vec<View> = Vec::new();
-        for r in frontier.drain(..) {
-            if formats_seen.insert(r.format().to_string()) {
-                copy_format(src, dst, r.format(), &mut n)?;
-            }
-            if seen.insert(r.key().to_string()) {
-                level.push(r);
-            }
-        }
-        let keys: Vec<String> = level.iter().map(|r| r.key().to_string()).collect();
+    let mut c = Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() };
+    let is_history = root.known_format().is_some_and(|f| f.alias == "history");
+    if is_history && !dst.has_many(&[root.key().to_string()])?[0] {
+        let h = history::read(src, root)?;
+        let mut seen = HashSet::new();
+        let versions: Vec<View> =
+            h.log().into_iter().rev().map(|id| id.version()).filter(|v| seen.insert(v.key().to_string())).collect();
+        // One batched check for all of them first: a push of one commit
+        // finds every version but the new one present.
+        let keys: Vec<String> = versions.iter().map(|v| v.key().to_string()).collect();
         let present = dst.has_many(&keys)?;
-        let mut want = Vec::new();
-        for (r, p) in level.into_iter().zip(present) {
+        let mut missing = Vec::new();
+        for (v, p) in versions.into_iter().zip(present) {
             if p {
-                n.present += 1;
+                c.n.present += 1;
+                c.done.insert(v.key().to_string());
             } else {
-                want.push(r);
+                missing.push(v);
             }
         }
-        let keys: Vec<String> = want.iter().map(|r| r.key().to_string()).collect();
-        let mut files = Vec::new();
-        for (r, value) in want.into_iter().zip(src.read_many(&keys)) {
-            let bytes = value?.ok_or_else(|| Error::Missing(r.key().to_string()))?;
-            match children_of(&r, &bytes)? {
-                None => files.push(Put::blob(r.key(), bytes)),
-                Some(kids) => {
-                    frontier.extend(kids.iter().cloned());
-                    containers.insert(r.key().to_string(), (bytes, kids));
+        for group in missing.chunks(ROOTS_PER_ROUND) {
+            c.copy_many(group)?;
+        }
+    }
+    c.copy_many(std::slice::from_ref(root))?;
+    Ok(c.n)
+}
+
+/// Node versions copied together when a history is copied.
+pub const ROOTS_PER_ROUND: usize = 256;
+
+struct Copier<'a> {
+    src: &'a dyn Store,
+    dst: &'a dyn Store,
+    n: Copied,
+    formats_seen: BTreeSet<String>,
+    /// Keys known to be in the destination, complete.
+    done: HashSet<String>,
+}
+
+/// A container read from the source, waiting for its children.
+struct Waiting {
+    bytes: Vec<u8>,
+    /// Children not yet known to be in the destination.
+    left: usize,
+}
+
+impl Copier<'_> {
+    fn copy_many(&mut self, roots: &[View]) -> Result<()> {
+        let (src, dst) = (self.src, self.dst);
+        let mut waiting: HashMap<String, Waiting> = HashMap::new();
+        // Child key to the containers waiting on it.
+        let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+        let mut frontier: Vec<View> = roots.to_vec();
+        let mut queued: HashSet<String> = HashSet::new();
+        while !frontier.is_empty() {
+            let mut level: Vec<View> = Vec::new();
+            for r in frontier.drain(..) {
+                if self.formats_seen.insert(r.format().to_string()) {
+                    copy_format(src, dst, r.format(), &mut self.n)?;
+                }
+                if !self.done.contains(r.key()) && queued.insert(r.key().to_string()) {
+                    level.push(r);
+                }
+            }
+            let keys: Vec<String> = level.iter().map(|r| r.key().to_string()).collect();
+            let present = dst.has_many(&keys)?;
+            let mut resolved: Vec<String> = Vec::new();
+            let mut want = Vec::new();
+            for (r, p) in level.into_iter().zip(present) {
+                if p {
+                    self.n.present += 1;
+                    resolved.push(r.key().to_string());
+                } else {
+                    want.push(r);
+                }
+            }
+            let keys: Vec<String> = want.iter().map(|r| r.key().to_string()).collect();
+            let mut ready: Vec<Put> = Vec::new();
+            for (r, value) in want.into_iter().zip(src.read_many(&keys)) {
+                let bytes = value?.ok_or_else(|| Error::Missing(r.key().to_string()))?;
+                let Some(kids) = children_of(&r, &bytes)? else {
+                    ready.push(Put::blob(r.key(), bytes));
+                    continue;
+                };
+                let kids: BTreeSet<View> = kids.into_iter().collect();
+                let mut left = 0;
+                for k in kids {
+                    if self.done.contains(k.key()) {
+                        continue;
+                    }
+                    left += 1;
+                    parents.entry(k.key().to_string()).or_default().push(r.key().to_string());
+                    if !queued.contains(k.key()) {
+                        frontier.push(k);
+                    }
+                }
+                if left == 0 {
+                    ready.push(Put::blob(r.key(), bytes));
+                } else {
+                    waiting.insert(r.key().to_string(), Waiting { bytes, left });
+                }
+            }
+            // Write what is ready; each write may free the containers above it.
+            loop {
+                self.n.blobs += ready.len();
+                dst.write_many(&ready).map_err(|(_, e)| Error::from(e))?;
+                resolved.extend(ready.drain(..).map(|p| p.key));
+                for k in resolved.drain(..) {
+                    for parent in parents.remove(&k).unwrap_or_default() {
+                        let w = waiting.get_mut(&parent).expect("a waiting parent");
+                        w.left -= 1;
+                        if w.left == 0 {
+                            let w = waiting.remove(&parent).expect("waiting");
+                            ready.push(Put::blob(parent, w.bytes));
+                        }
+                    }
+                    self.done.insert(k);
+                }
+                if ready.is_empty() {
+                    break;
                 }
             }
         }
-        n.blobs += files.len();
-        dst.write_many(&files).map_err(|(_, e)| Error::from(e))?;
+        debug_assert!(waiting.is_empty(), "every container was written");
+        Ok(())
     }
-    // Containers in post-order from the root, so each follows its children.
-    let mut order = Vec::new();
-    let mut done = HashSet::new();
-    let mut stack = vec![(root.key().to_string(), false)];
-    while let Some((k, expanded)) = stack.pop() {
-        if !containers.contains_key(&k) || (!expanded && !done.insert(k.clone())) {
-            continue;
-        }
-        if expanded {
-            let (bytes, _) = containers.remove(&k).expect("held");
-            order.push(Put::blob(k, bytes));
-            continue;
-        }
-        stack.push((k.clone(), true));
-        for c in &containers[&k].1 {
-            stack.push((c.key().to_string(), false));
-        }
-    }
-    n.blobs += order.len();
-    dst.write_many(&order).map_err(|(_, e)| Error::from(e))?;
-    Ok(n)
 }
 
 /// How a history name was synced.

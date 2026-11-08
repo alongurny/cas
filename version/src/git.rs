@@ -136,8 +136,11 @@ impl Importer<'_> {
 
 /// Import every commit reachable from `rev` in `repo` as a new history.
 pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &str) -> Result<(History, Imported)> {
-    let log = git(repo, &["log", "--topo-order", "--reverse", "--format=%H%x1f%P%x1f%T%x1f%B%x1e", rev])?;
-    let log = String::from_utf8(log).map_err(|_| Error::Io("non-UTF-8 commit message".into()))?;
+    // git re-encodes messages that declare an encoding; a message that is
+    // not UTF-8 and says nothing (old latin-1 commits) is kept lossily.
+    let log =
+        git(repo, &["log", "--encoding=UTF-8", "--topo-order", "--reverse", "--format=%H%x1f%P%x1f%T%x1f%B%x1e", rev])?;
+    let log = String::from_utf8_lossy(&log);
     let mut im = Importer {
         store,
         alg,

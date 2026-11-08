@@ -11,7 +11,7 @@ new history named `NAME` (default `main`). It runs `git` and only reads the repo
 | symlink, mode 120000 | `symlink` |
 | submodule, mode 160000 | left out, counted as skipped |
 | commit | a node whose version is its tree, after the nodes of its parents |
-| commit message | the changelog of each step into the node; for a root commit, the node's doc |
+| commit message | the changelog of each step into the node; for a root commit, the node's doc. Re-encoded to UTF-8 by git when the commit declares an encoding; any other non-UTF-8 byte becomes U+FFFD (old git.git commits) |
 | tag (lightweight or annotated) | a history tag on the commit's node |
 
 Author, committer and dates are not imported: a history records changes, not who made them or

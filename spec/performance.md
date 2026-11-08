@@ -262,6 +262,14 @@ for both tools. Results are recorded per corpus:
   about 60,000 loose files (blobs and chunks): that is step 2. The local diff
   walk for push is still to do.
 
+- 2026-11-08, git.git (82,725 commits) through the t/perf port
+  ([perf-port.md](perf-port.md)): every command that reads the history
+  spends about 2 s parsing it whole. Step 3 therefore also has to make
+  reading the tip, tags and recent nodes cheap without parsing every node.
+  The history's identity still covers its whole content, so this is a
+  derived index (or a cached parse keyed by the history's key), not a
+  change of format.
+
 ## Order of work
 
 Each step comes with its row in the benchmark, measured before and after.
