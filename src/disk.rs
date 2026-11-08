@@ -98,7 +98,7 @@ impl DiskBackend {
 
     /// [`DiskBackend::encode`] without writing: the blob file, and the
     /// packed chunks it names that may need writing.
-    fn encode_pure(&self, value: &[u8]) -> io::Result<(Vec<u8>, Vec<(crate::chunk::Id, Vec<u8>)>)> {
+    fn encode_pure(&self, value: &[u8]) -> io::Result<(Vec<u8>, PackedChunks)> {
         if !self.encoded {
             return Ok((value.to_vec(), Vec::new()));
         }
@@ -332,6 +332,9 @@ fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> +
         Ok(out)
     })
 }
+
+/// Chunks to write: id and packed bytes.
+type PackedChunks = Vec<(crate::chunk::Id, Vec<u8>)>;
 
 /// Temp files written but not yet synced or renamed, and where each goes.
 type Pending = Vec<(PathBuf, PathBuf)>;
