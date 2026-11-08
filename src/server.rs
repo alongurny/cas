@@ -56,8 +56,12 @@ const MAX_HEAD: usize = 64 << 10;
 const IDLE: Duration = Duration::from_secs(30);
 
 /// The server's certificate chain and private key.
+///
+/// With the `bench-insecure` feature, [`Tls::plain_http_for_benchmarks`]
+/// also exists: no TLS at all. It is for benchmarks against git's plain
+/// transports only; normal builds cannot speak anything but HTTPS.
 #[derive(Clone)]
-pub struct Tls(Arc<ServerConfig>);
+pub struct Tls(Option<Arc<ServerConfig>>);
 
 impl Tls {
     /// From PEM: the certificate chain (leaf first) and its private key.
@@ -76,7 +80,13 @@ impl Tls {
             .with_no_client_auth()
             .with_single_cert(certs, key)
             .map_err(|e| bad("TLS", &e))?;
-        Ok(Tls(Arc::new(config)))
+        Ok(Tls(Some(Arc::new(config))))
+    }
+
+    /// No TLS: plain HTTP. Only in builds with the `bench-insecure` feature.
+    #[cfg(feature = "bench-insecure")]
+    pub fn plain_http_for_benchmarks() -> Tls {
+        Tls(None)
     }
 
     /// [`Tls::from_pem`] from two files.
@@ -106,6 +116,7 @@ pub fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
 pub struct Server {
     addr: SocketAddr,
     closed: Arc<AtomicBool>,
+    plain: bool,
 }
 
 impl Server {
@@ -145,6 +156,7 @@ impl Server {
                 }
             });
         }
+        let plain = tls.0.is_none();
         let stop = Arc::clone(&closed);
         thread::spawn(move || {
             for tcp in listener.incoming() {
@@ -158,11 +170,11 @@ impl Server {
                 }
             }
         });
-        Ok(Server { addr, closed })
+        Ok(Server { addr, closed, plain })
     }
 
     pub fn url(&self) -> String {
-        format!("https://{}", self.addr)
+        format!("{}://{}", if self.plain { "http" } else { "https" }, self.addr)
     }
 }
 
@@ -174,7 +186,45 @@ impl Drop for Server {
     }
 }
 
-type Conn = StreamOwned<ServerConnection, TcpStream>;
+/// A connection: TLS, or (bench-insecure builds only) plain TCP.
+enum Conn {
+    Tls(Box<StreamOwned<ServerConnection, TcpStream>>),
+    #[cfg_attr(not(feature = "bench-insecure"), allow(dead_code))]
+    Plain(TcpStream),
+}
+
+impl Conn {
+    fn close(&mut self) {
+        if let Conn::Tls(s) = self {
+            s.conn.send_close_notify();
+        }
+        let _ = self.flush();
+    }
+}
+
+impl Read for Conn {
+    fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Conn::Tls(s) => s.read(b),
+            Conn::Plain(s) => s.read(b),
+        }
+    }
+}
+
+impl Write for Conn {
+    fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+        match self {
+            Conn::Tls(s) => s.write(b),
+            Conn::Plain(s) => s.write(b),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Conn::Tls(s) => s.flush(),
+            Conn::Plain(s) => s.flush(),
+        }
+    }
+}
 
 /// One answer: status, headers and body.
 pub(crate) struct Response {
@@ -348,8 +398,14 @@ fn serve_connection(
     tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(IDLE))?;
     tcp.set_write_timeout(Some(IDLE))?;
-    let conn = ServerConnection::new(Arc::clone(&tls.0)).map_err(io::Error::other)?;
-    let mut r = BufReader::new(StreamOwned::new(conn, tcp));
+    let conn = match &tls.0 {
+        Some(config) => {
+            let conn = ServerConnection::new(Arc::clone(config)).map_err(io::Error::other)?;
+            Conn::Tls(Box::new(StreamOwned::new(conn, tcp)))
+        }
+        None => Conn::Plain(tcp),
+    };
+    let mut r = BufReader::new(conn);
     loop {
         match read_request(&mut r, max_body)? {
             Next::End => return Ok(()),
@@ -363,8 +419,7 @@ fn serve_connection(
                 let resp = handle(&session, &req);
                 write_response(r.get_mut(), &resp, close)?;
                 if close {
-                    r.get_mut().conn.send_close_notify();
-                    let _ = r.get_mut().flush();
+                    r.get_mut().close();
                     return Ok(());
                 }
             }

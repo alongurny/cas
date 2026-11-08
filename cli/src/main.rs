@@ -77,6 +77,17 @@ struct Remote<'a> {
     ca: Option<&'a [u8]>,
 }
 
+#[cfg(feature = "bench-insecure")]
+fn insecure_http() -> Res<Tls> {
+    eprintln!("serving plain HTTP: a benchmark build");
+    Ok(Tls::plain_http_for_benchmarks())
+}
+
+#[cfg(not(feature = "bench-insecure"))]
+fn insecure_http() -> Res<Tls> {
+    Err("--insecure-http exists only in benchmark builds (feature bench-insecure); cas speaks HTTPS".into())
+}
+
 fn open(spec: &str, r: Remote) -> Res<Arc<dyn Store>> {
     if spec.contains("://") {
         // Remote stores are reached over HTTPS only; HttpStore refuses the rest.
@@ -414,7 +425,11 @@ fn run(a: Args) -> Res<()> {
                     .ok_or(format!("serve needs {name} FILE (it speaks only HTTPS)"))?;
                 a.rest.get(i + 1).cloned().ok_or(format!("{name} needs a file"))
             };
-            let tls = Tls::from_files(flag("--cert")?.as_ref(), flag("--key")?.as_ref()).map_err(e)?;
+            let tls = if a.rest.iter().any(|x| x == "--insecure-http") {
+                insecure_http()?
+            } else {
+                Tls::from_files(flag("--cert")?.as_ref(), flag("--key")?.as_ref()).map_err(e)?
+            };
             let backend = DiskBackend::open(&a.store).map_err(e)?;
             let server = if a.rest.iter().any(|x| x == "--open") {
                 eprintln!("serving without access control");

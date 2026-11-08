@@ -16,6 +16,12 @@ checks it against the Web PKI roots, or against CA certificates it is given
 (a private CA, or a self-signed certificate in tests). Bearer tokens
 (access.md) therefore never travel in clear.
 
+One exception, for benchmarks only (Alon, 2026-11-08: "for benchmark only
+allow insecure without https ... So we compare Apple's to Apple"): a build
+with the `bench-insecure` feature also serves plain HTTP (`serve
+--insecure-http`) and takes `http://` URLs. A normal build has neither and
+refuses both; `bench/perf/run.sh` builds the variant into `target/bench`.
+
 Requests carry a `Content-Length` body; a chunked request body is answered
 411 and the connection closed. A connection carries requests one after
 another (keep-alive) until either side closes it or it idles 30 seconds.

@@ -78,9 +78,15 @@ fn commit_log_diff_checkout_and_sync() {
         .spawn()
         .unwrap();
     let url = format!("https://{addr}");
-    let plain =
-        Command::new(env!("CARGO_BIN_EXE_cas")).args(["--store", &format!("http://{addr}"), "log"]).output().unwrap();
-    assert!(String::from_utf8_lossy(&plain.stderr).contains("https://"));
+    // Only a benchmark build (feature bench-insecure) speaks plain HTTP.
+    #[cfg(not(feature = "bench-insecure"))]
+    {
+        let plain = Command::new(env!("CARGO_BIN_EXE_cas"))
+            .args(["--store", &format!("http://{addr}"), "log"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&plain.stderr).contains("https://"));
+    }
     let tf = token_file.to_str().unwrap();
     let mut pushed = None;
     for _ in 0..50 {

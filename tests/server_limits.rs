@@ -105,7 +105,8 @@ fn bodies_within_the_bound_go_through_and_a_client_sees_too_large() {
 #[test]
 fn only_https_is_spoken() {
     let served = serve();
-    // The client refuses any other scheme.
+    // The client refuses any other scheme (a benchmark build also speaks http).
+    #[cfg(not(feature = "bench-insecure"))]
     assert!(HttpStore::new(served.url.replace("https://", "http://")).is_err());
     // The server answers plain HTTP with no HTTP response.
     let mut s = TcpStream::connect(served.url.trim_start_matches("https://")).unwrap();
@@ -117,4 +118,17 @@ fn only_https_is_spoken() {
     // A client that does not trust the certificate is refused.
     let untrusting = HttpStore::new(&served.url).unwrap();
     assert!(matches!(untrusting.read("main"), Err(Error::Unavailable(_))));
+}
+
+/// A benchmark build serves plain HTTP when asked, and its client speaks it.
+#[cfg(feature = "bench-insecure")]
+#[test]
+fn a_benchmark_build_speaks_plain_http() {
+    let core = CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive());
+    let tls = cas_core::server::Tls::plain_http_for_benchmarks();
+    let server = Server::start(core, "127.0.0.1:0", 2, Arc::new(|_: &Request| Who::anonymous()), tls).unwrap();
+    assert!(server.url().starts_with("http://"));
+    let client = HttpStore::new(server.url()).unwrap();
+    // A round trip: the request is answered (not refused for the scheme).
+    assert_eq!(client.read("main").unwrap(), None);
 }

@@ -2,10 +2,18 @@
 # The git t/perf scripts that have a cas counterpart, run on both tools
 # (spec/perf-port.md). Usage: run.sh GIT-REPO [EMPTY-WORKDIR]
 # Prints a Markdown table: test, git seconds, cas seconds, cas/git. Each
-# time is the best of $REPEAT runs (t/perf's min_time). Uses port 18180.
+# time is the best of $REPEAT runs (t/perf's min_time). Uses ports 18180
+# and 18181. Both tools talk over plain TCP on localhost, so neither pays for
+# TLS: git through `git daemon` (git://), cas through a benchmark build with
+# the bench-insecure feature (plain HTTP). Normal cas builds speak only HTTPS.
 set -euo pipefail
 REPEAT=${REPEAT:-3}
-CAS=$(realpath "${CAS:-$(dirname "$0")/../../target/release/cas}")
+ROOT=$(realpath "$(dirname "$0")/../..")
+if [ -z "${CAS:-}" ]; then
+  cargo build -q --release -p cas-cli --features bench-insecure --target-dir "$ROOT/target/bench" --manifest-path "$ROOT/Cargo.toml"
+  CAS=$ROOT/target/bench/release/cas
+fi
+CAS=$(realpath "$CAS")
 SRC=$(realpath "${1:?usage: run.sh GIT-REPO [EMPTY-WORKDIR]}")
 W=${2:-$(mktemp -d)}
 mkdir -p "$W"; [ -z "$(ls -A "$W")" ] || { echo "$W is not empty" >&2; exit 1; }
@@ -35,12 +43,12 @@ git clone -q --bare --no-local "$SRC" g.git
 git -C g.git config uploadpack.allowFilter true
 "$CAS" --store c import-git "$SRC" >/dev/null
 F=$(git -C g.git log --format= --name-only | sort | uniq -c | sort -rn | awk 'NR==1{print $2}')
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 \
-  -addext subjectAltName=IP:127.0.0.1 -addext basicConstraints=critical,CA:FALSE \
-  -keyout key.pem -out cert.pem 2>/dev/null
-"$CAS" --store c serve 127.0.0.1:18180 --open --cert cert.pem --key key.pem >/dev/null 2>&1 & SRV=$!
-trap 'kill $SRV 2>/dev/null' EXIT
-U=https://127.0.0.1:18180
+"$CAS" --store c serve 127.0.0.1:18180 --open --insecure-http >/dev/null 2>&1 & SRV=$!
+git daemon --reuseaddr --listen=127.0.0.1 --port=18181 --base-path="$W" --export-all --enable=receive-pack "$W" \
+  >/dev/null 2>&1 & GD=$!
+trap 'kill $SRV $GD 2>/dev/null' EXIT
+U=http://127.0.0.1:18180
+G=git://127.0.0.1:18181
 sleep 1
 
 echo "corpus: $(basename "$SRC"), $(git -C g.git rev-list --count HEAD) commits, $(git -C g.git ls-tree -r HEAD | wc -l) files; $(git --version); repeat $REPEAT"
@@ -64,20 +72,20 @@ row "commit 500 new files (p0008 odb-fsync)" \
   "rm -rf wc3; $CAS --store c checkout wc3; mkdir -p wc3/new; for i in \$(seq 500); do echo \$i\$RANDOM > wc3/new/\$i; done" \
   "$CAS --store c -H scratch3 commit wc3"
 row "clone over the network (p5601)" \
-  "rm -rf g2.git" "git clone -q --bare file://$W/g.git g2.git" \
-  "rm -rf c2" "$CAS --store c2 --ca cert.pem pull $U"
+  "rm -rf g2.git" "git clone -q --bare $G/g.git g2.git" \
+  "rm -rf c2" "$CAS --store c2 pull $U"
 rm -rf c2 g2.git
 row "clone without blobs (p5600)" \
-  "rm -rf g3.git" "git clone -q --bare --filter=blob:none file://$W/g.git g3.git" \
+  "rm -rf g3.git" "git clone -q --bare --filter=blob:none $G/g.git g3.git" \
   : -
 row "fetch one file, no clone (cas only)" \
-  "rm -rf g4" "git clone -q --filter=blob:none --depth 1 --no-checkout file://$W/g.git g4 && git -C g4 show HEAD:$F" \
-  "rm -rf one" "$CAS --store $U --ca cert.pem checkout one $F"
+  "rm -rf g4" "git clone -q --filter=blob:none --depth 1 --no-checkout $G/g.git g4 && git -C g4 show HEAD:$F" \
+  "rm -rf one" "$CAS --store $U checkout one $F"
 row "push one new commit" \
-  "rm -rf gp.git wgp; git clone -q --bare g.git gp.git; git clone -q gp.git wgp; echo x >> wgp/$F; git -C wgp commit -qam x" \
+  "rm -rf gp.git wgp; git clone -q --bare g.git gp.git; git clone -q $G/gp.git wgp; echo x >> wgp/$F; git -C wgp commit -qam x" \
   "git -C wgp push -q origin HEAD" \
   "rm -rf cp wcp; cp -r c cp; $CAS --store cp checkout wcp; echo x >> wcp/$F; $CAS --store cp commit wcp" \
-  "$CAS --store cp --ca cert.pem push $U"
+  "$CAS --store cp push $U"
 rm -rf cp wcp gp.git wgp g4 one g3.git
 row "fast-import (p9300) / import-git" \
   "rm -rf gi.git; git init -q --bare gi.git; git -C g.git fast-export --all > export" "git -C gi.git fast-import --quiet < export" \

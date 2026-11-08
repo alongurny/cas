@@ -13,9 +13,16 @@ pub struct HttpStore {
     token: Option<String>,
 }
 
+/// The schemes this build speaks: `https://`, plus `http://` in builds with
+/// the `bench-insecure` feature (benchmarks against git's plain transports).
+fn allowed(base: &str) -> bool {
+    base.starts_with("https://") || (cfg!(feature = "bench-insecure") && base.starts_with("http://"))
+}
+
 fn agent(roots: RootCerts) -> Agent {
     let tls = TlsConfig::builder().root_certs(roots).build();
-    Agent::config_builder().http_status_as_error(false).https_only(true).tls_config(tls).build().into()
+    let https_only = !cfg!(feature = "bench-insecure");
+    Agent::config_builder().http_status_as_error(false).https_only(https_only).tls_config(tls).build().into()
 }
 
 impl HttpStore {
@@ -25,7 +32,7 @@ impl HttpStore {
     /// against the Web PKI roots; see [`HttpStore::trusting`].
     pub fn new(base: impl Into<String>) -> std::io::Result<HttpStore> {
         let base = base.into().trim_end_matches('/').to_string();
-        if !base.starts_with("https://") {
+        if !allowed(&base) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 format!("{base}: a store URL must start with https://"),

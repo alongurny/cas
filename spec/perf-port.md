@@ -28,8 +28,10 @@ measure.
 | p9300-fast-import-export | `fast-import` of `fast-export --all` | `import-git` |
 | p5600-partial-clone | `gc` | `gc` |
 
-git's network rows use its pack protocol over a local pipe (`file://`). cas
-uses HTTPS on localhost, its only transport. git's fsync defaults differ: it
+Both tools' network rows go over plain TCP on localhost, so neither pays for
+TLS: git through `git daemon` (`git://`), cas through a benchmark build that
+also speaks plain HTTP (the `bench-insecure` feature; normal builds speak
+only HTTPS). git's fsync defaults differ: it
 does not fsync loose objects unless configured to. cas makes every write
 durable.
 
