@@ -2,7 +2,7 @@
 //!
 //! Layout under the root:
 //! - `blobs/<alg>/<first two hex chars>/<digest hex>`
-//! - `variables/<hex of the variable name's bytes>` (hex keeps bytewise order and any
+//! - `vars/<hex of the variable name's bytes>` (hex keeps bytewise order and any
 //!   name safe as a file name)
 //! - `tmp/` for writes in flight, renamed into place once synced
 //! - `lock`, held exclusively around every variable CAS, so CAS is atomic across
@@ -68,6 +68,23 @@ impl DiskBackend {
         }
     }
 
+    /// The one blob directory that holds every key `span` can contain, if
+    /// the bounds share a prefix `<alg>:<two hex digits>`.
+    fn fan_dir(&self, span: &Span) -> Option<(String, PathBuf)> {
+        let (from, to) = (span.from.as_deref()?, span.to.as_deref()?);
+        let common = from.iter().zip(to).take_while(|(a, b)| a == b).count();
+        let prefix = std::str::from_utf8(&from[..common]).ok()?;
+        let (alg, digest) = prefix.split_once(':')?;
+        let fan = digest.get(..2)?;
+        let ok = |s: &str, f: fn(u8) -> bool| !s.is_empty() && s.bytes().all(f);
+        if !ok(alg, |b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            || !ok(fan, |b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        {
+            return None;
+        }
+        Some((alg.to_string(), self.root.join("blobs").join(alg).join(fan)))
+    }
+
     fn all_keys(&self) -> io::Result<Vec<String>> {
         let mut keys = Vec::new();
         var_names(&self.root.join("vars"), String::new(), &mut keys)?;
@@ -85,18 +102,18 @@ impl DiskBackend {
 }
 
 /// File names are limited (often to 255 bytes), so a variable's hex name is cut
-/// into pieces of at most `TAG_PIECE` characters. Every piece but the last
+/// into pieces of at most `VAR_PIECE` characters. Every piece but the last
 /// is a directory, marked with a trailing `-` so it never collides with a
 /// file of the same hex. Variables up to 127 bytes are a single file, as before.
-const TAG_PIECE: usize = 254;
+const VAR_PIECE: usize = 254;
 
 fn var_path(vars: &Path, name: &str) -> PathBuf {
     let hex = hex::encode(name);
     let mut path = vars.to_path_buf();
     let mut rest = hex.as_str();
-    while rest.len() > TAG_PIECE {
-        path.push(format!("{}-", &rest[..TAG_PIECE]));
-        rest = &rest[TAG_PIECE..];
+    while rest.len() > VAR_PIECE {
+        path.push(format!("{}-", &rest[..VAR_PIECE]));
+        rest = &rest[VAR_PIECE..];
     }
     path.push(rest);
     path
@@ -165,9 +182,22 @@ impl Backend for DiskBackend {
         result
     }
 
-    // Scans every key; fine for Stage 2, an index can replace it later.
+    // Every key in a span starts with the common prefix of its bounds. When
+    // that prefix fixes a blob algorithm and fan-out directory, as the
+    // one-key spans of `has` do, only that directory is read; otherwise
+    // every key is scanned.
     fn list(&self, span: &Span, limit: usize) -> io::Result<Vec<String>> {
-        let mut keys: Vec<String> = self.all_keys()?.into_iter().filter(|k| span.contains(k.as_bytes())).collect();
+        let candidates = match self.fan_dir(span) {
+            Some((alg, dir)) => match fs::read_dir(&dir) {
+                Ok(entries) => entries
+                    .map(|e| e.map(|e| format!("{alg}:{}", e.file_name().to_string_lossy())))
+                    .collect::<io::Result<Vec<_>>>()?,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => return Err(e),
+            },
+            None => self.all_keys()?,
+        };
+        let mut keys: Vec<String> = candidates.into_iter().filter(|k| span.contains(k.as_bytes())).collect();
         keys.sort_unstable();
         keys.truncate(limit);
         Ok(keys)
