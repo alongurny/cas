@@ -10,7 +10,7 @@
 
 use crate::dir::Item;
 use crate::formats::{self, Kind};
-use crate::history;
+use crate::history::{self, History};
 use crate::{Error, Result, View, is_blob_key, read_blob, tree};
 use cas_core::store::Put;
 use cas_core::{Error as CoreError, Expect, Span, Store};
@@ -94,13 +94,35 @@ fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
 /// that to a group's subtrees: later groups find most of their trees
 /// present already.
 pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
-    let mut c = Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() };
     let is_history = root.known_format().is_some_and(|f| f.alias == "history");
     if is_history && !dst.has_many(&[root.key().to_string()])?[0] {
-        let h = history::read(src, root)?;
+        return copy_history(src, dst, root, &history::read(src, root)?, None);
+    }
+    Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() }.copy_root(root)
+}
+
+/// Copy the history `h` (stored at `root` in `src`) into `dst`. `known`,
+/// when given, is a history `dst` is known to hold whole (the one its name
+/// pointed at): its versions are present there, so they are not asked
+/// about. This is push's local diff walk, as git's push negotiates against
+/// the remote's ref: only what is new since `known` crosses the wire, and
+/// the remote's history need not be fetched when the source has it.
+fn copy_history(src: &dyn Store, dst: &dyn Store, root: &View, h: &History, known: Option<&History>) -> Result<Copied> {
+    let mut c = Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() };
+    if let Some(k) = known {
+        for id in k.log() {
+            c.done.insert(id.version().key().to_string());
+        }
+    }
+    {
         let mut seen = HashSet::new();
-        let versions: Vec<View> =
-            h.log().into_iter().rev().map(|id| id.version()).filter(|v| seen.insert(v.key().to_string())).collect();
+        let versions: Vec<View> = h
+            .log()
+            .into_iter()
+            .rev()
+            .map(|id| id.version())
+            .filter(|v| !c.done.contains(v.key()) && seen.insert(v.key().to_string()))
+            .collect();
         // One batched check for all of them first: a push of one commit
         // finds every version but the new one present.
         let keys: Vec<String> = versions.iter().map(|v| v.key().to_string()).collect();
@@ -118,8 +140,7 @@ pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
             c.copy_many(group)?;
         }
     }
-    c.copy_many(std::slice::from_ref(root))?;
-    Ok(c.n)
+    c.copy_root(root)
 }
 
 /// Node versions copied together when a history is copied.
@@ -142,6 +163,11 @@ struct Waiting {
 }
 
 impl Copier<'_> {
+    fn copy_root(mut self, root: &View) -> Result<Copied> {
+        self.copy_many(std::slice::from_ref(root))?;
+        Ok(self.n)
+    }
+
     fn copy_many(&mut self, roots: &[View]) -> Result<()> {
         let (src, dst) = (self.src, self.dst);
         let mut waiting: HashMap<String, Waiting> = HashMap::new();
@@ -244,12 +270,24 @@ pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(O
     if theirs.as_ref() == Some(&head) {
         return Ok((Outcome::UpToDate, Copied::default()));
     }
-    if let Some(t) = &theirs
-        && !history::read(src, &head)?.extends(&history::read(dst, t)?)
+    let mine = history::read(src, &head)?;
+    // The destination's history, read locally when the source has it (the
+    // usual push: the source fetched it before committing on top).
+    let old = match &theirs {
+        Some(t) if src.has_many(&[t.key().to_string()])?[0] => Some(history::read(src, t)?),
+        Some(t) => Some(history::read(dst, t)?),
+        None => None,
+    };
+    if let Some(o) = &old
+        && !mine.extends(o)
     {
         return Err(Error::Diverged(to.to_string()));
     }
-    let copied = copy(src, dst, &head)?;
+    let copied = if dst.has_many(&[head.key().to_string()])?[0] {
+        Copied { present: 1, ..Copied::default() }
+    } else {
+        copy_history(src, dst, &head, &mine, old.as_ref())?
+    };
     let expect = match &theirs {
         Some(t) => Expect::Value(t.to_string().into_bytes()),
         None => Expect::Absent,

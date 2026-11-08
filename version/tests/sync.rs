@@ -183,3 +183,58 @@ fn has_does_not_match_prefixes() {
     assert!(sync::has(&*s, k.key()).unwrap());
     assert!(!sync::has(&*s, &b3().key(b"y")).unwrap());
 }
+
+/// Counts what is asked of a store.
+struct Counting {
+    inner: Arc<dyn Store>,
+    asked: AtomicUsize,
+    reads: AtomicUsize,
+}
+
+impl Store for Counting {
+    fn read(&self, key: &str) -> cas_core::Result<Option<Vec<u8>>> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        self.inner.read(key)
+    }
+    fn write(&self, key: &str, value: &[u8], expect: &Expect) -> cas_core::Result<()> {
+        self.inner.write(key, value, expect)
+    }
+    fn remove(&self, key: &str, expect: &Expect) -> cas_core::Result<()> {
+        self.inner.remove(key, expect)
+    }
+    fn list(&self, span: &Span) -> cas_core::Result<ListPage> {
+        self.inner.list(span)
+    }
+    fn has_many(&self, keys: &[String]) -> cas_core::Result<Vec<bool>> {
+        self.asked.fetch_add(keys.len(), Ordering::SeqCst);
+        self.inner.has_many(keys)
+    }
+    fn read_many(&self, keys: &[String]) -> Vec<cas_core::Result<Option<Vec<u8>>>> {
+        self.reads.fetch_add(keys.len(), Ordering::SeqCst);
+        self.inner.read_many(keys)
+    }
+}
+
+/// Push walks locally: one commit on a long history asks the destination
+/// about the new objects only, and does not fetch its history.
+#[test]
+fn push_of_one_commit_asks_only_about_what_is_new() {
+    let src = store();
+    let inner = store();
+    let mut v = big(&*src);
+    for i in 0..300 {
+        v = edit(&*src, &v, "d1/f1", &format!("v{i}"));
+        history::commit(&*src, b3(), "main", &v, Step::default(), None).unwrap();
+    }
+    sync::push(&*src, &*inner, "main", "main").unwrap();
+    let v2 = edit(&*src, &v, "d4/f7", "changed");
+    history::commit(&*src, b3(), "main", &v2, Step::default(), None).unwrap();
+    let dst = Counting { inner, asked: AtomicUsize::new(0), reads: AtomicUsize::new(0) };
+    let (o, n) = sync::push(&*src, &dst, "main", "main").unwrap();
+    assert_eq!((o, n.blobs), (Outcome::FastForward, 4));
+    // The history and new version, then the new root's children level by
+    // level: far fewer than the 301 versions.
+    assert!(dst.asked.load(Ordering::SeqCst) < 40, "asked about {}", dst.asked.load(Ordering::SeqCst));
+    // Only the name was read, not the 300-node history.
+    assert_eq!(dst.reads.load(Ordering::SeqCst), 1);
+}
