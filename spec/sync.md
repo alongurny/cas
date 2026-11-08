@@ -3,7 +3,7 @@
 Two stores converge using only the core ops. There is no negotiation and no have/want exchange:
 the side doing the sync walks formats from a view, asks the destination whether it holds
 each key, and writes what is missing. Any store, cache or server can take either role, since
-they all speak the same four ops (the tests run one side over HTTP).
+they all speak the same four ops (the tests run one side over HTTPS).
 
 ## Existence
 
@@ -51,7 +51,7 @@ the result and creating its `derived/F/X` name with expect-absent.
 
 ## Conformance
 
-`version/tests/sync.rs`, run against an in-memory store and against one over HTTP, checks:
+`version/tests/sync.rs`, run against an in-memory store and against one over HTTPS, checks:
 
 - that a first push copies exactly the reachable blobs plus format descriptions, and a one-file
   change copies four blobs;

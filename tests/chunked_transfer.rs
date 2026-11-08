@@ -42,8 +42,10 @@ fn data(seed: u64, n: usize) -> Vec<u8> {
 
 fn serve(backend: impl cas_core::Backend + 'static, watch: Arc<Watch>) -> (Server, HttpStore) {
     let core = CoreStore::new(backend, W(watch), Policy::permissive());
-    let server = Server::start(core, "127.0.0.1:0", 2, Arc::new(|_: &tiny_http::Request| Who::anonymous())).unwrap();
-    let client = HttpStore::new(server.url());
+    let (tls, ca) = cas_core::server::self_signed();
+    let server =
+        Server::start(core, "127.0.0.1:0", 2, Arc::new(|_: &cas_core::server::Request| Who::anonymous()), tls).unwrap();
+    let client = HttpStore::new(server.url()).unwrap().trusting(&ca).unwrap();
     (server, client)
 }
 
@@ -97,8 +99,7 @@ fn chunks_are_gated_like_blob_writes() {
 #[test]
 fn a_wrong_chunk_is_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let (server, _client) = serve(DiskBackend::open(dir.path()).unwrap(), Arc::new(Watch::default()));
-    let id = hex::encode([0u8; 32]);
-    let resp = ureq::put(format!("{}/chunk/{id}", server.url())).send(&b"not that"[..]);
-    assert!(matches!(resp, Err(ureq::Error::StatusCode(400))));
+    let (_server, client) = serve(DiskBackend::open(dir.path()).unwrap(), Arc::new(Watch::default()));
+    let id = [0u8; 32];
+    assert_eq!(client.put_chunk(&id, b"not that"), Err(Error::Invalid(cas_core::Invalid::HashMismatch)));
 }

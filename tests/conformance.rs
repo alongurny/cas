@@ -3,7 +3,7 @@ use cas_core::client::HttpStore;
 use cas_core::conformance::Harness;
 use cas_core::disk::DiskBackend;
 use cas_core::mem::MemBackend;
-use cas_core::server::Server;
+use cas_core::server::{Request, Server};
 use cas_core::{AllowAll, CoreStore, Error, Expect, Gate, Op, Policy, Span, Store, Who};
 use std::sync::Arc;
 
@@ -22,10 +22,11 @@ fn disk(policy: Policy, gate: Box<dyn Gate>) -> Arc<dyn Store> {
 /// A server over a fresh in-memory store, and an HTTP client for it.
 fn serve(policy: Policy, gate: Arc<dyn Gate>) -> Arc<dyn Store> {
     let core = CoreStore::with_gate(MemBackend::new(), gate, policy);
-    let server = Server::start(core, "127.0.0.1:0", 32, Arc::new(|_: &tiny_http::Request| Who::anonymous())).unwrap();
+    let (tls, ca) = cas_core::server::self_signed();
+    let server = Server::start(core, "127.0.0.1:0", 32, Arc::new(|_: &Request| Who::anonymous()), tls).unwrap();
     let url = server.url();
     Box::leak(Box::new(server));
-    Arc::new(HttpStore::new(url))
+    Arc::new(HttpStore::new(url).unwrap().trusting(&ca).unwrap())
 }
 
 fn wire(policy: Policy, gate: Box<dyn Gate>) -> Arc<dyn Store> {

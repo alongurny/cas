@@ -5,6 +5,7 @@ use crate::types::{Error, Expect, Invalid, ListPage, Result, Span};
 use crate::wire;
 use ureq::Agent;
 use ureq::http::Response;
+use ureq::tls::{PemItem, RootCerts, TlsConfig};
 
 pub struct HttpStore {
     agent: Agent,
@@ -12,11 +13,41 @@ pub struct HttpStore {
     token: Option<String>,
 }
 
+fn agent(roots: RootCerts) -> Agent {
+    let tls = TlsConfig::builder().root_certs(roots).build();
+    Agent::config_builder().http_status_as_error(false).https_only(true).tls_config(tls).build().into()
+}
+
 impl HttpStore {
-    /// `base` is the server's URL, e.g. `http://127.0.0.1:8080`.
-    pub fn new(base: impl Into<String>) -> HttpStore {
-        let agent = Agent::config_builder().http_status_as_error(false).build().into();
-        HttpStore { agent, base: base.into().trim_end_matches('/').to_string(), token: None }
+    /// `base` is the server's URL, e.g. `https://cas.example:8443`. Only
+    /// `https` is spoken: any other scheme is refused here, and the agent
+    /// refuses plain-HTTP redirects. Server certificates are checked
+    /// against the Web PKI roots; see [`HttpStore::trusting`].
+    pub fn new(base: impl Into<String>) -> std::io::Result<HttpStore> {
+        let base = base.into().trim_end_matches('/').to_string();
+        if !base.starts_with("https://") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{base}: a store URL must start with https://"),
+            ));
+        }
+        Ok(HttpStore { agent: agent(RootCerts::WebPki), base, token: None })
+    }
+
+    /// Trust only the CA certificates in `pem` (e.g. a private CA or a
+    /// self-signed server certificate) instead of the Web PKI roots.
+    pub fn trusting(mut self, pem: &[u8]) -> std::io::Result<HttpStore> {
+        let mut certs = Vec::new();
+        for item in ureq::tls::parse_pem(pem) {
+            if let PemItem::Certificate(c) = item.map_err(std::io::Error::other)? {
+                certs.push(c);
+            }
+        }
+        if certs.is_empty() {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "no certificate in the PEM data"));
+        }
+        self.agent = agent(RootCerts::Specific(std::sync::Arc::new(certs)));
+        Ok(self)
     }
 
     /// Send `token` as `Authorization: Bearer <token>` (spec/access.md).
@@ -74,6 +105,16 @@ fn outcome(mut resp: Response<ureq::Body>) -> Error {
 }
 
 impl HttpStore {
+    /// Upload one chunk (spec/wire.md, chunked transfer).
+    pub fn put_chunk(&self, id: &crate::chunk::Id, bytes: &[u8]) -> Result<()> {
+        let resp = self
+            .auth(self.agent.put(format!("{}/chunk/{}", self.base, hex::encode(id))))
+            .header("Content-Type", "application/octet-stream")
+            .send(bytes)
+            .map_err(transport)?;
+        if resp.status().as_u16() == 204 { Ok(()) } else { Err(outcome(resp)) }
+    }
+
     /// Write a big blob by sending only the chunks the server lacks
     /// (spec/wire.md, chunked transfer). `None` when the server does not
     /// take chunks, or a chunk went missing meanwhile: send it whole.
@@ -94,13 +135,10 @@ impl HttpStore {
             if !missing.contains(&id[..]) || !sent.insert(*id) {
                 continue;
             }
-            let resp = self
-                .auth(self.agent.put(format!("{}/chunk/{}", self.base, hex::encode(id))))
-                .header("Content-Type", "application/octet-stream")
-                .send(*piece)
-                .map_err(transport)?;
-            if resp.status().as_u16() != 204 {
-                return Ok(None);
+            match self.put_chunk(id, piece) {
+                Ok(()) => {}
+                Err(Error::Unavailable(e)) => return Err(Error::Unavailable(e)),
+                Err(_) => return Ok(None),
             }
         }
         let mut payload = Vec::with_capacity(ids.len() + 9);

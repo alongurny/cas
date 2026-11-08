@@ -1,8 +1,24 @@
 # CAS wire protocol (Stage 3)
 
-The four core ops over HTTP/1.1. Store, server and cache speak exactly this; a
-cache is a store whose `read` falls through. Semantics, outcome order and
-guarantees are the core spec's; this file only fixes the encoding.
+The four core ops over HTTP/1.1 inside TLS (HTTPS). Store, server and cache
+speak exactly this; a cache is a store whose `read` falls through. Semantics,
+outcome order and guarantees are the core spec's; this file only fixes the
+encoding.
+
+## Transport
+
+HTTPS is the only transport, per Alon (2026-11-08): "it should only speak
+plain https, no other choice". A server listens for TLS and nothing else, so
+a plain-HTTP request gets no HTTP answer; a client takes only `https://`
+URLs and follows no redirect to another scheme. TLS 1.2 or 1.3 (rustls'
+safe defaults). The server has a certificate chain and key (PEM); a client
+checks it against the Web PKI roots, or against CA certificates it is given
+(a private CA, or a self-signed certificate in tests). Bearer tokens
+(access.md) therefore never travel in clear.
+
+Requests carry a `Content-Length` body; a chunked request body is answered
+411 and the connection closed. A connection carries requests one after
+another (keep-alive) until either side closes it or it idles 30 seconds.
 
 ## Identity
 

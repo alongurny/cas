@@ -23,10 +23,12 @@ fn store() -> Arc<dyn Store> {
 /// A store reached over HTTP, to show sync needs nothing beyond the ops.
 fn remote() -> Arc<dyn Store> {
     let core = CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive());
-    let server = Server::start(core, "127.0.0.1:0", 8, Arc::new(|_: &tiny_http::Request| Who::anonymous())).unwrap();
+    let (tls, ca) = cas_core::server::self_signed();
+    let server =
+        Server::start(core, "127.0.0.1:0", 8, Arc::new(|_: &cas_core::server::Request| Who::anonymous()), tls).unwrap();
     let url = server.url();
     Box::leak(Box::new(server));
-    Arc::new(HttpStore::new(url))
+    Arc::new(HttpStore::new(url).unwrap().trusting(&ca).unwrap())
 }
 
 /// Fails every write after the first `budget`, like a dropped connection.

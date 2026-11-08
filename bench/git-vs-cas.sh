@@ -29,15 +29,16 @@ row "commit one edit" "$(t git -C wgit commit -qam bench)" "$(t $CAS --store cas
 row "store growth from that commit, KB" "$(( $(kb wgit/.git/objects) - g0 ))" "$(( $(kb cas) - c0 ))"
 # Serve both over localhost. git: smart HTTP via git http-backend is not at hand, so git uses its
 # pack protocol over a local pipe (file://), which is if anything faster than HTTP.
-$CAS --store cas serve 127.0.0.1:18080 --open >/dev/null 2>&1 & SRV=$!
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 -addext basicConstraints=critical,CA:FALSE -keyout key.pem -out cert.pem 2>/dev/null
+$CAS --store cas serve 127.0.0.1:18080 --open --cert cert.pem --key key.pem >/dev/null 2>&1 & SRV=$!
 sleep 1
-U=http://127.0.0.1:18080
-row "clone everything" "$(t git clone -q --bare file://$B/git.git g2.git)" "$(t $CAS --store c2 pull $U)"
-row "fetch one file of the tip" "$(t sh -c "git clone -q --filter=blob:none --depth 1 --no-checkout file://$B/git.git g3 && git -C g3 show HEAD:$F")" "$(t $CAS --store $U checkout one $F)"
+U=https://127.0.0.1:18080
+row "clone everything" "$(t git clone -q --bare file://$B/git.git g2.git)" "$(t $CAS --store c2 --ca cert.pem pull $U)"
+row "fetch one file of the tip" "$(t sh -c "git clone -q --filter=blob:none --depth 1 --no-checkout file://$B/git.git g3 && git -C g3 show HEAD:$F")" "$(t $CAS --store $U --ca cert.pem checkout one $F)"
 # Push one new node / commit to the served copies.
 git clone -q file://$B/g2.git wg2
 echo "% push edit" >> wg2/$F; git -C wg2 commit -qam push
 $CAS --store c2 checkout wc2 >/dev/null; echo "% push edit" >> wc2/$F; $CAS --store c2 commit -m push wc2 >/dev/null
 sleep 1
-row "push one new commit" "$(t git -C wg2 push -q origin HEAD)" "$(t $CAS --store c2 push $U)"
+row "push one new commit" "$(t git -C wg2 push -q origin HEAD)" "$(t $CAS --store c2 --ca cert.pem push $U)"
 kill $SRV || true

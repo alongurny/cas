@@ -7,6 +7,6 @@ edition = "2024"
 cas-core = { path = ".." }
 
 [dev-dependencies]
+cas-core = { path = "..", features = ["test-tls"] }
 proptest = "1.12.0"
 tempfile = "3.27.0"
-tiny_http = "0.12.0"

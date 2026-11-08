@@ -1,14 +1,14 @@
 //! `cas`: a small command line over the CAS stages, for trying them out.
 //!
 //! The store is a directory (default `.cas`, or `$CAS_STORE`), or an
-//! `http://` URL of a `cas serve`. The history option defaults to `main`.
+//! `https://` URL of a `cas serve` (HTTPS only). The history option defaults to `main`.
 //! A served store with access control (spec/access.md) needs
 //! `--token-file FILE`; tokens are never taken from the environment.
 
 use cas_core::algo::{self, Algorithm};
 use cas_core::client::HttpStore;
 use cas_core::disk::DiskBackend;
-use cas_core::server::Server;
+use cas_core::server::{Request, Server, Tls};
 use cas_core::{AllowAll, CoreStore, Policy, Store, Who};
 use cas_version::access::{self, Access, Grant};
 use cas_version::derived::{self, SUMMARY};
@@ -31,7 +31,9 @@ macro_rules! out {
     }};
 }
 
-const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--meta DIR] COMMAND
+const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--ca FILE] [--meta DIR] COMMAND
+A URL is https:// (the only protocol); --ca trusts the CA certificates in FILE
+instead of the public ones.
 History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
 prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   commit DIR                    add DIR as a new node after the tip
@@ -52,9 +54,10 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   import-git REPO [REV]         import a git repository's commits (default HEAD)
                                 as history -H (refused if it exists)
   gc                            one collection run (two-phase)
-  serve ADDR [--open] [--max-body BYTES]
-                                serve the store over HTTP, under the access
-                                policy in --meta, or with --open to anyone;
+  serve ADDR --cert FILE --key FILE [--open] [--max-body BYTES]
+                                serve the store over HTTPS (the only protocol)
+                                with the PEM certificate chain and key, under
+                                the access policy in --meta, or with --open to anyone;
                                 request bodies up to BYTES (default 64 MiB)
   access show                   the policy in --meta (default .cas-meta)
   access user NAME              add or re-key NAME; prints its token once
@@ -67,10 +70,22 @@ fn b3() -> &'static Algorithm {
     algo::lookup("blake3").unwrap()
 }
 
-fn open(spec: &str, token: Option<&str>) -> Res<Arc<dyn Store>> {
-    if spec.starts_with("http://") || spec.starts_with("https://") {
-        let h = HttpStore::new(spec.trim_end_matches('/'));
-        return Ok(Arc::new(match token {
+/// How to reach a remote store: its token and the CA certificates to trust.
+#[derive(Clone, Copy)]
+struct Remote<'a> {
+    token: Option<&'a str>,
+    ca: Option<&'a [u8]>,
+}
+
+fn open(spec: &str, r: Remote) -> Res<Arc<dyn Store>> {
+    if spec.contains("://") {
+        // Remote stores are reached over HTTPS only; HttpStore refuses the rest.
+        let h = HttpStore::new(spec).map_err(e)?;
+        let h = match r.ca {
+            Some(pem) => h.trusting(pem).map_err(e)?,
+            None => h,
+        };
+        return Ok(Arc::new(match r.token {
             Some(t) => h.with_token(t),
             None => h,
         }));
@@ -88,6 +103,7 @@ struct Args {
     compatible: bool,
     remote: Option<String>,
     token_file: Option<String>,
+    ca: Option<String>,
     meta: String,
     rest: Vec<String>,
 }
@@ -102,6 +118,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         compatible: false,
         remote: None,
         token_file: None,
+        ca: None,
         meta: ".cas-meta".into(),
         rest: Vec::new(),
     };
@@ -117,6 +134,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--compatible" => a.compatible = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
+            "--ca" => a.ca = Some(value("--ca")?),
             "--meta" => a.meta = value("--meta")?,
             _ => a.rest.push(arg),
         }
@@ -169,8 +187,12 @@ fn run(a: Args) -> Res<()> {
         Some(f) => Some(std::fs::read_to_string(f).map_err(|x| format!("{f}: {x}"))?.trim().to_string()),
         None => None,
     };
-    let token = token.as_deref();
-    let s = open(&a.store, token)?;
+    let ca = match &a.ca {
+        Some(f) => Some(std::fs::read(f).map_err(|x| format!("{f}: {x}"))?),
+        None => None,
+    };
+    let remote = Remote { token: token.as_deref(), ca: ca.as_deref() };
+    let s = open(&a.store, remote)?;
     let s = &*s;
     let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}\n{USAGE}"));
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
@@ -256,7 +278,7 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some(cmd @ ("push" | "pull")) => {
-            let other = open(&arg(1, "STORE")?, token)?;
+            let other = open(&arg(1, "STORE")?, remote)?;
             let remote = a.remote.clone().unwrap_or_else(|| name.to_string());
             let (outcome, n) = if cmd == "push" {
                 sync::push(s, &*other, name, &remote)
@@ -333,7 +355,7 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some("access") => {
-            let meta = open(&a.meta, token)?;
+            let meta = open(&a.meta, remote)?;
             let (old, mut rules) = access::load(&*meta).map_err(e)?;
             match a.rest.get(1).map(String::as_str) {
                 Some("show") => {
@@ -376,25 +398,28 @@ fn run(a: Args) -> Res<()> {
                 Some(i) => a.rest.get(i + 1).and_then(|n| n.parse().ok()).ok_or("--max-body takes a byte count")?,
                 None => cas_core::server::DEFAULT_MAX_BODY,
             };
+            let flag = |name: &str| {
+                let i = a
+                    .rest
+                    .iter()
+                    .position(|x| x == name)
+                    .ok_or(format!("serve needs {name} FILE (it speaks only HTTPS)"))?;
+                a.rest.get(i + 1).cloned().ok_or(format!("{name} needs a file"))
+            };
+            let tls = Tls::from_files(flag("--cert")?.as_ref(), flag("--key")?.as_ref()).map_err(e)?;
             let backend = DiskBackend::open(&a.store).map_err(e)?;
             let server = if a.rest.iter().any(|x| x == "--open") {
                 eprintln!("serving without access control");
                 let core = CoreStore::new(backend, AllowAll, Policy::permissive());
-                Server::start_with_max_body(
-                    core,
-                    &addr,
-                    8,
-                    Arc::new(|_: &tiny_http::Request| Who::anonymous()),
-                    max_body,
-                )
+                Server::start_with_max_body(core, &addr, 8, Arc::new(|_: &Request| Who::anonymous()), tls, max_body)
             } else {
-                let meta = open(&a.meta, None)?;
+                let meta = open(&a.meta, Remote { token: None, ..remote })?;
                 if access::load(&*meta).map_err(e)?.0.is_none() {
                     eprintln!("no policy in {}: every request is denied (see `cas access`)", a.meta);
                 }
                 let gate = Access::new(meta);
                 let core = CoreStore::new(backend, gate.clone(), Policy::permissive());
-                Server::start_with_max_body(core, &addr, 8, gate.authenticate(), max_body)
+                Server::start_with_max_body(core, &addr, 8, gate.authenticate(), tls, max_body)
             }
             .map_err(e)?;
             out!("serving {} at {}", a.store, server.url());

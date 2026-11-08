@@ -40,7 +40,7 @@ fn commit_log_diff_checkout_and_sync() {
     assert_eq!(std::fs::read_to_string(out.join("src/lib.rs")).unwrap(), "fn b() {}\n");
     assert!(!out.join("README").exists());
 
-    // Sync to a second store directory, then over HTTP to a third.
+    // Sync to a second store directory, then over HTTPS to a third.
     assert!(cas(&store, &["push", other.to_str().unwrap()]).starts_with("Created"));
     assert!(cas(&store, &["push", other.to_str().unwrap()]).starts_with("UpToDate"));
     assert_eq!(cas(&other, &["log"]), log);
@@ -61,21 +61,33 @@ fn commit_log_diff_checkout_and_sync() {
     assert!(shown.contains("user  alice") && shown.contains("grant alice: write blobs, write var:main"), "{shown}");
     assert!(!shown.contains(token.trim()));
     let addr = "127.0.0.1:47391";
+    let (cert, key) = cas_core::server::self_signed_pem();
+    let (cert_file, key_file) = (tmp.path().join("cert.pem"), tmp.path().join("key.pem"));
+    std::fs::write(&cert_file, cert).unwrap();
+    std::fs::write(&key_file, key).unwrap();
+    let ca = cert_file.to_str().unwrap();
+    // Without a certificate there is nothing to serve: HTTPS is the only protocol.
+    let no_cert =
+        Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&served).args(["serve", addr]).output().unwrap();
+    assert!(!no_cert.status.success());
     let mut server = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
         .arg(&served)
-        .args(["--meta", m, "serve", addr])
+        .args(["--meta", m, "serve", addr, "--cert", ca, "--key", key_file.to_str().unwrap()])
         .stdout(Stdio::piped())
         .spawn()
         .unwrap();
-    let url = format!("http://{addr}");
+    let url = format!("https://{addr}");
+    let plain =
+        Command::new(env!("CARGO_BIN_EXE_cas")).args(["--store", &format!("http://{addr}"), "log"]).output().unwrap();
+    assert!(String::from_utf8_lossy(&plain.stderr).contains("https://"));
     let tf = token_file.to_str().unwrap();
     let mut pushed = None;
     for _ in 0..50 {
         let o = Command::new(env!("CARGO_BIN_EXE_cas"))
             .arg("--store")
             .arg(&store)
-            .args(["--token-file", tf, "push", &url])
+            .args(["--token-file", tf, "--ca", ca, "push", &url])
             .output()
             .unwrap();
         if o.status.success() {
@@ -88,10 +100,15 @@ fn commit_log_diff_checkout_and_sync() {
     // Without the token the same push is denied.
     std::fs::write(work.join("README"), "changed\n").unwrap();
     cas(&store, &["commit", w, "-m", "third"]);
-    let anon =
-        Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["push", &url]).output().unwrap();
+    let anon = Command::new(env!("CARGO_BIN_EXE_cas"))
+        .arg("--store")
+        .arg(&store)
+        .args(["--ca", ca, "push", &url])
+        .output()
+        .unwrap();
     assert!(!anon.status.success());
-    let remote_log = Command::new(env!("CARGO_BIN_EXE_cas")).args(["--store", &url, "log"]).output().unwrap();
+    let remote_log =
+        Command::new(env!("CARGO_BIN_EXE_cas")).args(["--store", &url, "--ca", ca, "log"]).output().unwrap();
     server.kill().unwrap();
     server.wait().unwrap();
     assert_eq!(String::from_utf8(remote_log.stdout).unwrap(), log);

@@ -1,4 +1,6 @@
-//! Serve a [`CoreStore`] over HTTP (spec/wire.md).
+//! Serve a [`CoreStore`] over HTTPS (spec/wire.md). TLS only: there is no
+//! plain HTTP listener. Each connection is one TLS session on one worker
+//! thread, carrying HTTP/1.1 requests one after another (keep-alive).
 
 use crate::chunk;
 use crate::gate::Who;
@@ -6,10 +8,31 @@ use crate::key::{Parsed, classify};
 use crate::store::{CoreStore, Session, Store};
 use crate::types::{Error, Span};
 use crate::wire;
-use std::io::Read;
-use std::sync::Arc;
+use rustls::{ServerConfig, ServerConnection, StreamOwned};
+use rustls_pki_types::pem::PemObject;
+use rustls_pki_types::{CertificateDer, PrivateKeyDer};
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use tiny_http::{Header, Method, Request, Response};
+use std::time::Duration;
+
+/// One HTTP request, body read.
+pub struct Request {
+    pub method: String,
+    /// Path and query, as sent.
+    pub url: String,
+    headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+impl Request {
+    /// The value of header `name` (case-insensitive), if present.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+}
 
 /// Turns a request into the caller's identity. This is where the outer
 /// protocol plugs in.
@@ -17,11 +40,7 @@ pub type Authenticate = dyn Fn(&Request) -> Who + Send + Sync;
 
 /// The bearer token of a request, from `Authorization: Bearer <token>`.
 pub fn bearer(req: &Request) -> Option<&str> {
-    req.headers()
-        .iter()
-        .find(|h| h.field.equiv("Authorization"))
-        .and_then(|h| h.value.as_str().strip_prefix("Bearer "))
-        .map(str::trim)
+    req.header("Authorization").and_then(|v| v.strip_prefix("Bearer ")).map(str::trim)
 }
 
 /// The largest request body [`Server::start`] reads: an expect frame and a
@@ -30,20 +49,76 @@ pub fn bearer(req: &Request) -> Option<&str> {
 /// without end. Larger requests are answered 413 before they are buffered.
 pub const DEFAULT_MAX_BODY: usize = 64 << 20;
 
+/// The largest request head (request line and headers).
+const MAX_HEAD: usize = 64 << 10;
+
+/// An idle kept-alive connection is closed after this, freeing its worker.
+const IDLE: Duration = Duration::from_secs(30);
+
+/// The server's certificate chain and private key.
+#[derive(Clone)]
+pub struct Tls(Arc<ServerConfig>);
+
+impl Tls {
+    /// From PEM: the certificate chain (leaf first) and its private key.
+    pub fn from_pem(chain: &[u8], key: &[u8]) -> io::Result<Tls> {
+        let bad =
+            |what: &str, e: &dyn std::fmt::Display| io::Error::new(io::ErrorKind::InvalidData, format!("{what}: {e}"));
+        let certs: Vec<CertificateDer<'static>> =
+            CertificateDer::pem_slice_iter(chain).collect::<Result<_, _>>().map_err(|e| bad("certificate", &e))?;
+        if certs.is_empty() {
+            return Err(bad("certificate", &"no certificate in the PEM file"));
+        }
+        let key = PrivateKeyDer::from_pem_slice(key).map_err(|e| bad("private key", &e))?;
+        let config = ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .map_err(|e| bad("TLS", &e))?
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| bad("TLS", &e))?;
+        Ok(Tls(Arc::new(config)))
+    }
+
+    /// [`Tls::from_pem`] from two files.
+    pub fn from_files(chain: &std::path::Path, key: &std::path::Path) -> io::Result<Tls> {
+        let read = |p: &std::path::Path| {
+            std::fs::read(p).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", p.display())))
+        };
+        Tls::from_pem(&read(chain)?, &read(key)?)
+    }
+}
+
+/// A fresh self-signed certificate for `localhost` and 127.0.0.1, for tests:
+/// the server's TLS and the certificate (PEM) a client must trust.
+#[cfg(feature = "test-tls")]
+pub fn self_signed() -> (Tls, Vec<u8>) {
+    let (cert, key) = self_signed_pem();
+    (Tls::from_pem(&cert, &key).unwrap(), cert)
+}
+
+/// The certificate and private key of [`self_signed`], as PEM files hold them.
+#[cfg(feature = "test-tls")]
+pub fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
+    let c = rcgen::generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+    (c.cert.pem().into_bytes(), c.signing_key.serialize_pem().into_bytes())
+}
+
 pub struct Server {
-    http: Arc<tiny_http::Server>,
+    addr: SocketAddr,
+    closed: Arc<AtomicBool>,
 }
 
 impl Server {
-    /// Listen on `addr` (e.g. `127.0.0.1:0`) with `workers` handler threads,
-    /// reading request bodies of at most [`DEFAULT_MAX_BODY`] bytes.
+    /// Listen on `addr` (e.g. `127.0.0.1:0`) with `workers` connection
+    /// threads, reading request bodies of at most [`DEFAULT_MAX_BODY`] bytes.
     pub fn start(
         store: Arc<CoreStore>,
         addr: &str,
         workers: usize,
         auth: Arc<Authenticate>,
-    ) -> std::io::Result<Server> {
-        Server::start_with_max_body(store, addr, workers, auth, DEFAULT_MAX_BODY)
+        tls: Tls,
+    ) -> io::Result<Server> {
+        Server::start_with_max_body(store, addr, workers, auth, tls, DEFAULT_MAX_BODY)
     }
 
     /// [`Server::start`], reading request bodies of at most `max_body` bytes.
@@ -52,112 +127,261 @@ impl Server {
         addr: &str,
         workers: usize,
         auth: Arc<Authenticate>,
+        tls: Tls,
         max_body: usize,
-    ) -> std::io::Result<Server> {
-        let listener = std::net::TcpListener::bind(addr)?;
-        no_delay(&listener)?;
-        let http = Arc::new(tiny_http::Server::from_listener(listener, None).map_err(std::io::Error::other)?);
+    ) -> io::Result<Server> {
+        let listener = TcpListener::bind(addr)?;
+        let addr = listener.local_addr()?;
+        let closed = Arc::new(AtomicBool::new(false));
+        let (send, recv) = mpsc::channel::<TcpStream>();
+        let recv = Arc::new(Mutex::new(recv));
         for _ in 0..workers.max(1) {
-            let (http, store, auth) = (Arc::clone(&http), Arc::clone(&store), Arc::clone(&auth));
+            let (recv, store, auth, tls) = (Arc::clone(&recv), Arc::clone(&store), Arc::clone(&auth), tls.clone());
             thread::spawn(move || {
-                while let Ok(req) = http.recv() {
-                    let who = auth(&req);
-                    handle(&store.session(who), req, max_body);
+                loop {
+                    let next = recv.lock().unwrap().recv();
+                    let Ok(tcp) = next else { return };
+                    let _ = serve_connection(&store, &auth, &tls, tcp, max_body);
                 }
             });
         }
-        Ok(Server { http })
+        let stop = Arc::clone(&closed);
+        thread::spawn(move || {
+            for tcp in listener.incoming() {
+                if stop.load(Ordering::SeqCst) {
+                    return;
+                }
+                if let Ok(tcp) = tcp
+                    && send.send(tcp).is_err()
+                {
+                    return;
+                }
+            }
+        });
+        Ok(Server { addr, closed })
     }
 
     pub fn url(&self) -> String {
-        format!("http://{}", self.http.server_addr().to_ip().expect("listening on TCP"))
+        format!("https://{}", self.addr)
     }
 }
 
 impl Drop for Server {
     fn drop(&mut self) {
-        self.http.unblock();
+        self.closed.store(true, Ordering::SeqCst);
+        // Wake the accept loop so it sees the flag.
+        let _ = TcpStream::connect(self.addr);
     }
 }
 
-/// Turn off Nagle's algorithm on the listener, which accepted connections
-/// inherit on Linux. tiny_http writes a response's head, body and chunk ends
-/// separately; with Nagle each small write after the first waits for the
-/// client's delayed ACK, about 40 ms per request on a kept-alive connection.
-#[cfg(target_os = "linux")]
-fn no_delay(l: &std::net::TcpListener) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let on: libc::c_int = 1;
-    // SAFETY: a valid socket and a c_int option value of the given size.
-    let r = unsafe {
-        libc::setsockopt(
-            l.as_raw_fd(),
-            libc::IPPROTO_TCP,
-            libc::TCP_NODELAY,
-            (&on as *const libc::c_int).cast(),
-            size_of::<libc::c_int>() as libc::socklen_t,
-        )
+type Conn = StreamOwned<ServerConnection, TcpStream>;
+
+/// One answer: status, headers and body.
+pub(crate) struct Response {
+    status: u16,
+    headers: Vec<(&'static str, String)>,
+    body: Vec<u8>,
+}
+
+impl Response {
+    fn new(status: u16) -> Response {
+        Response { status, headers: Vec::new(), body: Vec::new() }
+    }
+
+    fn data(body: impl Into<Vec<u8>>) -> Response {
+        Response { body: body.into(), ..Response::new(200) }
+    }
+
+    fn with(mut self, name: &'static str, value: &str) -> Response {
+        self.headers.push((name, value.to_string()));
+        self
+    }
+
+    fn status(mut self, status: u16) -> Response {
+        self.status = status;
+        self
+    }
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        413 => "Content Too Large",
+        422 => "Unprocessable Content",
+        431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
+        _ => "",
+    }
+}
+
+fn write_response(w: &mut Conn, r: &Response, close: bool) -> io::Result<()> {
+    let mut out = format!("HTTP/1.1 {} {}\r\nContent-Length: {}\r\n", r.status, reason(r.status), r.body.len());
+    for (k, v) in &r.headers {
+        out.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if close {
+        out.push_str("Connection: close\r\n");
+    }
+    out.push_str("\r\n");
+    let mut bytes = out.into_bytes();
+    bytes.extend_from_slice(&r.body);
+    w.write_all(&bytes)?;
+    w.flush()
+}
+
+/// What reading the next request found.
+enum Next {
+    Request(Request),
+    /// The peer closed (or went idle) between requests.
+    End,
+    /// Answer this and close: the request could not be read through.
+    Refuse(Response),
+}
+
+/// One line of a request head.
+enum Line {
+    Text(String),
+    /// The connection ended (or went idle) before a line.
+    End,
+    /// Over the head budget, or not UTF-8.
+    Bad,
+}
+
+fn read_line(r: &mut BufReader<Conn>, budget: &mut usize) -> io::Result<Line> {
+    let mut line = Vec::new();
+    let n = match r.by_ref().take(*budget as u64 + 1).read_until(b'\n', &mut line) {
+        Ok(n) => n,
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::UnexpectedEof
+            ) =>
+        {
+            return Ok(Line::End);
+        }
+        Err(e) => return Err(e),
     };
-    if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+    if n == 0 {
+        return Ok(Line::End);
+    }
+    if n > *budget || !line.ends_with(b"\n") {
+        return Ok(Line::Bad);
+    }
+    *budget -= n;
+    line.truncate(line.len() - 1);
+    if line.ends_with(b"\r") {
+        line.pop();
+    }
+    Ok(String::from_utf8(line).map_or(Line::Bad, Line::Text))
 }
 
-#[cfg(not(target_os = "linux"))]
-fn no_delay(_: &std::net::TcpListener) -> std::io::Result<()> {
-    Ok(())
+fn bad_request() -> Response {
+    Response::new(400).with("CAS-Reason", "request")
 }
 
-fn header(name: &str, value: &str) -> Header {
-    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("valid header")
-}
-
-fn empty(status: u16) -> Response<std::io::Empty> {
-    Response::empty(status)
-}
-
-fn respond_error(req: Request, e: Error) {
-    let r = match e {
-        Error::Denied => empty(403).boxed(),
-        Error::Invalid(r) => empty(400).with_header(header("CAS-Reason", wire::invalid_reason(r))).boxed(),
-        Error::Refused { reason, message } => Response::from_data(message.unwrap_or_default())
-            .with_status_code(422)
-            .with_header(header("CAS-Reason", &reason))
-            .boxed(),
-        Error::Conflict => empty(409).boxed(),
-        Error::Unavailable(m) => Response::from_data(m).with_status_code(503).boxed(),
+fn read_request(r: &mut BufReader<Conn>, max_body: usize) -> io::Result<Next> {
+    let mut budget = MAX_HEAD;
+    let line = match read_line(r, &mut budget)? {
+        Line::Text(l) => l,
+        Line::End => return Ok(Next::End),
+        Line::Bad => return Ok(Next::Refuse(Response::new(431))),
     };
-    let _ = req.respond(r);
-}
-
-fn bad_request(req: Request) {
-    let _ = req.respond(empty(400).with_header(header("CAS-Reason", "request")));
-}
-
-enum Body {
-    Read(Vec<u8>),
-    TooLarge,
-    Broken,
-}
-
-/// The request body, refused unread when its declared length is over `max`,
-/// and never buffered past `max + 1` bytes when it declares none.
-fn read_body(req: &mut Request, max: usize) -> Body {
-    if req.body_length().is_some_and(|n| n > max) {
-        return Body::TooLarge;
+    let mut parts = line.split(' ');
+    let (Some(method), Some(url), Some(version), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return Ok(Next::Refuse(bad_request()));
+    };
+    if !version.starts_with("HTTP/1.") {
+        return Ok(Next::Refuse(bad_request()));
     }
-    let mut body = Vec::new();
-    match req.as_reader().take(max as u64 + 1).read_to_end(&mut body) {
-        Ok(_) if body.len() > max => Body::TooLarge,
-        Ok(_) => Body::Read(body),
-        Err(_) => Body::Broken,
+    let mut headers = Vec::new();
+    loop {
+        let h = match read_line(r, &mut budget)? {
+            Line::Text(h) => h,
+            Line::End => return Ok(Next::End),
+            Line::Bad => return Ok(Next::Refuse(Response::new(431))),
+        };
+        if h.is_empty() {
+            break;
+        }
+        let Some((k, v)) = h.split_once(':') else { return Ok(Next::Refuse(bad_request())) };
+        headers.push((k.trim().to_string(), v.trim().to_string()));
+    }
+    let mut req = Request { method: method.to_string(), url: url.to_string(), headers, body: Vec::new() };
+    if req.header("Transfer-Encoding").is_some() {
+        // Clients send a Content-Length; chunked request bodies are not taken.
+        return Ok(Next::Refuse(Response::new(411)));
+    }
+    let len = match req.header("Content-Length") {
+        None => 0,
+        Some(v) => match v.parse::<usize>() {
+            Ok(n) => n,
+            Err(_) => return Ok(Next::Refuse(bad_request())),
+        },
+    };
+    if len > max_body {
+        return Ok(Next::Refuse(
+            Response::data(format!("request bodies are limited to {max_body} bytes"))
+                .status(413)
+                .with("CAS-Reason", "too-large"),
+        ));
+    }
+    req.body = vec![0; len];
+    r.read_exact(&mut req.body)?;
+    Ok(Next::Request(req))
+}
+
+fn serve_connection(
+    store: &Arc<CoreStore>,
+    auth: &Arc<Authenticate>,
+    tls: &Tls,
+    tcp: TcpStream,
+    max_body: usize,
+) -> io::Result<()> {
+    // Responses go out in one write each; Nagle would only delay them.
+    tcp.set_nodelay(true)?;
+    tcp.set_read_timeout(Some(IDLE))?;
+    tcp.set_write_timeout(Some(IDLE))?;
+    let conn = ServerConnection::new(Arc::clone(&tls.0)).map_err(io::Error::other)?;
+    let mut r = BufReader::new(StreamOwned::new(conn, tcp));
+    loop {
+        match read_request(&mut r, max_body)? {
+            Next::End => return Ok(()),
+            Next::Refuse(resp) => {
+                write_response(r.get_mut(), &resp, true)?;
+                return Ok(());
+            }
+            Next::Request(req) => {
+                let close = req.header("Connection").is_some_and(|v| v.eq_ignore_ascii_case("close"));
+                let session = store.session(auth(&req));
+                let resp = handle(&session, &req);
+                write_response(r.get_mut(), &resp, close)?;
+                if close {
+                    r.get_mut().conn.send_close_notify();
+                    let _ = r.get_mut().flush();
+                    return Ok(());
+                }
+            }
+        }
     }
 }
 
-fn too_large(req: Request, max: usize) {
-    let _ = req.respond(
-        Response::from_data(format!("request bodies are limited to {max} bytes"))
-            .with_status_code(413)
-            .with_header(header("CAS-Reason", "too-large")),
-    );
+fn respond_error(e: Error) -> Response {
+    match e {
+        Error::Denied => Response::new(403),
+        Error::Invalid(r) => Response::new(400).with("CAS-Reason", wire::invalid_reason(r)),
+        Error::Refused { reason, message } => {
+            Response::data(message.unwrap_or_default()).status(422).with("CAS-Reason", &reason)
+        }
+        Error::Conflict => Response::new(409),
+        Error::Unavailable(m) => Response::data(m).status(503),
+    }
 }
 
 /// A body of concatenated 32-byte chunk ids.
@@ -168,113 +392,87 @@ fn chunk_ids(body: &[u8]) -> Option<Vec<chunk::Id>> {
     Some(body.chunks(32).map(|c| c.try_into().unwrap()).collect())
 }
 
-fn handle(store: &Session, mut req: Request, max_body: usize) {
-    let url = req.url().to_string();
-    let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-    let method = req.method().clone();
+fn handle(store: &Session, req: &Request) -> Response {
+    let (path, query) = req.url.split_once('?').unwrap_or((&req.url, ""));
+    let method = req.method.as_str();
 
     if let Some(seg) = path.strip_prefix("/k/") {
         let key = match wire::decode_key(seg) {
             Ok(k) => k,
-            Err(e) => return respond_error(req, e),
+            Err(e) => return respond_error(e),
         };
         match method {
-            Method::Get => match store.read(&key) {
+            "GET" => match store.read(&key) {
                 Ok(Some(v)) => {
                     let cache = match classify(&key) {
                         Some(Parsed::Blob { .. }) => "private, max-age=31536000, immutable",
                         _ => "no-store",
                     };
-                    let _ = req.respond(Response::from_data(v).with_header(header("Cache-Control", cache)));
+                    Response::data(v).with("Cache-Control", cache)
                 }
-                Ok(None) => {
-                    let _ = req.respond(empty(404).with_header(header("Cache-Control", "no-store")));
-                }
-                Err(e) => respond_error(req, e),
+                Ok(None) => Response::new(404).with("Cache-Control", "no-store"),
+                Err(e) => respond_error(e),
             },
-            Method::Put => {
-                let body = match read_body(&mut req, max_body) {
-                    Body::Read(body) => body,
-                    Body::TooLarge => return too_large(req, max_body),
-                    Body::Broken => return bad_request(req),
-                };
-                let Some((expect, value)) = wire::decode_expect(&body) else { return bad_request(req) };
-                let by_chunks = req
-                    .headers()
-                    .iter()
-                    .any(|h| h.field.equiv("Content-Type") && h.value.as_str() == wire::WRITE_CHUNKS);
+            "PUT" => {
+                let Some((expect, value)) = wire::decode_expect(&req.body) else { return bad_request() };
+                let by_chunks = req.header("Content-Type") == Some(wire::WRITE_CHUNKS);
                 if !by_chunks {
                     return match store.write(&key, value, &expect) {
-                        Ok(()) => drop(req.respond(empty(204))),
-                        Err(e) => respond_error(req, e),
+                        Ok(()) => Response::new(204),
+                        Err(e) => respond_error(e),
                     };
                 }
-                let Some(ids) = chunk_ids(value) else { return bad_request(req) };
+                let Some(ids) = chunk_ids(value) else { return bad_request() };
                 if !store.chunked() {
-                    return drop(req.respond(empty(404)));
+                    return Response::new(404);
                 }
                 match store.write_chunks(&key, &ids, &expect) {
-                    Ok(Some(())) => drop(req.respond(empty(204))),
-                    Ok(None) => respond_error(req, Error::refused("chunks-missing", "upload the missing chunks first")),
-                    Err(e) => respond_error(req, e),
+                    Ok(Some(())) => Response::new(204),
+                    Ok(None) => respond_error(Error::refused("chunks-missing", "upload the missing chunks first")),
+                    Err(e) => respond_error(e),
                 }
             }
-            _ => drop(req.respond(empty(405))),
+            _ => Response::new(405),
         }
     } else if let Some(seg) = path.strip_prefix("/remove/") {
-        if method != Method::Post {
-            return drop(req.respond(empty(405)));
+        if method != "POST" {
+            return Response::new(405);
         }
         let key = match wire::decode_key(seg) {
             Ok(k) => k,
-            Err(e) => return respond_error(req, e),
+            Err(e) => return respond_error(e),
         };
-        let body = match read_body(&mut req, max_body) {
-            Body::Read(body) => body,
-            Body::TooLarge => return too_large(req, max_body),
-            Body::Broken => return bad_request(req),
-        };
-        match wire::decode_expect(&body) {
+        match wire::decode_expect(&req.body) {
             Some((expect, [])) => match store.remove(&key, &expect) {
-                Ok(()) => drop(req.respond(empty(204))),
-                Err(e) => respond_error(req, e),
+                Ok(()) => Response::new(204),
+                Err(e) => respond_error(e),
             },
-            _ => bad_request(req),
+            _ => bad_request(),
         }
-    } else if path == "/chunks/missing" && method == Method::Post {
+    } else if path == "/chunks/missing" && method == "POST" {
         if !store.chunked() {
-            return drop(req.respond(empty(404)));
+            return Response::new(404);
         }
-        let body = match read_body(&mut req, max_body) {
-            Body::Read(body) => body,
-            Body::TooLarge => return too_large(req, max_body),
-            Body::Broken => return bad_request(req),
-        };
-        let Some(ids) = chunk_ids(&body) else { return bad_request(req) };
+        let Some(ids) = chunk_ids(&req.body) else { return bad_request() };
         match store.missing_chunks(&ids) {
-            Ok(missing) => drop(req.respond(Response::from_data(missing.concat()))),
-            Err(e) => respond_error(req, e),
+            Ok(missing) => Response::data(missing.concat()),
+            Err(e) => respond_error(e),
         }
     } else if let Some(seg) = path.strip_prefix("/chunk/") {
-        if method != Method::Put {
-            return drop(req.respond(empty(405)));
+        if method != "PUT" {
+            return Response::new(405);
         }
         if !store.chunked() {
-            return drop(req.respond(empty(404)));
+            return Response::new(404);
         }
         let Some(id) = hex::decode(seg).ok().and_then(|b| chunk::Id::try_from(b).ok()) else {
-            return bad_request(req);
+            return bad_request();
         };
-        let body = match read_body(&mut req, max_body) {
-            Body::Read(body) => body,
-            Body::TooLarge => return too_large(req, max_body),
-            Body::Broken => return bad_request(req),
-        };
-        match store.put_chunk(&id, &body) {
-            Ok(()) => drop(req.respond(empty(204))),
-            Err(e) => respond_error(req, e),
+        match store.put_chunk(&id, &req.body) {
+            Ok(()) => Response::new(204),
+            Err(e) => respond_error(e),
         }
-    } else if path == "/list" && method == Method::Get {
+    } else if path == "/list" && method == "GET" {
         let mut span = Span::all();
         for pair in query.split('&').filter(|p| !p.is_empty()) {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
@@ -286,7 +484,7 @@ fn handle(store: &Session, mut req: Request, max_body: usize) {
             };
             match hex::decode(v) {
                 Ok(b) => *bound = Some(b),
-                Err(_) => return bad_request(req),
+                Err(_) => return bad_request(),
             }
         }
         match store.list(&span) {
@@ -296,15 +494,15 @@ fn handle(store: &Session, mut req: Request, max_body: usize) {
                     body.extend_from_slice(k.as_bytes());
                     body.push(b'\n');
                 }
-                let mut r = Response::from_data(body).with_header(header("Cache-Control", "no-store"));
-                if let Some(rest) = page.rest {
-                    r.add_header(header("CAS-Rest-From", &hex::encode(rest.from.unwrap_or_default())));
+                let r = Response::data(body).with("Cache-Control", "no-store");
+                match page.rest {
+                    Some(rest) => r.with("CAS-Rest-From", &hex::encode(rest.from.unwrap_or_default())),
+                    None => r,
                 }
-                let _ = req.respond(r);
             }
-            Err(e) => respond_error(req, e),
+            Err(e) => respond_error(e),
         }
     } else {
-        let _ = req.respond(empty(404));
+        Response::new(404)
     }
 }

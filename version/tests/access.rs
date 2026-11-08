@@ -88,20 +88,22 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
 
     let gate = Access::new(Arc::clone(&meta));
     let core = CoreStore::new(MemBackend::new(), gate.clone(), Policy::permissive());
-    let server = Server::start(core, "127.0.0.1:0", 4, gate.authenticate()).unwrap();
+    let (tls, ca) = cas_core::server::self_signed();
+    let server = Server::start(core, "127.0.0.1:0", 4, gate.authenticate(), tls).unwrap();
     let url = server.url();
+    let client = || HttpStore::new(&url).unwrap().trusting(&ca).unwrap();
     let local = local_branch();
 
-    let anon = HttpStore::new(&url);
+    let anon = client();
     assert!(matches!(sync::push(&*local, &anon, "main", "main"), Err(Error::Store(CoreError::Denied))));
-    let as_bob = HttpStore::new(&url).with_token(&bob);
+    let as_bob = client().with_token(&bob);
     assert!(matches!(sync::push(&*local, &as_bob, "main", "main"), Err(Error::Store(CoreError::Denied))));
-    let as_alice = HttpStore::new(&url).with_token(&alice);
+    let as_alice = client().with_token(&alice);
     assert_eq!(sync::push(&*local, &as_alice, "main", "main").unwrap().0, sync::Outcome::Created);
     // Anyone may read what alice pushed.
     assert_eq!(history::load(&anon, "main").unwrap().1.log().len(), 1);
     // A wrong token is just anonymous.
-    let guess = HttpStore::new(&url).with_token("0123");
+    let guess = client().with_token("0123");
     assert_eq!(guess.write("main", b"x", &Expect::Absent), Err(CoreError::Denied));
     // Alice may not write other variables.
     assert_eq!(as_alice.write("other", b"x", &Expect::Absent), Err(CoreError::Denied));
