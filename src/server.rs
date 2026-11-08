@@ -54,7 +54,9 @@ impl Server {
         auth: Arc<Authenticate>,
         max_body: usize,
     ) -> std::io::Result<Server> {
-        let http = Arc::new(tiny_http::Server::http(addr).map_err(std::io::Error::other)?);
+        let listener = std::net::TcpListener::bind(addr)?;
+        no_delay(&listener)?;
+        let http = Arc::new(tiny_http::Server::from_listener(listener, None).map_err(std::io::Error::other)?);
         for _ in 0..workers.max(1) {
             let (http, store, auth) = (Arc::clone(&http), Arc::clone(&store), Arc::clone(&auth));
             thread::spawn(move || {
@@ -76,6 +78,32 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.http.unblock();
     }
+}
+
+/// Turn off Nagle's algorithm on the listener, which accepted connections
+/// inherit on Linux. tiny_http writes a response's head, body and chunk ends
+/// separately; with Nagle each small write after the first waits for the
+/// client's delayed ACK, about 40 ms per request on a kept-alive connection.
+#[cfg(target_os = "linux")]
+fn no_delay(l: &std::net::TcpListener) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let on: libc::c_int = 1;
+    // SAFETY: a valid socket and a c_int option value of the given size.
+    let r = unsafe {
+        libc::setsockopt(
+            l.as_raw_fd(),
+            libc::IPPROTO_TCP,
+            libc::TCP_NODELAY,
+            (&on as *const libc::c_int).cast(),
+            size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn no_delay(_: &std::net::TcpListener) -> std::io::Result<()> {
+    Ok(())
 }
 
 fn header(name: &str, value: &str) -> Header {

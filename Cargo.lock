@@ -126,6 +126,7 @@ dependencies = [
  "blake3",
  "fastcdc",
  "hex",
+ "libc",
  "md-5",
  "percent-encoding",
  "proptest",
