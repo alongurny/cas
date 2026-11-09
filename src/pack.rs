@@ -153,6 +153,40 @@ struct Idx {
     /// Every record's (offset, number) by offset, built when an offset
     /// delta's base is first named (a repack, a copy).
     by_offset: std::sync::OnceLock<Vec<(u64, u32)>>,
+    /// Lookups in the fixed sections so far; past [`HASH_AFTER`] each gets
+    /// a fanout by its digests' leading bits (about four records a
+    /// bucket), so a lookup costs a table read and a probe or two instead
+    /// of an interpolation search's half dozen cache misses.
+    fixed_searches: std::sync::atomic::AtomicU32,
+    fans: [std::sync::OnceLock<Fan>; 2],
+}
+
+/// Bucket `b` of a fixed section holds records `starts[b]..starts[b + 1]`,
+/// the digests whose leading `bits` bits are `b`.
+struct Fan {
+    bits: u32,
+    starts: Vec<u32>,
+}
+
+impl Fan {
+    fn build(r: &[u8]) -> Fan {
+        let n = r.len() / FIXED;
+        let bits = (n / 4).max(1).ilog2().clamp(1, 24);
+        let mut starts = vec![0u32; (1 << bits) + 1];
+        for i in 0..n {
+            let b = (r[i * FIXED] as u32) << 16 | (r[i * FIXED + 1] as u32) << 8 | r[i * FIXED + 2] as u32;
+            starts[(b >> (24 - bits)) as usize + 1] += 1;
+        }
+        for b in 1..starts.len() {
+            starts[b] += starts[b - 1];
+        }
+        Fan { bits, starts }
+    }
+
+    fn range(&self, d: &[u8; 32]) -> (usize, usize) {
+        let b = ((d[0] as u32) << 16 | (d[1] as u32) << 8 | d[2] as u32) >> (24 - self.bits);
+        (self.starts[b as usize] as usize, self.starts[b as usize + 1] as usize)
+    }
 }
 
 /// Binary searches in one index before it gets a hash table.
@@ -171,13 +205,34 @@ fn name_hash(name: &[u8]) -> u64 {
     h ^ (h >> 33)
 }
 
-/// The 32 digest bytes of a canonical (lowercase) 64-digit hex string.
+/// Lowercase hex digits' values; 0xff for any other byte.
+const HEX: [u8; 256] = {
+    let mut t = [0xffu8; 256];
+    let mut i = 0;
+    while i < 10 {
+        t[b'0' as usize + i] = i as u8;
+        i += 1;
+    }
+    let mut i = 0;
+    while i < 6 {
+        t[b'a' as usize + i] = 10 + i as u8;
+        i += 1;
+    }
+    t
+};
+
+/// The 32 digest bytes of a canonical (lowercase) 64-digit hex string. A
+/// table lookup per digit: parsing names was most of an index lookup.
 fn hex32(h: &str) -> Option<[u8; 32]> {
+    let b: &[u8; 64] = h.as_bytes().try_into().ok()?;
     let mut d = [0u8; 32];
-    (h.len() == 64
-        && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
-        && hex::decode_to_slice(h, &mut d).is_ok())
-    .then_some(d)
+    let mut bad = 0u8;
+    for i in 0..32 {
+        let (hi, lo) = (HEX[b[2 * i] as usize], HEX[b[2 * i + 1] as usize]);
+        bad |= hi | lo;
+        d[i] = hi << 4 | (lo & 0x0f);
+    }
+    (bad & 0xf0 == 0).then_some(d)
 }
 
 /// The fixed sections' name prefixes, in section order.
@@ -258,6 +313,8 @@ impl Idx {
             searches: Default::default(),
             table: Default::default(),
             by_offset: Default::default(),
+            fixed_searches: Default::default(),
+            fans: Default::default(),
         })
     }
 
@@ -391,7 +448,22 @@ impl Idx {
 
     fn get(&self, name: &str) -> Option<u64> {
         if let Some((s, d)) = fixed_name(name) {
-            if let Some(o) = Idx::find_fixed(self.fixed(s), &d) {
+            let r = self.fixed(s);
+            let fan = match self.fans[s].get() {
+                Some(f) => Some(f),
+                None if self.fixed_searches.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= HASH_AFTER => {
+                    Some(self.fans[s].get_or_init(|| Fan::build(r)))
+                }
+                None => None,
+            };
+            let found = match fan {
+                Some(f) => {
+                    let (lo, hi) = f.range(&d);
+                    Idx::find_fixed(&r[lo * FIXED..hi * FIXED], &d)
+                }
+                None => Idx::find_fixed(r, &d),
+            };
+            if let Some(o) = found {
                 return Some(o);
             }
             // A version 2 file holds keys among its strings.
