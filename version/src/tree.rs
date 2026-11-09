@@ -211,6 +211,29 @@ fn resolve(store: &dyn Store, root: &View, path: Option<&Path>) -> Result<At> {
     Ok(at)
 }
 
+/// [`object_at`] for many roots, reading only the directory blobs that
+/// differ from those already read into `memo`.
+pub fn object_at_memo(
+    store: &dyn Store,
+    root: &View,
+    path: &Path,
+    memo: &mut crate::dir::FindMemo,
+) -> Result<Option<View>> {
+    dir_format(root)?;
+    let mut at = root.clone();
+    for name in path.names() {
+        if !at.is_dir() {
+            return Ok(None);
+        }
+        let Kind::Dir(d) = &dir_format(&at)?.kind else { unreachable!() };
+        match d.find_memo(store, at.key(), name, memo)? {
+            Some(child) => at = child,
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(at))
+}
+
 /// The object at `path`: a file's view or a directory's own.
 pub fn object_at(store: &dyn Store, root: &View, path: &Path) -> Result<Option<View>> {
     Ok(match resolve(store, root, Some(path))? {

@@ -103,6 +103,122 @@ impl Dir {
     }
 }
 
+/// Answers of [`Dir::find_memo`] by (name, blob key): the blob's level and
+/// greatest name (to check it against any parent naming it), and the entry.
+pub type FindMemo = std::collections::HashMap<(String, String), (u64, Option<String>, Option<View>)>;
+
+impl Dir {
+    /// [`Dir::find`] that remembers its answer for every blob it reads, so
+    /// looking `name` up in many versions reads only the blobs that differ.
+    pub fn find_memo(&self, store: &dyn Store, key: &str, name: &str, memo: &mut FindMemo) -> Result<Option<View>> {
+        match self {
+            Dir::Text => {
+                if let Some((_, _, v)) = memo.get(&(name.to_string(), key.to_string())) {
+                    return Ok(v.clone());
+                }
+                let v = Dir::text_find(key, &crate::read_blob(store, key)?, name)?;
+                memo.insert((name.to_string(), key.to_string()), (0, None, v.clone()));
+                Ok(v)
+            }
+            Dir::Tree => Ok(tree_find_memo(store, key, name, memo)?.2),
+        }
+    }
+}
+
+fn tree_find_memo(
+    store: &dyn Store,
+    key: &str,
+    name: &str,
+    memo: &mut FindMemo,
+) -> Result<(u64, Option<String>, Option<View>)> {
+    let id = (name.to_string(), key.to_string());
+    if let Some(a) = memo.get(&id) {
+        return Ok(a.clone());
+    }
+    let bytes = crate::read_blob(store, key)?;
+    let (level, last, hit) = scan(&bytes, name).map_err(|e| malformed(key, e))?;
+    let a = if level == 0 {
+        (0, last, hit)
+    } else {
+        let found = match hit {
+            None => None,
+            Some(part) => {
+                let (l, got, v) = tree_find_memo(store, part.key(), name, memo)?;
+                if l + 1 != level || got.as_deref() != Some(part.format()) {
+                    return Err(malformed(part.key(), "a blob is not where its parent says"));
+                }
+                v
+            }
+        };
+        (level, last, found)
+    };
+    memo.insert(id, a.clone());
+    Ok(a)
+}
+
+/// One pass over a `tree` blob for `name`, allocating only the answer: its
+/// level, its greatest name, and the entry `name` (in a leaf) or the part
+/// that would hold it (in an inner blob, as a view whose format is the
+/// part's greatest name). For lookups in stored, hash-checked blobs: it
+/// checks bounds and name order, not every canonical-form rule
+/// [`tree_decode`] checks.
+fn scan(b: &[u8], name: &str) -> std::result::Result<(u64, Option<String>, Option<View>), String> {
+    if b.is_empty() {
+        return Ok((0, None, None));
+    }
+    let mut r = Reader { b, at: 0 };
+    let level = r.varint()?;
+    let algs = get_algs(&mut r)?;
+    let mut used = vec![false; algs.len()];
+    let formats: Vec<String> = if level == 0 {
+        let nf = r.count()?;
+        (0..nf).map(|_| get_key(&mut r, &algs, &mut used)).collect::<std::result::Result<_, _>>()?
+    } else {
+        Vec::new()
+    };
+    let n = r.count()?;
+    if n == 0 {
+        return Err("no entries".into());
+    }
+    let (mut cur, mut prev) = (Vec::<u8>::new(), Vec::<u8>::new());
+    let mut hit = None;
+    for i in 0..n {
+        std::mem::swap(&mut cur, &mut prev);
+        let shared = r.varint()? as usize;
+        let len = r.count()?;
+        let rest = r.take(len)?;
+        cur.clear();
+        cur.extend_from_slice(prev.get(..shared).ok_or("shared prefix too long")?);
+        cur.extend_from_slice(rest);
+        if i > 0 && cur <= prev {
+            return Err("names out of order".into());
+        }
+        let fi = if level == 0 { Some(r.varint()? as usize) } else { None };
+        let key_at = r.at;
+        let a = *algs.get(r.varint()? as usize).ok_or("algorithm index out of range")?;
+        r.take(a.digest_len)?;
+        let wanted = if level == 0 {
+            cur.as_slice() == name.as_bytes()
+        } else {
+            hit.is_none() && cur.as_slice() >= name.as_bytes()
+        };
+        if wanted {
+            let mut sub = Reader { b, at: key_at };
+            let key = get_key(&mut sub, &algs, &mut used)?;
+            let format = match fi {
+                Some(fi) => formats.get(fi).ok_or("format index out of range")?.clone(),
+                None => String::from_utf8(cur.clone()).map_err(|_| "name is not UTF-8")?,
+            };
+            hit = Some(View { format, key });
+        }
+    }
+    if r.at != b.len() {
+        return Err("trailing bytes".into());
+    }
+    let last = String::from_utf8(cur).map_err(|_| "name is not UTF-8")?;
+    Ok((level, Some(last), hit))
+}
+
 // The `tree` format.
 
 fn varint(out: &mut Vec<u8>, mut n: u64) {

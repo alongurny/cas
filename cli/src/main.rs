@@ -405,7 +405,9 @@ fn run(a: Args) -> Res<()> {
         Some("path-log") => {
             let p = Path::new(arg(1, "PATH")?).map_err(e)?;
             let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
-            let g = graph::graph(s, b3(), &v).map_err(e)?;
+            // A cached graph skips the steps its filters rule out; without
+            // one, walking every step is faster than building the graph.
+            let g = graph::graph_or_order(s, &v).map_err(e)?;
             for i in g.path_log(s, &p).map_err(e)? {
                 out!("{}  {}", short(g.nodes[i].id.version().key()), g.nodes[i].notes);
             }

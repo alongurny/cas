@@ -5,7 +5,7 @@
 
 use crate::derived::{self, Function};
 use crate::history::{History, NodeId};
-use crate::{Path, Result, View, diff, malformed, object_at, read_blob};
+use crate::{Path, Result, View, diff, malformed, read_blob};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
 use std::collections::{BTreeSet, HashMap};
@@ -255,13 +255,15 @@ impl Graph {
     fn changes(&self, store: &dyn Store, path: &Path, first_only: bool) -> Result<Vec<usize>> {
         // Each version is looked at as a node and again as its successor's
         // predecessor; remember the answers by version key.
+        // Directory blobs shared between versions are read once.
         let memo = std::cell::RefCell::new(HashMap::new());
+        let blobs = std::cell::RefCell::new(crate::dir::FindMemo::new());
         let at = |i: usize| -> Result<Option<View>> {
             let v = self.nodes[i].id.version();
             if let Some(n) = memo.borrow().get(v.key()) {
                 return Ok(Clone::clone(n));
             }
-            let n = object_at(store, &v, path)?;
+            let n = crate::tree::object_at_memo(store, &v, path, &mut blobs.borrow_mut())?;
             memo.borrow_mut().insert(v.key().to_string(), n.clone());
             Ok(n)
         };
