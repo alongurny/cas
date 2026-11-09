@@ -170,6 +170,26 @@ enum Entry<'a> {
     Skipped,
 }
 
+impl<'a> Entry<'a> {
+    /// Name, whether a tree, and id.
+    fn parts(self) -> Option<(&'a str, bool, Oid)> {
+        match self {
+            Entry::Tree(n, c) => Some((n, true, c)),
+            Entry::File(n, c, _) => Some((n, false, c)),
+            Entry::Skipped => None,
+        }
+    }
+}
+
+/// A tree's entries as (name, whether a tree, id).
+type Listed<'a> = Vec<(&'a str, bool, Oid)>;
+
+/// Git's tree order: by name, a tree's name as if it ended in '/'.
+fn git_order(a: &str, a_tree: bool, b: &str, b_tree: bool) -> std::cmp::Ordering {
+    let a = a.bytes().chain(a_tree.then_some(b'/'));
+    a.cmp(b.bytes().chain(b_tree.then_some(b'/')))
+}
+
 /// Binary tree entries: "<mode> <name>\0<20-byte id>".
 fn entries<'a>(id: &Oid, raw: &'a [u8]) -> Result<Vec<Entry<'a>>> {
     let bad = || Error::Io(format!("bad git tree {}", hex(id)));
@@ -214,6 +234,19 @@ struct Importer<'a> {
     /// The leaves (greatest name, key) and the blobs above them of the last
     /// directory converted at each path, for the next one's delta bases.
     last_dir: HashMap<String, DirBlobs>,
+    /// A new tree's and a new file's version at the same path in a parent
+    /// commit (of a merge, the parent whose tree there shares the most
+    /// entries), found while fetching: its delta base. The last version
+    /// imported at the path is often on another branch (topic branches
+    /// come after newer commits of the branch they fork from); it is only
+    /// the fallback.
+    tree_pair: OidMap<Oid, Oid>,
+    file_pair: OidMap<Oid, Oid>,
+    /// [`DirBlobs`] of each converted git tree, for the trees paired with it.
+    dir_blobs: OidMap<Oid, DirBlobs>,
+    /// Tree bodies of the previous chunk of commits, and of trees fetched
+    /// only as counterparts: most first parents' trees are among them.
+    old_raw: OidMap<Oid, Vec<u8>>,
     n: Imported,
 }
 
@@ -253,36 +286,111 @@ impl Importer<'_> {
     /// Fetch every tree and file under `roots` that is not converted yet,
     /// one level at a time (one round trip to git each). The trees'
     /// contents are left in `raw`, the files' in `bodies`.
-    fn fetch(&mut self, roots: &[Oid], raw: &mut OidMap<Oid, Vec<u8>>, bodies: &mut Bodies) -> Result<()> {
-        let mut want: Vec<Oid> =
-            roots.iter().filter(|r| !self.trees.contains_key(*r) && !raw.contains_key(*r)).copied().collect();
-        want.sort_unstable();
-        want.dedup();
+    /// `roots` pairs each root with its parents' roots.
+    fn fetch(&mut self, roots: &[(Oid, Vec<Oid>)], raw: &mut OidMap<Oid, Vec<u8>>, bodies: &mut Bodies) -> Result<()> {
+        let mut want: Vec<(Oid, Vec<Oid>)> = Vec::new();
+        let mut queued = OidSet::default();
+        for (r, qs) in roots {
+            if !self.trees.contains_key(r) && !raw.contains_key(r) && queued.insert(*r) {
+                want.push((*r, qs.iter().copied().filter(|q| q != r).collect()));
+            }
+        }
         let mut files: Vec<(Oid, &'static str)> = Vec::new();
         while !want.is_empty() || !files.is_empty() {
-            let ids: Vec<Oid> = want.iter().copied().chain(files.iter().map(|(o, _)| *o)).collect();
+            // Counterparts whose bodies are not at hand are fetched with
+            // the level.
+            let mut asked = OidSet::default();
+            let at: OidMap<Oid, usize> = want.iter().enumerate().map(|(i, (w, _))| (*w, i)).collect();
+            let missing: Vec<Oid> = want
+                .iter()
+                .flat_map(|(_, qs)| qs.iter().copied())
+                .filter(|q| {
+                    !raw.contains_key(q) && !self.old_raw.contains_key(q) && !at.contains_key(q) && asked.insert(*q)
+                })
+                .collect();
+            let ids: Vec<Oid> = want
+                .iter()
+                .map(|(w, _)| *w)
+                .chain(missing.iter().copied())
+                .chain(files.iter().map(|(o, _)| *o))
+                .collect();
             let mut got = self.cat.get_many(&ids)?.into_iter();
+            let new_bodies: Vec<Vec<u8>> = want.iter().map(|_| got.next().unwrap()).collect();
+            for q in &missing {
+                self.old_raw.insert(*q, got.next().unwrap());
+            }
             let mut next = Vec::new();
             let mut queued = OidSet::default();
             let mut new_files = Vec::new();
             let mut seen = OidSet::default();
-            for id in &want {
-                let body = got.next().unwrap();
-                for e in entries(id, &body)? {
-                    match e {
-                        Entry::Tree(_, c)
-                            if !self.trees.contains_key(&c) && !raw.contains_key(&c) && queued.insert(c) =>
-                        {
-                            next.push(c)
-                        }
-                        Entry::File(_, c, alias)
-                            if !self.files.contains_key(&(c, alias)) && seen.insert((c, alias)) =>
-                        {
-                            new_files.push((c, alias))
-                        }
-                        _ => {}
+            for ((id, qs), body) in want.iter().zip(&new_bodies) {
+                let mine = entries(id, body)?;
+                // Each counterpart's entries by name, the one sharing the
+                // most entries first: the tree's delta base (a merge's
+                // tree is often closer to the branch merged in).
+                let mut olds: Vec<(Oid, Listed)> = Vec::new();
+                for q in qs {
+                    let qb = raw.get(q).or_else(|| self.old_raw.get(q)).or_else(|| at.get(q).map(|i| &new_bodies[*i]));
+                    if let Some(qb) = qb {
+                        olds.push((*q, entries(q, qb)?.into_iter().filter_map(Entry::parts).collect()));
                     }
                 }
+                let mine: Vec<(&str, bool, Oid, Option<&'static str>)> = mine
+                    .into_iter()
+                    .filter_map(|e| match e {
+                        Entry::Tree(n, c) => Some((n, true, c, None)),
+                        Entry::File(n, c, a) => Some((n, false, c, Some(a))),
+                        Entry::Skipped => None,
+                    })
+                    .collect();
+                // Both lists are in git's order: walk them together.
+                let matches = |old: &[(&str, bool, Oid)]| -> Vec<Option<Oid>> {
+                    let mut j = 0;
+                    mine.iter()
+                        .map(|&(n, t, _, _)| {
+                            while j < old.len() && git_order(old[j].0, old[j].1, n, t).is_lt() {
+                                j += 1;
+                            }
+                            (j < old.len() && old[j].0 == n && old[j].1 == t).then(|| old[j].2)
+                        })
+                        .collect()
+                };
+                let mut found: Vec<(Oid, Vec<Option<Oid>>)> = olds.iter().map(|(q, o)| (*q, matches(o))).collect();
+                if found.len() > 1 {
+                    let score = |m: &[Option<Oid>]| mine.iter().zip(m).filter(|(e, o)| **o == Some(e.2)).count();
+                    let best = (0..found.len()).max_by_key(|&i| (score(&found[i].1), std::cmp::Reverse(i))).unwrap();
+                    found.swap(0, best);
+                }
+                if let Some((q, _)) = found.first() {
+                    self.tree_pair.entry(*id).or_insert(*q);
+                }
+                for (i, &(_, tree, c, alias)) in mine.iter().enumerate() {
+                    let olds_here = found.iter().filter_map(|(_, m)| m[i]).filter(|o| *o != c);
+                    match alias {
+                        None => {
+                            if !self.trees.contains_key(&c) && !raw.contains_key(&c) && queued.insert(c) {
+                                let mut qs: Vec<Oid> = Vec::new();
+                                for o in olds_here {
+                                    if !qs.contains(&o) {
+                                        qs.push(o);
+                                    }
+                                }
+                                next.push((c, qs))
+                            }
+                        }
+                        Some(alias) => {
+                            debug_assert!(!tree);
+                            if let Some(qc) = olds_here.into_iter().next() {
+                                self.file_pair.entry(c).or_insert(qc);
+                            }
+                            if !self.files.contains_key(&(c, alias)) && seen.insert((c, alias)) {
+                                new_files.push((c, alias))
+                            }
+                        }
+                    }
+                }
+            }
+            for ((id, _), body) in want.iter().zip(new_bodies) {
                 raw.insert(*id, body);
             }
             for f in std::mem::take(&mut files) {
@@ -303,7 +411,12 @@ impl Importer<'_> {
                 let body = bodies
                     .remove(&(*id, alias))
                     .ok_or_else(|| Error::Io(format!("git blob {} not fetched", hex(id))))?;
-                let like = self.last_at.get(&path).cloned();
+                let paired = self.file_pair.remove(id).and_then(|q| {
+                    ["raw", "exec", "symlink"]
+                        .iter()
+                        .find_map(|a| self.files.get(&(q, *a)).map(|v| v.key().to_string()))
+                });
+                let like = paired.or_else(|| self.last_at.get(&path).cloned());
                 let v = self.put(alias, body, false, like)?;
                 self.files.insert((*id, alias), v.clone());
                 self.n.files += 1;
@@ -352,6 +465,8 @@ impl Importer<'_> {
             self.n.trees += 1;
             return Ok(v);
         }
+        let old: Option<DirBlobs> =
+            self.tree_pair.remove(id).and_then(|q| self.dir_blobs.get(&q)).or_else(|| self.last_dir.get(path)).cloned();
         let mut leaves = Vec::new();
         let mut start = 0;
         let b3 = cas_core::algo::lookup("blake3").unwrap();
@@ -384,7 +499,7 @@ impl Importer<'_> {
                     // Like the leaf of this path's last version that covered
                     // the same names, as gc pairs them.
                     let last = part.last().unwrap().0;
-                    let like = self.last_dir.get(path).and_then(|(ls, _)| {
+                    let like = old.as_ref().and_then(|(ls, _)| {
                         ls.get(ls.partition_point(|(l, _)| l.as_str() < last).min(ls.len().saturating_sub(1)))
                             .map(|l| l.1.clone())
                     });
@@ -399,7 +514,7 @@ impl Importer<'_> {
         let mut blobs = Vec::new();
         let leaf_list: Vec<(String, String)> = leaves.iter().map(|(l, k, _)| (l.clone(), k.clone())).collect();
         let top = crate::dir::tree_upper(self.alg, leaves, &mut blobs);
-        let old_upper = self.last_dir.get(path).map(|(_, u)| u.clone()).unwrap_or_default();
+        let old_upper = old.map(|(_, u)| u).unwrap_or_default();
         let mut upper = Vec::with_capacity(blobs.len());
         for (i, (k, b)) in blobs.into_iter().enumerate() {
             upper.push(k.clone());
@@ -408,6 +523,7 @@ impl Importer<'_> {
                 self.put("tree", b, true, like)?;
             }
         }
+        self.dir_blobs.insert(*id, (leaf_list.clone(), upper.clone()));
         self.last_dir.insert(path.to_string(), (leaf_list, upper));
         let v = View { format: format.to_string(), key: top };
         self.trees.insert(*id, v.clone());
@@ -434,6 +550,10 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
         leaves: OidMap::default(),
         last_at: HashMap::new(),
         last_dir: HashMap::new(),
+        tree_pair: OidMap::default(),
+        file_pair: OidMap::default(),
+        dir_blobs: OidMap::default(),
+        old_raw: OidMap::default(),
         n: Imported::default(),
         pending: Vec::new(),
         pending_bytes: 0,
@@ -443,6 +563,7 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
     let recs: Vec<&str> = log.split('\x1e').map(|r| r.trim_start_matches('\n')).filter(|r| !r.is_empty()).collect();
     // Commits in chunks: the trees and files of a chunk are fetched
     // together, a level of directories per round trip.
+    let mut root_of: HashMap<String, Oid> = HashMap::new();
     for chunk in recs.chunks(256) {
         let mut parsed = Vec::with_capacity(chunk.len());
         for rec in chunk {
@@ -453,7 +574,13 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
             parsed.push((commit, parents, oid(tree)?, message));
         }
         let (mut raw, mut bodies) = (OidMap::default(), Bodies::default());
-        im.fetch(&parsed.iter().map(|p| p.2).collect::<Vec<_>>(), &mut raw, &mut bodies)?;
+        let mut roots = Vec::with_capacity(parsed.len());
+        for (commit, parents, tree, _) in &parsed {
+            let qs = parents.split_whitespace().filter_map(|p| root_of.get(p)).copied().collect();
+            roots.push((*tree, qs));
+            root_of.insert(commit.to_string(), *tree);
+        }
+        im.fetch(&roots, &mut raw, &mut bodies)?;
         for (commit, parents, tree, message) in parsed {
             let version = im.tree(&tree, &raw, &mut bodies, "")?;
             let message = message.trim_end();
@@ -467,6 +594,7 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
             nodes.insert(commit.to_string(), h.add(&version, after, doc)?);
             im.n.commits += 1;
         }
+        im.old_raw = raw;
     }
     // Tags that point (through annotated tags) at imported commits.
     let refs = String::from_utf8(git(repo, &["show-ref", "--tags", "-d"]).unwrap_or_default()).unwrap_or_default();

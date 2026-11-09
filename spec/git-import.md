@@ -20,8 +20,13 @@ with a `#n` id. Every step is marked breaking, the default.
 
 Empty directories do not exist in git, so none are created.
 
-Into a local disk store, each file is written as a delta against its path's previous version and
-each directory blob against the blob that covered the same names before, as git fast-import does.
+Into a local disk store, each file is written as a delta against its version at the same path in
+a parent commit, and each directory blob against the parent's blob that covered the same names. A
+merge takes the parent whose directory there shares the most entries (its tree is often closer to
+the branch merged in than to its first parent). The last version imported at the path is only the
+fallback: `--topo-order` imports a topic branch after newer commits of the branch it forked from,
+and deltas against those carried every change in between (git.git: directory deltas 96 -> 14 MB,
+store 292 -> 192 MB, import about 4 s slower).
 These are the deltas a gc would pick, so the import ends by merging its packs into one sealed pack
 (as a repack leaves it): the first gc reuses its frames instead of trying each delta again
 (git.git: first gc 53 s -> 15 s).
