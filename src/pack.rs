@@ -96,13 +96,37 @@ impl Drop for Map {
     }
 }
 
-/// One pack's index, in its file's (version 2) bytes.
+/// One pack's index, in its file's (version 2) bytes: mapped, so opening
+/// a store reads none of an index it does not search.
 struct Idx {
-    bytes: Vec<u8>,
+    bytes: IdxBytes,
     n: usize,
 }
 
+enum IdxBytes {
+    Owned(Vec<u8>),
+    Mapped(Map),
+}
+
+impl IdxBytes {
+    fn get(&self) -> &[u8] {
+        match self {
+            IdxBytes::Owned(v) => v,
+            IdxBytes::Mapped(m) => m.bytes(),
+        }
+    }
+}
+
 impl Idx {
+    /// The index file at `path`, mapped when it is version 2.
+    fn open(id: &str, path: &Path) -> io::Result<Idx> {
+        let m = Map::open(path)?;
+        if m.bytes().starts_with(IDX_MAGIC) {
+            return Idx::check(id, IdxBytes::Mapped(m));
+        }
+        Idx::parse(id, m.bytes().to_vec())
+    }
+
     fn parse(id: &str, bytes: Vec<u8>) -> io::Result<Idx> {
         let magic = bytes.get(..8).ok_or_else(|| bad(format!("{id}.idx: truncated")))?;
         if magic == IDX_MAGIC_V1 {
@@ -118,21 +142,26 @@ impl Idx {
         if magic != IDX_MAGIC {
             return Err(bad(format!("{id}.idx: not an index")));
         }
-        let n = u32::from_be_bytes(bytes.get(8..12).ok_or_else(|| bad("idx truncated"))?.try_into().unwrap()) as usize;
-        let idx = Idx { bytes, n };
-        if idx.bytes.len() < 12 + n * REC {
+        Idx::check(id, IdxBytes::Owned(bytes))
+    }
+
+    fn check(id: &str, bytes: IdxBytes) -> io::Result<Idx> {
+        let b = bytes.get();
+        let n = u32::from_be_bytes(b.get(8..12).ok_or_else(|| bad("idx truncated"))?.try_into().unwrap()) as usize;
+        if b.len() < 12 + n * REC {
             return Err(bad(format!("{id}.idx: truncated")));
         }
-        Ok(idx)
+        Ok(Idx { bytes, n })
     }
 
     /// Record `i`'s name bytes; a record pointing outside the file reads
     /// as empty (and so never matches).
     fn name_bytes(&self, i: usize) -> &[u8] {
-        let r = &self.bytes[12 + i * REC..12 + (i + 1) * REC];
+        let b = self.bytes.get();
+        let r = &b[12 + i * REC..12 + (i + 1) * REC];
         let start = u32::from_be_bytes(r[..4].try_into().unwrap()) as usize;
         let len = u16::from_be_bytes(r[4..6].try_into().unwrap()) as usize;
-        self.bytes.get(start..start + len).unwrap_or_default()
+        b.get(start..start + len).unwrap_or_default()
     }
 
     fn name(&self, i: usize) -> io::Result<&str> {
@@ -140,7 +169,7 @@ impl Idx {
     }
 
     fn offset(&self, i: usize) -> u64 {
-        let r = &self.bytes[12 + i * REC..12 + (i + 1) * REC];
+        let r = &self.bytes.get()[12 + i * REC..12 + (i + 1) * REC];
         u64::from_be_bytes(r[6..].try_into().unwrap())
     }
 
@@ -445,7 +474,7 @@ impl Packs {
         }
         let known: BTreeSet<String> = st.packs.iter().cloned().collect();
         for id in ids.into_iter().filter(|i| !known.contains(i)) {
-            let idx = Idx::parse(&id, fs::read(self.dir.join(format!("{id}.idx")))?)?;
+            let idx = Idx::open(&id, &self.dir.join(format!("{id}.idx")))?;
             st.idx.push(idx);
             st.maps.push(std::sync::OnceLock::new());
             st.packs.push(id);
@@ -724,7 +753,7 @@ impl Packs {
         let mut w = self.writer(tmp)?;
         let mut seen = std::collections::HashSet::new();
         for id in merge {
-            let idx = Idx::parse(id, fs::read(self.dir.join(format!("{id}.idx")))?)?;
+            let idx = Idx::open(id, &self.dir.join(format!("{id}.idx")))?;
             let map = Map::open(&self.dir.join(format!("{id}.pack")))?;
             for i in 0..idx.n {
                 let name = idx.name(i)?;
