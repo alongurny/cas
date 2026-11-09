@@ -194,3 +194,44 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// A diff of two big directories, which reads only the leaves that
+    /// differ, finds exactly the entries that changed.
+    #[test]
+    fn a_diff_skipping_shared_leaves_finds_every_change(
+        edits in proptest::collection::vec((0usize..3500, 0u8..3), 1..30),
+    ) {
+        let s = store();
+        let m = flat(&s, 3000);
+        let a = build(&s, b3(), tree(), &m).unwrap();
+        let mut m2 = m.clone();
+        let mut batch = BTreeMap::new();
+        for (i, op) in edits {
+            let p = Path::new(format!("name-{i:05}.c")).unwrap();
+            let e = match op {
+                0 => Edit::Remove,
+                _ => Edit::Set(Node::File(put(&s, b3(), "raw", format!("new {i} {op}").as_bytes()).unwrap())),
+            };
+            match &e {
+                Edit::Remove => m2.remove(&p),
+                Edit::Set(n) => m2.insert(p.clone(), n.clone()),
+            };
+            batch.insert(p, e);
+        }
+        let b = update(&s, b3(), &a, &batch).unwrap();
+        let got: Vec<(Path, Option<Node>, Option<Node>)> =
+            diff(&s, &a, &b, None).unwrap().into_iter().map(|c| (c.path, c.old, c.new)).collect();
+        let mut want = Vec::new();
+        let paths: std::collections::BTreeSet<&Path> = m.keys().chain(m2.keys()).collect();
+        for p in paths {
+            let (o, n) = (m.get(p).cloned(), m2.get(p).cloned());
+            if o != n {
+                want.push((p.clone(), o, n));
+            }
+        }
+        prop_assert_eq!(got, want);
+    }
+}

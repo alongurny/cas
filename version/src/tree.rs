@@ -299,7 +299,9 @@ fn diff_at(store: &dyn Store, path: Option<&Path>, a: At, b: At, out: &mut Vec<C
     match (a, b) {
         (At::Dir(x), At::Dir(y)) if x == y => {}
         (At::Dir(x), At::Dir(y)) => {
-            let (mut ia, mut ib) = (load(store, &x)?.into_iter().peekable(), load(store, &y)?.into_iter().peekable());
+            // Entries in blobs both directories share are equal: skipped.
+            let (la, lb) = crate::dir::load_differing(store, &x, &y)?;
+            let (mut ia, mut ib) = (la.into_iter().peekable(), lb.into_iter().peekable());
             loop {
                 let order = match (ia.peek(), ib.peek()) {
                     (None, None) => break,

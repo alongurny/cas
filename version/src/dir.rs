@@ -419,6 +419,64 @@ fn read_tree_blob(store: &dyn Store, key: &str) -> Result<Blob> {
     tree_decode(&bytes).map_err(|e| malformed(key, e))
 }
 
+/// Inner blob keys, and leaves as (greatest name, key).
+pub(crate) type Parts = (Vec<String>, Vec<(String, String)>);
+
+/// A `tree` directory's blobs below its top `top`: the inner ones, and the
+/// leaves, in name order. Reads the inner blobs only; `checked` decodes
+/// them with every check, else without the chunk check.
+pub(crate) fn tree_parts(store: &dyn Store, top: &str, checked: bool) -> Result<Parts> {
+    let (mut inner, mut leaves) = (Vec::new(), Vec::new());
+    // (greatest name, key, known to be a leaf): the parts of a level 1 blob
+    // are leaves.
+    let mut todo = vec![(String::new(), top.to_string(), false)];
+    while let Some((last, key, leaf)) = todo.pop() {
+        if leaf {
+            leaves.push((last, key));
+            continue;
+        }
+        let bytes = crate::read_blob(store, &key)?;
+        let blob = if checked { tree_decode(&bytes) } else { tree_decode_uncut(&bytes) };
+        match blob.map_err(|e| malformed(&key, e))? {
+            Blob::Items(_) => leaves.push((last, key)),
+            Blob::Parts { level, parts } => {
+                if key != top {
+                    inner.push(key);
+                }
+                todo.extend(parts.into_iter().rev().map(|(n, k)| (n, k, level == 1)));
+            }
+        }
+    }
+    Ok((inner, leaves))
+}
+
+/// The entries of directories `a` and `b`, leaving out those in blobs both
+/// share: what is left holds every difference between them. Two `tree`
+/// directories read only their inner blobs and the leaves that differ.
+pub fn load_differing(store: &dyn Store, a: &View, b: &View) -> Result<(Vec<Item>, Vec<Item>)> {
+    let is_tree = |v: &View| v.format() == tree_format();
+    if !(is_tree(a) && is_tree(b)) {
+        return Ok((crate::tree::load(store, a)?, crate::tree::load(store, b)?));
+    }
+    let (_, al) = tree_parts(store, a.key(), true)?;
+    let (_, bl) = tree_parts(store, b.key(), true)?;
+    let keys = |ls: &[(String, String)]| ls.iter().map(|l| l.1.clone()).collect::<BTreeSet<String>>();
+    let (ak, bk) = (keys(&al), keys(&bl));
+    let items = |ls: &[(String, String)], other: &BTreeSet<String>| -> Result<Vec<Item>> {
+        let want: Vec<String> = ls.iter().filter(|l| !other.contains(&l.1)).map(|l| l.1.clone()).collect();
+        let mut out = Vec::new();
+        for (k, r) in want.iter().zip(store.read_many(&want)) {
+            let b = r?.ok_or_else(|| crate::Error::Missing(k.clone()))?;
+            match tree_decode(&b).map_err(|e| malformed(k, e))? {
+                Blob::Items(i) => out.extend(i),
+                Blob::Parts { .. } => return Err(malformed(k, "a leaf where a leaf belongs is not one")),
+            }
+        }
+        Ok(out)
+    };
+    Ok((items(&al, &bk)?, items(&bl, &ak)?))
+}
+
 fn tree_load(store: &dyn Store, key: &str, bytes: &[u8]) -> Result<Vec<Item>> {
     let top = tree_decode(bytes).map_err(|e| malformed(key, e))?;
     let (level, parts) = match top {

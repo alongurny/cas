@@ -221,33 +221,6 @@ fn is_tree(v: &View) -> bool {
 
 /// A `tree` directory's blobs below its top: the inner ones, and the leaves
 /// as (greatest name, key), in name order.
-/// Inner blob keys, and leaves as (greatest name, key).
-type Parts = (Vec<String>, Vec<(String, String)>);
-
-fn tree_parts(store: &dyn Store, top: &str) -> Result<Parts> {
-    let (mut inner, mut leaves) = (Vec::new(), Vec::new());
-    // (greatest name, key, known to be a leaf): the parts of a level 1 blob
-    // are leaves, read only if they differ.
-    let mut todo = vec![(String::new(), top.to_string(), false)];
-    while let Some((last, key, leaf)) = todo.pop() {
-        if leaf {
-            leaves.push((last, key));
-            continue;
-        }
-        let bytes = crate::read_blob(store, &key)?;
-        match tree_decode_uncut(&bytes).map_err(|e| crate::malformed(&key, e))? {
-            Blob::Items(_) => leaves.push((last, key)),
-            Blob::Parts { level, parts } => {
-                if key != top {
-                    inner.push(key);
-                }
-                todo.extend(parts.into_iter().rev().map(|(n, k)| (n, k, level == 1)));
-            }
-        }
-    }
-    Ok((inner, leaves))
-}
-
 /// [`pair`] of two `tree` directories, reading only the leaves that differ:
 /// the entries of a leaf both share are the same. Each new blob of the
 /// directory is hinted to an old one covering the same names.
@@ -260,8 +233,8 @@ fn pair_trees(
     walked: &mut HashSet<String>,
     placed: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
-    let (oi, ol) = tree_parts(store, old.key())?;
-    let (ni, nl) = tree_parts(store, new.key())?;
+    let (oi, ol) = crate::dir::tree_parts(store, old.key(), false)?;
+    let (ni, nl) = crate::dir::tree_parts(store, new.key(), false)?;
     let old_keys: HashSet<&str> = ol.iter().map(|l| l.1.as_str()).chain(oi.iter().map(String::as_str)).collect();
     let new_keys: HashSet<&str> = nl.iter().map(|l| l.1.as_str()).chain(ni.iter().map(String::as_str)).collect();
     let old_only: Vec<&(String, String)> = ol.iter().filter(|l| !new_keys.contains(l.1.as_str())).collect();
