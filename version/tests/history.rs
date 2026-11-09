@@ -294,3 +294,60 @@ proptest! {
         prop_assert_eq!(h.merge_bases(a, b), want);
     }
 }
+
+/// Values shaped like histories, valid or nearly so.
+fn history_like() -> impl Strategy<Value = Value> {
+    let s = store();
+    let ids: Vec<String> = (0..3).map(|i| NodeId::of(&version(&s, &format!("h{i}"))).to_string()).collect();
+    let id = prop::sample::select(ids);
+    let text = prop_oneof![Just(""), Just("note"), Just("é")].prop_map(Value::str);
+    let empty = prop_oneof![4 => Just(Value::empty()), 1 => text.clone()];
+    let step = prop::collection::btree_map(
+        prop_oneof![Just("changelog"), Just("compatible"), Just("other")].prop_map(Value::str),
+        prop_oneof![text.clone(), empty],
+        0..3,
+    )
+    .prop_map(Value::Map);
+    let after = prop::collection::btree_map(id.clone().prop_map(Value::str), step, 0..3).prop_map(Value::Map);
+    let node = prop::collection::btree_map(
+        prop_oneof![Just("after"), Just("doc"), Just("x")].prop_map(Value::str),
+        prop_oneof![after, text.clone()],
+        0..3,
+    )
+    .prop_map(Value::Map);
+    let nodes = prop::collection::btree_map(
+        prop_oneof![8 => id.clone().prop_map(Value::str), 1 => Just(Value::str("bad id"))],
+        node,
+        0..4,
+    )
+    .prop_map(Value::Map);
+    let tags = prop::collection::btree_map(
+        prop_oneof![Just("v1"), Just("")].prop_map(Value::str),
+        prop_oneof![id.prop_map(Value::str), Just(Value::empty())],
+        0..2,
+    )
+    .prop_map(Value::Map);
+    prop::collection::btree_map(
+        prop_oneof![Just("doc"), Just("nodes"), Just("tags"), Just("zz")].prop_map(Value::str),
+        prop_oneof![nodes, tags, text],
+        0..4,
+    )
+    .prop_map(Value::Map)
+}
+
+proptest! {
+    /// The direct decoder agrees with deserialize plus from_value: the same
+    /// history, or an error for an error, also on damaged bytes.
+    #[test]
+    fn decode_agrees_with_from_value(v in history_like(), flip in any::<prop::sample::Index>()) {
+        let slow = |b: &[u8]| Value::deserialize(b).and_then(|v| History::from_value(&v)).ok();
+        let bytes = v.serialize();
+        prop_assert_eq!(History::decode(&bytes).ok(), slow(&bytes));
+        let mut damaged = bytes.clone();
+        let i = flip.index(damaged.len());
+        damaged[i] ^= 0x41;
+        prop_assert_eq!(History::decode(&damaged).ok(), slow(&damaged));
+        let cut = &bytes[..i];
+        prop_assert_eq!(History::decode(cut).ok(), slow(cut));
+    }
+}

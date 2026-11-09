@@ -3,7 +3,7 @@
 //! version; versions have no parents. A history object never changes; a
 //! store name (a mutable, compare-and-set value) points at the current one.
 
-use crate::uni::Value;
+use crate::uni::{Cursor, Value};
 use crate::{Error, Result, View, by_alias, malformed, read_blob, write_blob};
 use cas_core::algo::Algorithm;
 use cas_core::{Error as CoreError, Expect, Store};
@@ -157,6 +157,75 @@ impl History {
             let n = NodeId::parse(n.as_str().ok_or("a tag names a node id")?)?;
             h.tags.insert(t, n);
         }
+        h.validate()?;
+        Ok(h)
+    }
+
+    /// [`History::from_value`] of the value `bytes` serialize, read
+    /// straight from the bytes: the same answer (any error for any error),
+    /// without building the value first.
+    pub fn decode(bytes: &[u8]) -> std::result::Result<History, String> {
+        let mut c = Cursor::new(bytes);
+        let mut h = History::default();
+        let mut top = c.map()?;
+        while let Some(k) = c.key(&mut top, "a history")? {
+            match k {
+                "doc" => h.doc = Some(c.str().map_err(|_| "doc is not a string")?.to_string()),
+                "nodes" => {
+                    let mut nodes = c.map().map_err(|_| "nodes is not a map")?;
+                    while let Some(id) = c.key(&mut nodes, "nodes")? {
+                        let id = NodeId::parse(id)?;
+                        let mut node = HistNode::default();
+                        let mut f = c.map().map_err(|_| "a node is not a map")?;
+                        while let Some(k) = c.key(&mut f, "a node")? {
+                            match k {
+                                "doc" => node.doc = Some(c.str().map_err(|_| "node doc is not a string")?.to_string()),
+                                "after" => {
+                                    let mut after = c.map().map_err(|_| "after is not a map")?;
+                                    while let Some(p) = c.key(&mut after, "after")? {
+                                        let p = NodeId::parse(p)?;
+                                        let mut step = Step::default();
+                                        let mut sf = c.map().map_err(|_| "a step is not a map")?;
+                                        while let Some(k) = c.key(&mut sf, "a step")? {
+                                            match k {
+                                                "changelog" => {
+                                                    step.changelog = Some(
+                                                        c.str().map_err(|_| "changelog is not a string")?.to_string(),
+                                                    )
+                                                }
+                                                "compatible" => {
+                                                    let mut m = c.map().map_err(|_| "compatible is {} when present")?;
+                                                    if c.key(&mut m, "compatible").is_ok_and(|k| k.is_some()) {
+                                                        return Err("compatible is {} when present".into());
+                                                    }
+                                                    step.compatible = true;
+                                                }
+                                                k => return Err(format!("a step has unknown key {k:?}")),
+                                            }
+                                        }
+                                        node.after.insert(p, step);
+                                    }
+                                }
+                                k => return Err(format!("a node has unknown key {k:?}")),
+                            }
+                        }
+                        h.nodes.insert(id, node);
+                    }
+                }
+                "tags" => {
+                    let mut tags = c.map().map_err(|_| "tags is not a map")?;
+                    while let Some(t) = c.key(&mut tags, "tags")? {
+                        if t.is_empty() {
+                            return Err("empty tag name".into());
+                        }
+                        let n = NodeId::parse(c.str().map_err(|_| "a tag names a node id")?)?;
+                        h.tags.insert(t.to_string(), n);
+                    }
+                }
+                k => return Err(format!("a history has unknown key {k:?}")),
+            }
+        }
+        c.done()?;
         h.validate()?;
         Ok(h)
     }
@@ -329,7 +398,7 @@ impl History {
 
 /// Check the bytes of a `history` blob.
 pub(crate) fn check(bytes: &[u8]) -> std::result::Result<(), String> {
-    History::from_value(&Value::deserialize(bytes)?).map(|_| ())
+    History::decode(bytes).map(|_| ())
 }
 
 pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<View> {
@@ -346,8 +415,7 @@ pub fn read(store: &dyn Store, r: &View) -> Result<History> {
 
 /// The history in `bytes`, the value of blob `key`.
 pub fn parse(key: &str, bytes: &[u8]) -> Result<History> {
-    let value = Value::deserialize(bytes).map_err(|e| malformed(key, e))?;
-    History::from_value(&value).map_err(|e| malformed(key, e))
+    History::decode(bytes).map_err(|e| malformed(key, e))
 }
 
 /// The history object `name` points at, if `name` is set.
