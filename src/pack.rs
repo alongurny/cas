@@ -10,9 +10,12 @@
 //! this module sees them.
 //!
 //! Layout under `packs/`:
-//! - `<id>.pack`: `CASPACK1`, then frames `kind u8, name len u16, name,
-//!   data len u32, data`. Kind 0 is file bytes; kind 1 is a delta, whose data
-//!   is `base name len u16, base name, value len u32, zstd bytes`.
+//! - `<id>.pack`: `CASPACK1`, then frames `kind u8, name, data len u32,
+//!   data`. Kind 2 is file bytes; kind 3 is a delta, whose data is `base
+//!   name, value len u32, zstd bytes`. A name there is binary: `1` and the
+//!   32 digest bytes of a `blake3:` key, `2` and those of a chunk, or `0`,
+//!   `len u16` and the name. Kinds 0 and 1, still read, are the same with
+//!   every name as `len u16, name` (73 bytes for a blake3 key, not 33).
 //! - `<id>.idx`: `CASIDX02`, a count `n u32`, then `n` records `name start
 //!   u32, name len u16, offset u64` sorted by name, then the names. A lookup
 //!   is a binary search in the file's bytes, as in git's pack index, so
@@ -43,6 +46,10 @@ const IDX_MAGIC: &[u8; 8] = b"CASIDX02";
 const REC: usize = 14;
 const FILE: u8 = 0;
 const DELTA: u8 = 1;
+/// As FILE and DELTA, with names (the frame's, a delta's base) in the
+/// binary form of [`put_bin_name`]: what writers write now.
+const FILE_B: u8 = 2;
+const DELTA_B: u8 = 3;
 /// Longest chain of deltas a pack holds (git's default depth). At 10, a
 /// file's every eleventh version was whole: git.git's store took 506 MB,
 /// 350 MB at 50; reading the newest version of a file costs the most.
@@ -373,6 +380,81 @@ fn put_name(out: &mut Vec<u8>, name: &str) {
     out.extend_from_slice(name.as_bytes());
 }
 
+/// A name in binary form: `1` and the 32 digest bytes of a `blake3:` key,
+/// `2` and those of a chunk (`#hex`), else `0` and the name as
+/// [`put_name`] writes it. A blake3 key takes 33 bytes, not 73.
+fn put_bin_name(out: &mut Vec<u8>, name: &str) {
+    let hex32 = |h: &str| -> Option<[u8; 32]> {
+        let mut d = [0u8; 32];
+        (h.len() == 64
+            && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+            && hex::decode_to_slice(h, &mut d).is_ok())
+        .then_some(d)
+    };
+    if let Some(d) = name.strip_prefix("blake3:").and_then(hex32) {
+        out.push(1);
+        out.extend_from_slice(&d);
+    } else if let Some(d) = name.strip_prefix('#').and_then(hex32) {
+        out.push(2);
+        out.extend_from_slice(&d);
+    } else {
+        out.push(0);
+        put_name(out, name);
+    }
+}
+
+/// A name written by [`put_name`] (`binary` false) or [`put_bin_name`].
+fn take_any_name(b: &mut &[u8], binary: bool) -> io::Result<String> {
+    if !binary {
+        let n = take_u16(b)?;
+        return std::str::from_utf8(take(b, n)?).map(str::to_string).map_err(bad);
+    }
+    match take(b, 1)?[0] {
+        0 => take_any_name(b, false),
+        1 => Ok(format!("blake3:{}", hex::encode(take(b, 32)?))),
+        2 => Ok(format!("#{}", hex::encode(take(b, 32)?))),
+        t => Err(bad(format!("name tag {t}"))),
+    }
+}
+
+/// Skip a name as [`take_any_name`] reads it.
+fn skip_name(b: &mut &[u8], binary: bool) -> io::Result<()> {
+    if !binary {
+        let n = take_u16(b)?;
+        return take(b, n).map(|_| ());
+    }
+    match take(b, 1)?[0] {
+        0 => skip_name(b, false),
+        1 | 2 => take(b, 32).map(|_| ()),
+        t => Err(bad(format!("name tag {t}"))),
+    }
+}
+
+/// One frame at the start of `b`: whether it is a delta, whether its names
+/// are binary, its data, and its whole length.
+fn parse_frame(mut b: &[u8]) -> io::Result<(bool, bool, &[u8], usize)> {
+    let start = b.len();
+    let kind = take(&mut b, 1)?[0];
+    let (delta, binary) = match kind {
+        FILE => (false, false),
+        DELTA => (true, false),
+        FILE_B => (false, true),
+        DELTA_B => (true, true),
+        k => return Err(bad(format!("frame kind {k}"))),
+    };
+    skip_name(&mut b, binary)?;
+    let n = take_u32(&mut b)?;
+    let data = take(&mut b, n)?;
+    Ok((delta, binary, data, start - b.len()))
+}
+
+/// A delta frame's data: its base, value length and zstd bytes.
+fn delta_parts(mut d: &[u8], binary: bool) -> io::Result<(String, usize, &[u8])> {
+    let base = take_any_name(&mut d, binary)?;
+    let len = take_u32(&mut d)?;
+    Ok((base, len, d))
+}
+
 /// A frame to write: plain file bytes, or a value of `len` bytes compressed
 /// with the value of `base` as zstd dictionary.
 pub enum Entry {
@@ -445,15 +527,11 @@ fn with_dict_compress(dict: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
 
 impl Frame {
     /// A delta frame's base, value length and zstd bytes.
-    pub fn delta(&self) -> io::Result<Option<(&str, usize, &[u8])>> {
+    pub fn delta(&self) -> io::Result<Option<(String, usize, &[u8])>> {
         if self.base.is_none() {
             return Ok(None);
         }
-        let mut d = &self.bytes[self.data_at..];
-        let n = take_u16(&mut d)?;
-        let base = std::str::from_utf8(take(&mut d, n)?).map_err(bad)?;
-        let len = take_u32(&mut d)?;
-        Ok(Some((base, len, d)))
+        delta_parts(&self.bytes[self.data_at..], self.bytes[0] == DELTA_B).map(Some)
     }
 }
 
@@ -492,8 +570,8 @@ impl PackWriter<'_> {
         let data_len;
         match e {
             Entry::File(bytes) => {
-                frame.push(FILE);
-                put_name(&mut frame, name);
+                frame.push(FILE_B);
+                put_bin_name(&mut frame, name);
                 frame.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
                 data_len = bytes.len();
                 self.out.write_all(&frame)?;
@@ -501,15 +579,15 @@ impl PackWriter<'_> {
             }
             Entry::Delta { base, len, z } => {
                 let mut d = Vec::new();
-                put_name(&mut d, base);
+                put_bin_name(&mut d, base);
                 d.extend_from_slice(&(*len as u32).to_be_bytes());
-                d.extend_from_slice(z);
-                frame.push(DELTA);
-                put_name(&mut frame, name);
-                frame.extend_from_slice(&(d.len() as u32).to_be_bytes());
-                data_len = d.len();
+                frame.push(DELTA_B);
+                put_bin_name(&mut frame, name);
+                frame.extend_from_slice(&((d.len() + z.len()) as u32).to_be_bytes());
+                data_len = d.len() + z.len();
                 self.out.write_all(&frame)?;
                 self.out.write_all(&d)?;
+                self.out.write_all(z)?;
             }
         }
         self.offset += (frame.len() + data_len) as u64;
@@ -711,26 +789,21 @@ impl Packs {
         }
         // A base may have been removed: its dependents still need it.
         let Some((loc, map)) = self.locate_mapped(name, depth > 0)? else { return Ok(None) };
-        let (kind, data) = frame_data(&map, loc)?;
-        match kind {
-            FILE => Ok(Some(data.to_vec())),
-            DELTA => {
-                let v = self.delta_value(name, data, depth)?;
+        match frame_data(&map, loc)? {
+            (false, _, data) => Ok(Some(data.to_vec())),
+            (true, binary, data) => {
+                let v = self.delta_value(name, data, binary, depth)?;
                 Ok(Some(as_file(&v)))
             }
-            k => Err(bad(format!("frame kind {k}"))),
         }
     }
 
     /// The value of the delta frame `data` of `name`, kept in the base
     /// cache: a walk reads the next version at the same path soon, a delta
     /// on this one.
-    fn delta_value(&self, name: &str, data: &[u8], depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
-        let mut b = data;
-        let n = take_u16(&mut b)?;
-        let base = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?;
-        let size = take_u32(&mut b)?;
-        let base_value = self.base_value(base, depth + 1)?;
+    fn delta_value(&self, name: &str, data: &[u8], binary: bool, depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let (base, size, b) = delta_parts(data, binary)?;
+        let base_value = self.base_value(&base, depth + 1)?;
         let v = std::sync::Arc::new(with_dict_decompress(&base_value, b, size)?);
         self.bases.lock().unwrap().put(name, v.clone());
         Ok(v)
@@ -742,16 +815,9 @@ impl Packs {
     /// place: for scans that look at one byte of every blob.
     pub fn peek<R>(&self, name: &str, f: impl FnOnce(Option<&[u8]>) -> io::Result<R>) -> io::Result<Option<R>> {
         let Some((loc, map)) = self.locate_mapped(name, false)? else { return Ok(None) };
-        let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
-        let kind = take(&mut b, 1)?[0];
-        let n = take_u16(&mut b)?;
-        take(&mut b, n)?;
-        let n = take_u32(&mut b)?;
-        let data = take(&mut b, n)?;
-        match kind {
-            FILE => f(Some(data)).map(Some),
-            DELTA => f(None).map(Some),
-            k => Err(bad(format!("frame kind {k}"))),
+        match frame_data(&map, loc)? {
+            (false, _, data) => f(Some(data)).map(Some),
+            (true, _, _) => f(None).map(Some),
         }
     }
 
@@ -799,38 +865,25 @@ impl Packs {
     }
 }
 
-/// The kind and data of the frame at `loc`.
-fn frame_data(map: &Map, loc: Loc) -> io::Result<(u8, &[u8])> {
-    let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
-    let kind = take(&mut b, 1)?[0];
-    let n = take_u16(&mut b)?;
-    take(&mut b, n)?;
-    let n = take_u32(&mut b)?;
-    Ok((kind, take(&mut b, n)?))
+/// Whether the frame at `loc` is a delta, whether its names are binary,
+/// and its data.
+fn frame_data(map: &Map, loc: Loc) -> io::Result<(bool, bool, &[u8])> {
+    let b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
+    let (delta, binary, data, _) = parse_frame(b)?;
+    Ok((delta, binary, data))
 }
 
 fn frame_at(map: &Map, loc: Loc) -> io::Result<Option<Frame>> {
-    {
-        let at = loc.offset as usize;
-        let mut b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
-        let start = b.len();
-        let kind = take(&mut b, 1)?[0];
-        let n = take_u16(&mut b)?;
-        take(&mut b, n)?;
-        let n = take_u32(&mut b)?;
-        let data = take(&mut b, n)?;
-        let bytes = map.bytes()[at..at + start - b.len()].to_vec();
-        let data_at = bytes.len() - data.len();
-        match kind {
-            FILE => Ok(Some(Frame { bytes, data_at, base: None, plain: matches!(data.first(), Some(0 | 1)) })),
-            DELTA => {
-                let mut d = data;
-                let n = take_u16(&mut d)?;
-                let base = std::str::from_utf8(take(&mut d, n)?).map_err(bad)?.to_string();
-                Ok(Some(Frame { bytes, data_at, base: Some(base), plain: true }))
-            }
-            k => Err(bad(format!("frame kind {k}"))),
-        }
+    let at = loc.offset as usize;
+    let b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
+    let (delta, binary, data, len) = parse_frame(b)?;
+    let bytes = b[..len].to_vec();
+    let data_at = len - data.len();
+    if delta {
+        let (base, _, _) = delta_parts(data, binary)?;
+        Ok(Some(Frame { bytes, data_at, base: Some(base), plain: true }))
+    } else {
+        Ok(Some(Frame { bytes, data_at, base: None, plain: matches!(data.first(), Some(0 | 1)) }))
     }
 }
 
@@ -845,13 +898,12 @@ impl Packs {
         }
         let (loc, map) = self.locate_mapped(name, true)?.ok_or_else(|| bad(format!("base {name} gone")))?;
         match frame_data(&map, loc)? {
-            (FILE, data) => {
+            (false, _, data) => {
                 let v = std::sync::Arc::new(plain_value(data)?);
                 self.bases.lock().unwrap().put(name, v.clone());
                 Ok(v)
             }
-            (DELTA, data) => self.delta_value(name, data, depth),
-            (k, _) => Err(bad(format!("frame kind {k}"))),
+            (true, binary, data) => self.delta_value(name, data, binary, depth),
         }
     }
 
@@ -958,15 +1010,9 @@ impl Packs {
                 if !seen.insert(name.to_string()) {
                     continue;
                 }
-                let mut b = map.bytes().get(idx.offset(i) as usize..).ok_or_else(|| bad("offset past the pack"))?;
-                let start = b.len();
-                take(&mut b, 1)?;
-                let n = take_u16(&mut b)?;
-                take(&mut b, n)?;
-                let n = take_u32(&mut b)?;
-                take(&mut b, n)?;
-                let len = start - b.len();
                 let at = idx.offset(i) as usize;
+                let b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
+                let (_, _, _, len) = parse_frame(b)?;
                 w.add_frame(name, &map.bytes()[at..at + len])?;
             }
         }
@@ -1085,6 +1131,56 @@ mod tests {
         let idx = Idx::parse("x", v1).unwrap();
         assert_eq!((idx.get("a"), idx.get("m"), idx.get("zz"), idx.get("b")), (Some(8), Some(20), Some(30), None));
         assert_eq!(idx.name(idx.lower_bound("b")).unwrap(), "m");
+    }
+
+    /// Frames with string names (kinds 0 and 1, written before binary
+    /// names) still read, alongside binary ones, deltas across both.
+    #[test]
+    fn frames_with_string_names_still_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let p = Packs::open(dir.path().join("packs")).unwrap();
+        let (a, b, c) = (format!("blake3:{:064x}", 1), format!("blake3:{:064x}", 2), "odd-name".to_string());
+        let base = b"\0line one\nline two\n".to_vec();
+        let value = b"line one\nline two\nline three\n".to_vec();
+        // An old pack by hand: a file and a delta on it, string names.
+        let mut pack = PACK_MAGIC.to_vec();
+        let mut idx = Vec::new();
+        idx.push((a.clone(), pack.len() as u64));
+        pack.push(FILE);
+        put_name(&mut pack, &a);
+        pack.extend_from_slice(&(base.len() as u32).to_be_bytes());
+        pack.extend_from_slice(&base);
+        let z = with_dict_compress(&base[1..], &value).unwrap();
+        let mut d = Vec::new();
+        put_name(&mut d, &a);
+        d.extend_from_slice(&(value.len() as u32).to_be_bytes());
+        d.extend_from_slice(&z);
+        idx.push((b.clone(), pack.len() as u64));
+        pack.push(DELTA);
+        put_name(&mut pack, &b);
+        pack.extend_from_slice(&(d.len() as u32).to_be_bytes());
+        pack.extend_from_slice(&d);
+        fs::write(dir.path().join("packs/1.pack"), &pack).unwrap();
+        fs::write(dir.path().join("packs/1.idx"), encode_idx(idx)).unwrap();
+        // A new pack: a binary-named delta on the old file, and a name
+        // that is not a key.
+        p.write(&[(c.clone(), Entry::Delta { base: a.clone(), len: value.len(), z: z.clone() })], &tmp).unwrap();
+        let other = Packs::open(dir.path().join("packs")).unwrap();
+        let want = [&[0u8][..], &value].concat();
+        assert_eq!(other.file(&a).unwrap(), Some(base.clone()));
+        assert_eq!(other.file(&b).unwrap(), Some(want.clone()));
+        assert_eq!(other.file(&c).unwrap(), Some(want.clone()));
+        assert_eq!(other.frame(&b).unwrap().unwrap().base.as_deref(), Some(a.as_str()));
+        assert_eq!(other.frame(&c).unwrap().unwrap().delta().unwrap().unwrap().0, a);
+        // Merging copies both kinds as they are.
+        other.seal_all(&tmp).unwrap();
+        let merged = Packs::open(dir.path().join("packs")).unwrap();
+        assert_eq!(merged.ids().unwrap().len(), 1);
+        for (n, v) in [(&a, &base), (&b, &want), (&c, &want)] {
+            assert_eq!(merged.file(n).unwrap().as_ref(), Some(v));
+        }
     }
 
     #[test]
