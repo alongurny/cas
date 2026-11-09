@@ -68,6 +68,13 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
             r.bad.push((v.key().to_string(), e.to_string()));
             continue;
         }
+        // A history is checked whole too: its tree's shape and its tips.
+        if v.known_format().is_some_and(|f| f.alias == "history")
+            && let Err(e) = crate::history::read(store, &v)
+            && !matches!(e, Error::Missing(_))
+        {
+            r.bad.push((v.key().to_string(), e.to_string()));
+        }
         // The format object itself is a blob too.
         if is_blob_key(v.format()) && by_id(v.format()).is_none() && !blobs.contains(v.format()) {
             r.missing.push((v.key().to_string(), v.format().to_string()));

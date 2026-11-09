@@ -10,7 +10,7 @@
 
 use crate::dir::Item;
 use crate::formats::{self, Kind};
-use crate::history::{self, History};
+use crate::history;
 use crate::{Error, Result, View, is_blob_key, read_blob, tree};
 use cas_core::store::Put;
 use cas_core::{Error as CoreError, Expect, Span, Store};
@@ -38,7 +38,7 @@ pub struct Copied {
 pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(_), _)) => Ok(tree::load(store, r)?.into_iter().map(|Item { child, .. }| child).collect()),
-        Some((_, "history")) => Ok(history::read(store, r)?.nodes.keys().map(|id| id.version()).collect()),
+        Some((_, "history" | "history-part")) => Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default()),
         _ => Ok(Vec::new()),
     }
 }
@@ -80,7 +80,11 @@ fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
         Some((Kind::Dir(d), _)) => {
             Ok(Some(d.decode(r.key(), bytes)?.into_iter().map(|Item { child, .. }| child).collect()))
         }
-        Some((_, "history")) => Ok(Some(history::parse(r.key(), bytes)?.nodes.keys().map(|id| id.version()).collect())),
+        Some((_, "history")) => {
+            let root = crate::htree::Root::decode(bytes).map_err(|e| crate::malformed(r.key(), e))?;
+            Ok(Some(root.nodes.into_iter().collect()))
+        }
+        Some((_, "history-part")) => Ok(Some(crate::htree::part_children(r.key(), bytes)?)),
         _ => Ok(None),
     }
 }
@@ -96,49 +100,45 @@ fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
 pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
     let is_history = root.known_format().is_some_and(|f| f.alias == "history");
     if is_history && !dst.has_many(&[root.key().to_string()])?[0] {
-        return copy_history(src, dst, root, &history::read(src, root)?, None);
+        let h = history::read(src, root)?;
+        let versions = h.log().into_iter().rev().map(|id| id.version()).collect();
+        return copy_history(src, dst, root, versions, HashSet::new());
     }
     Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() }.copy_root(root)
 }
 
-/// Copy the history `h` (stored at `root` in `src`) into `dst`. `known`,
-/// when given, is a history `dst` is known to hold whole (the one its name
-/// pointed at): its versions are present there, so they are not asked
-/// about. This is push's local diff walk, as git's push negotiates against
-/// the remote's ref: only what is new since `known` crosses the wire, and
-/// the remote's history need not be fetched when the source has it.
-fn copy_history(src: &dyn Store, dst: &dyn Store, root: &View, h: &History, known: Option<&History>) -> Result<Copied> {
-    let mut c = Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() };
-    if let Some(k) = known {
-        for id in k.log() {
-            c.done.insert(id.version().key().to_string());
+/// Copy the history at `root` in `src` into `dst`: first `versions`
+/// (oldest first, in groups of [`ROOTS_PER_ROUND`], each as soon as it is
+/// known to be missing), then the history's own blobs, skipping the parts
+/// `dst` already holds. Push passes only the versions of nodes the
+/// destination's history lacks, and as `known` the versions it is known to
+/// hold: its local diff walk, as git's push negotiates against the
+/// remote's ref.
+fn copy_history(
+    src: &dyn Store,
+    dst: &dyn Store,
+    root: &View,
+    versions: Vec<View>,
+    known: HashSet<String>,
+) -> Result<Copied> {
+    let mut c = Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: known };
+    let mut seen = HashSet::new();
+    let versions: Vec<View> = versions.into_iter().filter(|v| seen.insert(v.key().to_string())).collect();
+    // One batched check for all of them first: a push of one commit finds
+    // every version but the new one present.
+    let keys: Vec<String> = versions.iter().map(|v| v.key().to_string()).collect();
+    let present = if keys.is_empty() { Vec::new() } else { dst.has_many(&keys)? };
+    let mut missing = Vec::new();
+    for (v, p) in versions.into_iter().zip(present) {
+        if p {
+            c.n.present += 1;
+            c.done.insert(v.key().to_string());
+        } else {
+            missing.push(v);
         }
     }
-    {
-        let mut seen = HashSet::new();
-        let versions: Vec<View> = h
-            .log()
-            .into_iter()
-            .rev()
-            .map(|id| id.version())
-            .filter(|v| !c.done.contains(v.key()) && seen.insert(v.key().to_string()))
-            .collect();
-        // One batched check for all of them first: a push of one commit
-        // finds every version but the new one present.
-        let keys: Vec<String> = versions.iter().map(|v| v.key().to_string()).collect();
-        let present = dst.has_many(&keys)?;
-        let mut missing = Vec::new();
-        for (v, p) in versions.into_iter().zip(present) {
-            if p {
-                c.n.present += 1;
-                c.done.insert(v.key().to_string());
-            } else {
-                missing.push(v);
-            }
-        }
-        for group in missing.chunks(ROOTS_PER_ROUND) {
-            c.copy_many(group)?;
-        }
+    for group in missing.chunks(ROOTS_PER_ROUND) {
+        c.copy_many(group)?;
     }
     c.copy_root(root)
 }
@@ -270,23 +270,33 @@ pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(O
     if theirs.as_ref() == Some(&head) {
         return Ok((Outcome::UpToDate, Copied::default()));
     }
-    let mine = history::read(src, &head)?;
+    let mine = history::Stored::open(src, Some(&head))?;
     // The destination's history, read locally when the source has it (the
-    // usual push: the source fetched it before committing on top).
-    let old = match &theirs {
-        Some(t) if src.has_many(&[t.key().to_string()])?[0] => Some(history::read(src, t)?),
-        Some(t) => Some(history::read(dst, t)?),
+    // usual push: the source fetched it before committing on top). Only
+    // the leaves that differ are read.
+    let added = match &theirs {
         None => None,
+        Some(t) => {
+            let at: &dyn Store = if src.has_many(&[t.key().to_string()])?[0] { src } else { dst };
+            let c = history::Stored::open(at, Some(t))?.changed(&mine)?;
+            if c.old.iter().any(|(id, n)| c.added.get(id).is_none_or(|m| m.after != n.after)) {
+                return Err(Error::Diverged(to.to_string()));
+            }
+            Some(c)
+        }
     };
-    if let Some(o) = &old
-        && !mine.extends(o)
-    {
-        return Err(Error::Diverged(to.to_string()));
-    }
     let copied = if dst.has_many(&[head.key().to_string()])?[0] {
         Copied { present: 1, ..Copied::default() }
     } else {
-        copy_history(src, dst, &head, &mine, old.as_ref())?
+        match added {
+            // The destination holds its history whole, so the versions of
+            // nodes it shares with ours are there.
+            Some(c) => {
+                let known = c.same.iter().chain(c.old.keys()).map(|id| id.version().key().to_string()).collect();
+                copy_history(src, dst, &head, c.added.keys().map(|id| id.version()).collect(), known)?
+            }
+            None => copy(src, dst, &head)?,
+        }
     };
     let expect = match &theirs {
         Some(t) => Expect::Value(t.to_string().into_bytes()),

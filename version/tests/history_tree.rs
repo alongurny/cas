@@ -1,0 +1,176 @@
+//! The stored tree of a history (spec/formats/history-part.md).
+
+use cas_core::algo::{self, Algorithm};
+use cas_core::mem::MemBackend;
+use cas_core::{AllowAll, CoreStore, Expect, Policy, Session, Store, Who};
+use cas_version::history::{self, History, NodeId, Part, Root, Step, Stored};
+use cas_version::{View, put};
+use proptest::prelude::*;
+use std::collections::BTreeMap;
+
+fn b3() -> &'static Algorithm {
+    algo::lookup("blake3").unwrap()
+}
+
+fn store() -> Session {
+    CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive()).session(Who::anonymous())
+}
+
+fn step(i: usize) -> Step {
+    Step { changelog: Some(format!("step {i}")), compatible: i.is_multiple_of(3) }
+}
+
+/// A linear history of `n` raw versions, built in memory.
+fn linear(s: &Session, n: usize) -> History {
+    let mut h = History { doc: Some("demo".into()), ..History::default() };
+    for i in 0..n {
+        let v = put(s, b3(), "raw", format!("v{i}").as_bytes()).unwrap();
+        h.append(&v, step(i), None).unwrap();
+    }
+    h
+}
+
+/// Every part under `v`, with its level.
+fn parts(s: &Session, v: &View, out: &mut Vec<(u32, Part)>) {
+    let p = Part::decode(&s.read(v.key()).unwrap().unwrap()).unwrap();
+    if let Part::Inner { level, parts: kids } = &p {
+        for k in kids.values() {
+            parts(s, k, out);
+        }
+        out.push((*level, p));
+    } else {
+        out.push((0, p));
+    }
+}
+
+fn top(s: &Session, r: &View) -> Option<View> {
+    Root::decode(&s.read(r.key()).unwrap().unwrap()).unwrap().nodes
+}
+
+#[test]
+fn commits_one_by_one_give_the_tree_of_the_whole_history() {
+    let s = store();
+    let h = linear(&s, 5000);
+    let whole = history::write(&s, b3(), &h).unwrap();
+    for id in h.log().into_iter().rev() {
+        let n = &h.nodes[&id];
+        let st = step_of(n);
+        history::commit(&s, b3(), "main", &id.version(), st, None).unwrap();
+    }
+    // The doc differs (commit writes none); set it and compare.
+    let (old, mut built) = history::load(&s, "main").unwrap();
+    assert_eq!(built.nodes, h.nodes);
+    built.doc = h.doc.clone();
+    assert_eq!(history::save(&s, b3(), "main", old.as_ref(), &built).unwrap(), whole);
+    // 5000 nodes: leaves, inner parts at level 1, and a top at level 2.
+    let mut all = Vec::new();
+    parts(&s, &top(&s, &whole).unwrap(), &mut all);
+    let leaves = all.iter().filter(|(l, _)| *l == 0).count();
+    assert!((40..140).contains(&leaves), "{leaves} leaves");
+    assert_eq!(all.last().unwrap().0, 2);
+}
+
+fn step_of(n: &history::HistNode) -> Step {
+    n.after.values().next().cloned().unwrap_or_default()
+}
+
+/// A commit reads and writes a few parts, not the history.
+#[test]
+fn a_commit_touches_a_few_parts() {
+    let s = store();
+    let h = linear(&s, 3000);
+    let r = history::write(&s, b3(), &h).unwrap();
+    s.write("main", r.to_string().as_bytes(), &Expect::Absent).unwrap();
+    let before: usize = count(&s);
+    let v = put(&s, b3(), "raw", b"new").unwrap();
+    history::commit(&s, b3(), "main", &v, Step::default(), None).unwrap();
+    // The blob, a leaf or two, one or two inner parts, the root.
+    let written = count(&s) - before;
+    assert!(written <= 6, "{written} blobs written");
+}
+
+fn count(s: &Session) -> usize {
+    cas_core::list_all(s, &cas_core::Span::all()).unwrap().len()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(24))]
+
+    /// Any sequence of updates (adds, changes, removals) gives the tree a
+    /// whole write of the result gives, and reads back as that history.
+    #[test]
+    fn updates_agree_with_a_whole_write(
+        n in 0usize..400,
+        edits in proptest::collection::vec((0usize..600, 0u8..3), 0..60),
+    ) {
+        let s = store();
+        let mut h = History::default();
+        let ids: Vec<NodeId> = (0..600)
+            .map(|i| NodeId::of(&put(&s, b3(), "raw", format!("v{i}").as_bytes()).unwrap()))
+            .collect();
+        for id in ids.iter().take(n) {
+            h.nodes.insert(id.clone(), Default::default());
+        }
+        let mut r = history::write(&s, b3(), &h).unwrap();
+        for (i, op) in edits {
+            let id = &ids[i];
+            let change = match op {
+                0 => None,
+                1 => Some(Default::default()),
+                _ => Some(history::HistNode { doc: Some(format!("doc {i}")), ..Default::default() }),
+            };
+            match &change {
+                None => h.nodes.remove(id),
+                Some(c) => h.nodes.insert(id.clone(), c.clone()),
+            };
+            let st = Stored::open(&s, Some(&r)).unwrap();
+            let root = Root { tips: h.tips(), ..Root::default() };
+            r = st.update(b3(), root, &BTreeMap::from([(id.clone(), change)])).unwrap();
+            prop_assert_eq!(&r, &history::write(&s, b3(), &h).unwrap());
+        }
+        prop_assert_eq!(history::read(&s, &r).unwrap(), h);
+    }
+}
+
+#[test]
+fn changed_reads_only_the_differing_leaves() {
+    let s = store();
+    let mut h = linear(&s, 2000);
+    let a = history::write(&s, b3(), &h).unwrap();
+    let v = put(&s, b3(), "raw", b"extra").unwrap();
+    let id = h.append(&v, Step::default(), None).unwrap();
+    let b = history::write(&s, b3(), &h).unwrap();
+    let (old, new) = (Stored::open(&s, Some(&a)).unwrap(), Stored::open(&s, Some(&b)).unwrap());
+    let c = old.changed(&new).unwrap();
+    // The old tip gained no step, so only the new node differs.
+    assert!(c.old.is_empty(), "{:?}", c.old);
+    assert_eq!(c.added.keys().collect::<Vec<_>>(), vec![&id]);
+    assert!(!c.same.is_empty() && c.same.len() < 200);
+}
+
+#[test]
+fn a_damaged_tree_is_refused_on_a_whole_read() {
+    let s = store();
+    let h = linear(&s, 500);
+    let r = history::write(&s, b3(), &h).unwrap();
+    let root = Root::decode(&s.read(r.key()).unwrap().unwrap()).unwrap();
+    let write_root = |root: &Root| {
+        let bytes = root.encode();
+        let key = b3().key(&bytes);
+        s.write(&key, &bytes, &Expect::Absent).unwrap();
+        View::new(r.format(), &key).unwrap()
+    };
+    // Wrong tips.
+    let bad = write_root(&Root { tips: [h.log().last().unwrap().clone()].into(), ..root.clone() });
+    assert!(history::read(&s, &bad).is_err());
+    // All the nodes in one leaf: not chunked by id.
+    let one = Part::Leaf(h.nodes.clone());
+    let bytes = one.encode();
+    let key = b3().key(&bytes);
+    s.write(&key, &bytes, &Expect::Absent).unwrap();
+    let leaf = View::new(root.nodes.as_ref().unwrap().format(), &key).unwrap();
+    let bad = write_root(&Root { nodes: Some(leaf), ..root.clone() });
+    assert!(history::read(&s, &bad).is_err());
+    // The good one still reads.
+    assert_eq!(history::read(&s, &write_root(&root)).unwrap(), h);
+}

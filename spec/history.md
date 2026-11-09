@@ -7,7 +7,8 @@ what changed at each step and whether that step is a compatible upgrade,
 which versions carry which tags, and their documentation. There is no
 commit object and no parent link: a node of a history is a version.
 
-Histories are stored in `uni-bin` ([formats/uni-bin.md](formats/uni-bin.md)),
+Histories are stored as a small root over a tree of parts, each in
+`uni-bin` ([formats/uni-bin.md](formats/uni-bin.md)),
 a general data format modeled on Uniform's primitive values. A value is a
 string or a map from values to values, and the blob is its canonical
 binary serialization. The same values written as canonical text are a
@@ -53,7 +54,13 @@ owner has to accept explicitly.
 
 - `load(store, name)` and `save(store, alg, name, old, history)`, the
   compare-and-set pair; `record(store, alg, name, f)` loads, applies `f`
-  and saves.
+  and saves. These read and write the whole history.
+- `Stored::open(store, view)` reads a history's root and the parts above
+  its leaves (formats/history-part.md), and then single nodes on demand;
+  `edit(store, alg, name, f)` changes the root and a few nodes and
+  rewrites only the leaves they fall in. `commit` and tagging use it, so
+  their cost grows with the logarithm of the history, not its size, and
+  push compares two histories by the parts they share.
 - `History::add(version, after, step)` adds a node after the given
   predecessors (by default the single tip), choosing a `#n` suffix if the
   version already occurs.

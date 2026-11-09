@@ -91,19 +91,21 @@ fn push_copies_only_what_is_missing() {
         history::commit(&*src, b3(), "main", &v1, Step::default(), None).unwrap();
         let (o, n) = sync::push(&*src, &*dst, "main", "main").unwrap();
         assert_eq!(o, Outcome::Created);
-        // 100 files, 10 directories, the root, one history, and the specs and
-        // objects of the dir, raw and history formats.
-        assert_eq!(n.blobs, 100 + 10 + 1 + 1 + 6);
+        // 100 files, 10 directories, the root, a history root and its one
+        // leaf, and the specs and objects of the dir, raw, history and
+        // history-part formats.
+        assert_eq!(n.blobs, 100 + 10 + 1 + 2 + 8);
         same_tree(&*src, &*dst, &v1);
 
         assert_eq!(sync::push(&*src, &*dst, "main", "main").unwrap(), (Outcome::UpToDate, Copied::default()));
 
-        // One edit: one file, one directory, the root, one history.
+        // One edit: one file, one directory, the root, a history root and
+        // its leaf.
         let v2 = edit(&*src, &v1, "d4/f7", "changed");
         history::commit(&*src, b3(), "main", &v2, Step::default(), None).unwrap();
         let (o, n) = sync::push(&*src, &*dst, "main", "main").unwrap();
         assert_eq!(o, Outcome::FastForward);
-        assert_eq!(n.blobs, 4);
+        assert_eq!(n.blobs, 5);
         assert_eq!(history::head(&*dst, "main").unwrap(), history::head(&*src, "main").unwrap());
         assert_eq!(diff(&*dst, &v1, &v2, None).unwrap().len(), 1);
     }
@@ -231,7 +233,9 @@ fn push_of_one_commit_asks_only_about_what_is_new() {
     history::commit(&*src, b3(), "main", &v2, Step::default(), None).unwrap();
     let dst = Counting { inner, asked: AtomicUsize::new(0), reads: AtomicUsize::new(0) };
     let (o, n) = sync::push(&*src, &dst, "main", "main").unwrap();
-    assert_eq!((o, n.blobs), (Outcome::FastForward, 4));
+    // The new file, its directory and root, and of the history its root,
+    // the leaf the new node is in and the top part over the leaves.
+    assert_eq!((o, n.blobs), (Outcome::FastForward, 6));
     // The history and new version, then the new root's children level by
     // level: far fewer than the 301 versions.
     assert!(dst.asked.load(Ordering::SeqCst) < 40, "asked about {}", dst.asked.load(Ordering::SeqCst));

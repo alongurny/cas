@@ -133,12 +133,20 @@ fn histories_round_trip_and_are_content_addressed() {
     let r = history::write(&s, b3(), &h).unwrap();
     assert_eq!(history::read(&s, &r).unwrap(), h);
     assert_eq!(history::write(&s, b3(), &h).unwrap(), r);
+    // The root: doc, tags, tips and the top of the node tree, here a leaf.
     let bytes = s.read(r.key()).unwrap().unwrap();
+    let root = Value::deserialize(&bytes).unwrap();
+    let top = root.as_map().unwrap()[&Value::str("nodes")].as_str().unwrap().to_string();
     assert_eq!(
-        Value::deserialize(&bytes).unwrap().to_text(),
+        root.to_text(),
+        // Keys sort by their serialization: shorter first.
+        format!("{{'doc': 'demo', 'tags': {{'v1': '{n1}'}}, 'tips': {{'{n2}': {{}}}}, 'nodes': '{top}'}}")
+    );
+    let leaf = s.read(View::parse(&top).unwrap().key()).unwrap().unwrap();
+    assert_eq!(
+        Value::deserialize(&leaf).unwrap().to_text(),
         format!(
-            // Keys sort by their serialization: shorter first.
-            "{{'doc': 'demo', 'tags': {{'v1': '{n1}'}}, 'nodes': {{'{n1}': {{'doc': 'first'}}, '{n2}': {{'after': {{'{n1}': {{'changelog': 'rename', 'compatible': {{}}}}}}}}}}}}"
+            "{{'nodes': {{'{n1}': {{'doc': 'first'}}, '{n2}': {{'after': {{'{n1}': {{'changelog': 'rename', 'compatible': {{}}}}}}}}}}}}"
         )
     );
     // A node is its version: nothing about the history is in it.

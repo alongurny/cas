@@ -171,9 +171,9 @@ pub fn path_log(store: &dyn Store, h: &History, path: &Path) -> Result<Vec<NodeI
     Ok(out)
 }
 
-/// `heads` (spec/functions/heads.md): a history's tips, with the nodes each
-/// follows, and its tags. What most commands need, without the whole
-/// history.
+/// A history's tips, with the nodes each follows, and its tags: what most
+/// commands need. The history's root holds the tips and tags, so this
+/// reads the root, the parts above the leaves and one leaf per tip.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Heads {
     pub tips: std::collections::BTreeMap<NodeId, Vec<NodeId>>,
@@ -200,76 +200,17 @@ impl Heads {
         }
         self.tips.keys().find(|t| t.as_str() == what).cloned()
     }
-
-    fn to_value(&self) -> Value {
-        let mut top = std::collections::BTreeMap::new();
-        if !self.tags.is_empty() {
-            let tags = self.tags.iter().map(|(t, n)| (Value::str(t), Value::str(n.as_str())));
-            top.insert(Value::str("tags"), Value::Map(tags.collect()));
-        }
-        if !self.tips.is_empty() {
-            let tips = self.tips.iter().map(|(t, after)| {
-                (Value::str(t.as_str()), Value::map(after.iter().map(|p| (Value::str(p.as_str()), Value::empty()))))
-            });
-            top.insert(Value::str("tips"), Value::Map(tips.collect()));
-        }
-        Value::Map(top)
-    }
-
-    fn from_value(v: &Value) -> std::result::Result<Heads, String> {
-        let top = v.as_map().ok_or("heads is not a map")?;
-        let entries = |field: &str| -> std::result::Result<Vec<(&str, &Value)>, String> {
-            match top.get(&Value::str(field)) {
-                None => Ok(Vec::new()),
-                Some(m) => m
-                    .as_map()
-                    .ok_or(format!("{field} is not a map"))?
-                    .iter()
-                    .map(|(k, v)| Ok((k.as_str().ok_or(format!("{field} has a map key"))?, v)))
-                    .collect(),
-            }
-        };
-        let mut h = Heads::default();
-        for (t, n) in entries("tags")? {
-            h.tags.insert(t.to_string(), NodeId::parse(n.as_str().ok_or("a tag names a node id")?)?);
-        }
-        for (t, after) in entries("tips")? {
-            let after = after.as_map().ok_or("a tip's predecessors are not a map")?;
-            let after = after
-                .keys()
-                .map(|p| NodeId::parse(p.as_str().ok_or("a predecessor is a map")?))
-                .collect::<std::result::Result<_, _>>()?;
-            h.tips.insert(NodeId::parse(t)?, after);
-        }
-        Ok(h)
-    }
 }
 
-fn heads_value(store: &dyn Store, _: &'static Algorithm, input: &View) -> Result<Vec<u8>> {
-    Ok(Heads::of(&crate::history::read(store, input)?).to_value().serialize())
-}
-
-pub static HEADS: Function = Function {
-    name: "heads",
-    input: "history",
-    output: "uni-bin",
-    spec: include_str!("../../spec/functions/heads.md"),
-    compute: heads_value,
-};
-
-/// The heads of the history at `input`: from the cache when it holds them,
-/// else computed from the history and recorded for the next reader. A
-/// store that refuses the record (a read-only remote) still gets an answer.
-pub fn heads(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<Heads> {
-    let parse = |r: &View| Heads::from_value(&value(store, r)?).map_err(|e| malformed(r.key(), e));
-    if let Some(r) = readable_cache(store, &HEADS, input)? {
-        return parse(&r);
+/// The heads of the history at `input`.
+pub fn heads(store: &dyn Store, input: &View) -> Result<Heads> {
+    let st = crate::history::Stored::open(store, Some(input))?;
+    let mut tips = std::collections::BTreeMap::new();
+    for t in &st.root.tips {
+        let n = st.get(t)?.ok_or_else(|| malformed(input.key(), format!("tip {t} is not a node")))?;
+        tips.insert(t.clone(), n.after.into_keys().collect());
     }
-    match derive(store, alg, &HEADS, input) {
-        Ok(r) => parse(&r),
-        Err(Error::Store(CoreError::Denied)) => Ok(Heads::of(&crate::history::read(store, input)?)),
-        Err(e) => Err(e),
-    }
+    Ok(Heads { tips, tags: st.root.tags.clone() })
 }
 
 /// Record `bytes` as `f(input)`, computed by the caller. Best effort: a
@@ -278,10 +219,4 @@ pub fn record(store: &dyn Store, alg: &'static Algorithm, f: &Function, input: &
     let Ok(key) = write_blob(store, alg, bytes) else { return };
     let result = View { format: by_alias(f.output).unwrap().id().to_string(), key };
     let _ = store.write(&f.var(input), result.to_string().as_bytes(), &Expect::Absent);
-}
-
-/// Record the heads of `h`, just written at `input`, so readers need not
-/// parse it.
-pub fn record_heads(store: &dyn Store, alg: &'static Algorithm, input: &View, h: &History) {
-    record(store, alg, &HEADS, input, &Heads::of(h).to_value().serialize());
 }

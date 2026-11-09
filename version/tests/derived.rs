@@ -145,11 +145,11 @@ fn path_log() {
     let _ = (m, View::parse);
 }
 
-/// Saving a history records its heads, which answer `latest`, tags and the
-/// step into a tip without the history.
+/// The heads, from the history's root, answer `latest`, tags and the step
+/// into a tip without the whole history.
 #[test]
-fn heads_are_recorded_and_answer_without_the_history() {
-    use cas_version::derived::{HEADS, Heads, heads};
+fn heads_answer_without_the_history() {
+    use cas_version::derived::{Heads, heads};
     let s = store();
     let v1 = put(&s, b3(), "raw", b"one").unwrap();
     let v2 = put(&s, b3(), "raw", b"two").unwrap();
@@ -161,8 +161,7 @@ fn heads_are_recorded_and_answer_without_the_history() {
     })
     .unwrap();
     let head = cas_version::history::head(&s, "main").unwrap().unwrap();
-    assert!(derived::cached(&s, &HEADS, &head).unwrap().is_some(), "recorded on save");
-    let hd = heads(&s, b3(), &head).unwrap();
+    let hd = heads(&s, &head).unwrap();
     assert_eq!(hd, Heads::of(&cas_version::history::read(&s, &head).unwrap()));
     assert_eq!(hd.resolve("latest"), Some(b.clone()));
     assert_eq!(hd.resolve("first"), Some(a.clone()));

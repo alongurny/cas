@@ -222,14 +222,23 @@ fn run(a: Args) -> Res<()> {
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     let name = a.history.as_str();
     let step = Step { changelog: a.message.clone(), compatible: a.compatible };
-    // The node -n names: from the history's heads when they answer, which
-    // spares reading the whole history.
+    // The node -n names: a tag, `latest` or a node id is found from the
+    // history's root and one leaf; only a key prefix needs every node.
     let at = || -> Res<NodeId> {
         let Some(v) = history::head(s, name).map_err(e)? else { return Err(format!("no history {name}")) };
-        match derived::heads(s, b3(), &v).map_err(e)?.resolve(&a.node) {
-            Some(id) => Ok(id),
-            None => node(&history::read(s, &v).map_err(e)?, &a.node, name),
+        let st = history::Stored::open(s, Some(&v)).map_err(e)?;
+        if let Some(id) = st.root.tags.get(&a.node) {
+            return Ok(id.clone());
         }
+        if a.node == "latest" && st.root.tips.len() == 1 {
+            return Ok(st.root.tips.first().unwrap().clone());
+        }
+        if let Ok(id) = NodeId::parse(&a.node)
+            && st.contains(&id).map_err(e)?
+        {
+            return Ok(id);
+        }
+        node(&st.read_all().map_err(e)?, &a.node, name)
     };
     match a.rest.first().map(String::as_str) {
         Some("commit") => {
@@ -297,7 +306,7 @@ fn run(a: Args) -> Res<()> {
             // From the graph when one is cached (path-log builds it), which
             // spares parsing the whole history.
             let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
-            let heads = derived::heads(s, b3(), &v).map_err(e)?;
+            let heads = derived::heads(s, &v).map_err(e)?;
             let g = graph::graph_or_order(s, &v).map_err(e)?;
             let mut tags: BTreeMap<&NodeId, Vec<&str>> = BTreeMap::new();
             for (t, n) in &heads.tags {
@@ -322,10 +331,8 @@ fn run(a: Args) -> Res<()> {
         Some("diff") => {
             let id = at()?;
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
-            let preds = match derived::heads(s, b3(), &v).map_err(e)?.tips.remove(&id) {
-                Some(p) => p,
-                None => history::read(s, &v).map_err(e)?.nodes[&id].after.keys().cloned().collect(),
-            };
+            let st = history::Stored::open(s, Some(&v)).map_err(e)?;
+            let preds: Vec<NodeId> = st.get(&id).map_err(e)?.map(|n| n.after.into_keys().collect()).unwrap_or_default();
             let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
             for c in diff(s, &pred.version(), &id.version(), None).map_err(e)? {
                 out!("{:8} -> {:8} {}", node_text(&c.old), node_text(&c.new), c.path);
@@ -360,10 +367,10 @@ fn run(a: Args) -> Res<()> {
         }
         Some("tag") => {
             let t = arg(1, "NAME")?;
-            history::record(s, b3(), name, |h| {
-                let id = h.resolve(&a.node).ok_or(cas_version::Error::Missing(format!("node {}", a.node)))?;
-                h.tags.insert(t.clone(), id);
-                Ok(())
+            let id = at()?;
+            history::edit(s, b3(), name, |_, root| {
+                root.tags.insert(t.clone(), id.clone());
+                Ok((BTreeMap::new(), ()))
             })
             .map_err(e)?;
         }

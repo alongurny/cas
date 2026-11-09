@@ -4,7 +4,7 @@
 //! store name (a mutable, compare-and-set value) points at the current one.
 
 use crate::uni::{Cursor, Value};
-use crate::{Error, Result, View, by_alias, malformed, read_blob, write_blob};
+use crate::{Error, Result, View, malformed};
 use cas_core::algo::Algorithm;
 use cas_core::{Error as CoreError, Expect, Store};
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,15 +64,67 @@ pub struct HistNode {
     pub doc: Option<String>,
 }
 
+impl HistNode {
+    pub(crate) fn to_value(&self) -> Value {
+        let mut m = BTreeMap::new();
+        opt_str(&mut m, "doc", &self.doc);
+        if !self.after.is_empty() {
+            let after = self.after.iter().map(|(p, s)| {
+                let mut sm = BTreeMap::new();
+                opt_str(&mut sm, "changelog", &s.changelog);
+                if s.compatible {
+                    sm.insert(Value::str("compatible"), Value::empty());
+                }
+                (Value::str(p.as_str()), Value::Map(sm))
+            });
+            m.insert(Value::str("after"), Value::Map(after.collect()));
+        }
+        Value::Map(m)
+    }
+
+    /// A node read straight from serialized bytes.
+    pub(crate) fn read(c: &mut Cursor) -> std::result::Result<HistNode, String> {
+        let mut node = HistNode::default();
+        let mut f = c.map().map_err(|_| "a node is not a map")?;
+        while let Some(k) = c.key(&mut f, "a node")? {
+            match k {
+                "doc" => node.doc = Some(c.str().map_err(|_| "node doc is not a string")?.to_string()),
+                "after" => {
+                    let mut after = c.map().map_err(|_| "after is not a map")?;
+                    while let Some(p) = c.key(&mut after, "after")? {
+                        let p = NodeId::parse(p)?;
+                        let mut step = Step::default();
+                        let mut sf = c.map().map_err(|_| "a step is not a map")?;
+                        while let Some(k) = c.key(&mut sf, "a step")? {
+                            match k {
+                                "changelog" => {
+                                    step.changelog = Some(c.str().map_err(|_| "changelog is not a string")?.to_string())
+                                }
+                                "compatible" => {
+                                    let mut m = c.map().map_err(|_| "compatible is {} when present")?;
+                                    if c.key(&mut m, "compatible").is_ok_and(|k| k.is_some()) {
+                                        return Err("compatible is {} when present".into());
+                                    }
+                                    step.compatible = true;
+                                }
+                                k => return Err(format!("a step has unknown key {k:?}")),
+                            }
+                        }
+                        node.after.insert(p, step);
+                    }
+                }
+                k => return Err(format!("a node has unknown key {k:?}")),
+            }
+        }
+        Ok(node)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct History {
     pub doc: Option<String>,
     pub nodes: BTreeMap<NodeId, HistNode>,
     pub tags: BTreeMap<String, NodeId>,
-}
-
-fn history_format() -> &'static str {
-    by_alias("history").unwrap().id()
 }
 
 fn opt_str(m: &mut BTreeMap<Value, Value>, k: &str, v: &Option<String>) {
@@ -104,22 +156,7 @@ impl History {
         let mut top = BTreeMap::new();
         opt_str(&mut top, "doc", &self.doc);
         if !self.nodes.is_empty() {
-            let nodes = self.nodes.iter().map(|(id, n)| {
-                let mut m = BTreeMap::new();
-                opt_str(&mut m, "doc", &n.doc);
-                if !n.after.is_empty() {
-                    let after = n.after.iter().map(|(p, s)| {
-                        let mut sm = BTreeMap::new();
-                        opt_str(&mut sm, "changelog", &s.changelog);
-                        if s.compatible {
-                            sm.insert(Value::str("compatible"), Value::empty());
-                        }
-                        (Value::str(p.as_str()), Value::Map(sm))
-                    });
-                    m.insert(Value::str("after"), Value::Map(after.collect()));
-                }
-                (Value::str(id.as_str()), Value::Map(m))
-            });
+            let nodes = self.nodes.iter().map(|(id, n)| (Value::str(id.as_str()), n.to_value()));
             top.insert(Value::str("nodes"), Value::Map(nodes.collect()));
         }
         if !self.tags.is_empty() {
@@ -157,7 +194,7 @@ impl History {
             let n = NodeId::parse(n.as_str().ok_or("a tag names a node id")?)?;
             h.tags.insert(t, n);
         }
-        h.validate()?;
+        h.check()?;
         Ok(h)
     }
 
@@ -175,40 +212,7 @@ impl History {
                     let mut nodes = c.map().map_err(|_| "nodes is not a map")?;
                     while let Some(id) = c.key(&mut nodes, "nodes")? {
                         let id = NodeId::parse(id)?;
-                        let mut node = HistNode::default();
-                        let mut f = c.map().map_err(|_| "a node is not a map")?;
-                        while let Some(k) = c.key(&mut f, "a node")? {
-                            match k {
-                                "doc" => node.doc = Some(c.str().map_err(|_| "node doc is not a string")?.to_string()),
-                                "after" => {
-                                    let mut after = c.map().map_err(|_| "after is not a map")?;
-                                    while let Some(p) = c.key(&mut after, "after")? {
-                                        let p = NodeId::parse(p)?;
-                                        let mut step = Step::default();
-                                        let mut sf = c.map().map_err(|_| "a step is not a map")?;
-                                        while let Some(k) = c.key(&mut sf, "a step")? {
-                                            match k {
-                                                "changelog" => {
-                                                    step.changelog = Some(
-                                                        c.str().map_err(|_| "changelog is not a string")?.to_string(),
-                                                    )
-                                                }
-                                                "compatible" => {
-                                                    let mut m = c.map().map_err(|_| "compatible is {} when present")?;
-                                                    if c.key(&mut m, "compatible").is_ok_and(|k| k.is_some()) {
-                                                        return Err("compatible is {} when present".into());
-                                                    }
-                                                    step.compatible = true;
-                                                }
-                                                k => return Err(format!("a step has unknown key {k:?}")),
-                                            }
-                                        }
-                                        node.after.insert(p, step);
-                                    }
-                                }
-                                k => return Err(format!("a node has unknown key {k:?}")),
-                            }
-                        }
+                        let node = HistNode::read(&mut c)?;
                         h.nodes.insert(id, node);
                     }
                 }
@@ -226,11 +230,11 @@ impl History {
             }
         }
         c.done()?;
-        h.validate()?;
+        h.check()?;
         Ok(h)
     }
 
-    fn validate(&self) -> std::result::Result<(), String> {
+    pub(crate) fn check(&self) -> std::result::Result<(), String> {
         for (id, n) in &self.nodes {
             if let Some(p) = n.after.keys().find(|p| !self.nodes.contains_key(*p)) {
                 return Err(format!("{id} follows {p}, which is not a node"));
@@ -396,26 +400,16 @@ impl History {
     }
 }
 
-/// Check the bytes of a `history` blob.
-pub(crate) fn check(bytes: &[u8]) -> std::result::Result<(), String> {
-    History::decode(bytes).map(|_| ())
-}
+pub use crate::htree::{Changed, Part, Root, Stored, height};
 
+/// Write `h` whole: its root and every part the store lacks.
 pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<View> {
-    let key = write_blob(store, alg, &h.to_value().serialize())?;
-    Ok(View { format: history_format().to_string(), key })
+    crate::htree::write(store, alg, h)
 }
 
+/// Read the whole history at `r`, checking every part.
 pub fn read(store: &dyn Store, r: &View) -> Result<History> {
-    if r.format() != history_format() {
-        return Err(Error::UnknownFormat(format!("{} is not the history format", r.format())));
-    }
-    parse(r.key(), &read_blob(store, r.key())?)
-}
-
-/// The history in `bytes`, the value of blob `key`.
-pub fn parse(key: &str, bytes: &[u8]) -> Result<History> {
-    History::decode(bytes).map_err(|e| malformed(key, e))
+    Stored::open(store, Some(r))?.read_all()
 }
 
 /// The history object `name` points at, if `name` is set.
@@ -441,7 +435,6 @@ pub fn load(store: &dyn Store, name: &str) -> Result<(Option<View>, History)> {
 /// Write `h` and move `name` to it, only if `name` still holds `old`.
 pub fn save(store: &dyn Store, alg: &'static Algorithm, name: &str, old: Option<&View>, h: &History) -> Result<View> {
     let new = write(store, alg, h)?;
-    crate::derived::record_heads(store, alg, &new, h);
     if let Some(o) = old {
         crate::graph::record_after_save(store, alg, o, &new);
     }
@@ -469,7 +462,39 @@ pub fn record<T>(
     }
 }
 
-/// Append `version` to history `name` after its tip.
+/// Change history `name` without reading all of it: `f` gets the stored
+/// history and a copy of its root, edits the root's doc, tags and tips,
+/// and returns the nodes to add, change or (`None`) remove. Only the leaves
+/// those fall in are rewritten. Retried while other writers win the race.
+/// `f` must keep the tips right; a whole read checks them.
+pub fn edit<T>(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    name: &str,
+    mut f: impl FnMut(&Stored, &mut Root) -> Result<(BTreeMap<NodeId, Option<HistNode>>, T)>,
+) -> Result<(View, T)> {
+    loop {
+        let old = head(store, name)?;
+        let st = Stored::open(store, old.as_ref())?;
+        let mut root = st.root.clone();
+        let (changes, out) = f(&st, &mut root)?;
+        let new = st.update(alg, root, &changes)?;
+        if let Some(o) = &old {
+            crate::graph::record_after_save(store, alg, o, &new);
+        }
+        if old.as_ref() == Some(&new) {
+            return Ok((new, out));
+        }
+        let expect = old.as_ref().map_or(Expect::Absent, |r| Expect::Value(r.to_string().into_bytes()));
+        match store.write(name, new.to_string().as_bytes(), &expect) {
+            Err(CoreError::Conflict) => continue,
+            r => return r.map(|_| (new, out)).map_err(Error::from),
+        }
+    }
+}
+
+/// Append `version` to history `name` after its tip. Only the leaf the
+/// new node goes into is read and rewritten, with the parts above it.
 pub fn commit(
     store: &dyn Store,
     alg: &'static Algorithm,
@@ -478,5 +503,18 @@ pub fn commit(
     step: Step,
     doc: Option<String>,
 ) -> Result<NodeId> {
-    record(store, alg, name, |h| h.append(version, step.clone(), doc.clone())).map(|(_, id)| id)
+    edit(store, alg, name, |st, root| {
+        let after = match (root.nodes.is_none(), root.tips.len()) {
+            (true, _) => BTreeMap::new(),
+            (false, 1) => BTreeMap::from([(root.tips.first().unwrap().clone(), step.clone())]),
+            _ => return Err(Error::Diverged("the history has several tips; merge them first".into())),
+        };
+        let id = st.new_id(version)?;
+        for p in after.keys() {
+            root.tips.remove(p);
+        }
+        root.tips.insert(id.clone());
+        Ok((BTreeMap::from([(id.clone(), Some(HistNode { after, doc: doc.clone() }))]), id))
+    })
+    .map(|(_, id)| id)
 }

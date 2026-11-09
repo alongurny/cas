@@ -281,8 +281,9 @@ for both tools. Results are recorded per corpus:
 
 - 2026-11-08, step 3 begun, on git.git (82,725 nodes), each command was
   2 s: the whole history was parsed for the tip. Now:
-  - The function `heads` (spec/functions/heads.md): tips, the nodes each
-    follows, and tags, recorded whenever a history is saved. `ls`, `diff`,
+  - The function `heads`: tips, the nodes each follows, and tags,
+    recorded whenever a history is saved (since replaced by the tips and
+    tags in the history's root, 2026-11-09). `ls`, `diff`,
     `checkout` and `summary` resolve `-n` through it and fall back to the
     whole history only for other nodes.
   - Pack indexes are sorted tables searched in place (`CASIDX02`), as in
