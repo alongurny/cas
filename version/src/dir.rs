@@ -42,7 +42,7 @@ const BITS: u32 = 6;
 pub fn height(name: &str) -> u32 {
     // Names repeat across the versions of a directory: remember them.
     thread_local! {
-        static SEEN: std::cell::RefCell<std::collections::HashMap<Box<str>, u32>> = Default::default();
+        static SEEN: std::cell::RefCell<std::collections::HashMap<Box<str>, u32, cas_core::keyhash::KeyState>> = Default::default();
     }
     if let Some(h) = SEEN.with(|m| m.borrow().get(name).copied()) {
         return h;
@@ -492,11 +492,14 @@ fn get_key(r: &mut Reader, algs: &[&'static Algorithm], used: &mut [bool]) -> st
     let a = *algs.get(i).ok_or("algorithm index out of range")?;
     used[i] = true;
     let d = r.take(a.digest_len)?;
-    let mut s = Vec::with_capacity(a.name.len() + 1 + 2 * d.len());
-    s.extend_from_slice(a.name.as_bytes());
-    s.push(b':');
-    hex_into(&mut s, d);
-    String::from_utf8(s).map_err(|_| "algorithm name is not UTF-8".into())
+    let mut s = String::with_capacity(a.name.len() + 1 + 2 * d.len());
+    s.push_str(a.name);
+    s.push(':');
+    for &b in d {
+        s.push(char::from(HEX[usize::from(b >> 4)]));
+        s.push(char::from(HEX[usize::from(b & 15)]));
+    }
+    Ok(s)
 }
 
 fn put_name(out: &mut Vec<u8>, prev: &str, name: &str) {

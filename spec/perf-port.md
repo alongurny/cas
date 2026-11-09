@@ -180,6 +180,13 @@ a failing setup step shows as FAIL.
   value whole and as a delta and kept the smaller. A delta under 1/16 of
   the value is now kept without the whole try. git.git import CPU 125 ->
   97 s, wall 111 -> 101 s; the pack is the same size to the byte.
+- **Small commands:** a history opens with its root only; the parts above
+  the leaves are read when a command first needs them (ls and checkout
+  never do). Key syntax is checked by a byte-class table, output lines are
+  written without an intermediate string, and diff opens its history once.
+  git.git instructions: ls 77M -> 53M, diff 38M -> 25M; wall ls 12.5 ms
+  (git 5.1), diff 6.2 ms (git 3.2), merge-base 12 ms (git 9; the ancestry
+  blob's decompression, hash check and validation are most of it).
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
   (git's 423k objects); import (101 s) is slower than fast-import (82-93 s)
   but not than fast-export plus fast-import (~100-110 s).

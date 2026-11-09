@@ -10,15 +10,35 @@ pub enum Parsed<'a> {
 
 /// Classify `key`, or `None` when it breaks the key byte rules or the blob
 /// grammar. Digest length is checked later, once the algorithm is known.
+const ALG: u8 = 1;
+const HEX: u8 = 2;
+/// Byte classes: ALG for `[a-z0-9-]`, HEX for `[0-9a-f]`.
+static CLASS: [u8; 256] = {
+    let mut t = [0u8; 256];
+    let mut c = 0;
+    while c < 256 {
+        let b = c as u8;
+        if b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' {
+            t[c] |= ALG;
+        }
+        if b.is_ascii_digit() || (b >= b'a' && b <= b'f') {
+            t[c] |= HEX;
+        }
+        c += 1;
+    }
+    t
+};
+
 pub fn classify(key: &str) -> Option<Parsed<'_>> {
     // Fast path, one pass: `alg:hex` with a valid algorithm name, which is
     // every blob key. Such a key has no control byte and no `/` before its
     // first colon, so the full rules below would agree.
     let b = key.as_bytes();
-    let alg_len = b.iter().take(33).take_while(|c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'-')).count();
+    let alg_len = b.iter().take(33).take_while(|&&c| CLASS[usize::from(c)] & ALG != 0).count();
     if (1..=32).contains(&alg_len) && b.get(alg_len) == Some(&b':') {
         let d = &b[alg_len + 1..];
-        if !d.is_empty() && d.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+        // A table and no early exit: keys are nearly always valid.
+        if !d.is_empty() && d.iter().fold(HEX, |m, &c| m & CLASS[usize::from(c)]) != 0 {
             return Some(Parsed::Blob { alg: &key[..alg_len], digest_hex: &key[alg_len + 1..] });
         }
     }

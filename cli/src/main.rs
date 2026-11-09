@@ -37,8 +37,7 @@ thread_local! {
 macro_rules! out {
     ($($t:tt)*) => {{
         use std::io::Write;
-        let line = format!($($t)*);
-        if OUT.with(|o| writeln!(o.borrow_mut(), "{line}")).is_err() {
+        if OUT.with(|o| writeln!(o.borrow_mut(), $($t)*)).is_err() {
             std::process::exit(0);
         }
     }};
@@ -274,11 +273,11 @@ fn node(h: &History, what: &str, name: &str) -> Res<NodeId> {
     h.resolve(what).ok_or(format!("no node {what} in history {name}"))
 }
 
-fn node_text(n: &Option<Node>) -> String {
+fn node_text(n: &Option<Node>) -> &'static str {
     match n {
-        None => "-".into(),
-        Some(Node::Dir) => "dir".into(),
-        Some(Node::File(r)) => r.known_format().map_or("?", |f| f.alias).to_string(),
+        None => "-",
+        Some(Node::Dir) => "dir",
+        Some(Node::File(r)) => r.known_format().map_or("?", |f| f.alias),
     }
 }
 
@@ -420,9 +419,9 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some("diff") => {
-            let id = at()?;
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
+            let id = find_node(&st, &a.node, name)?;
             let preds: Vec<NodeId> = st.get(&id).map_err(e)?.map(|n| n.after.into_keys().collect()).unwrap_or_default();
             let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
             for c in diff(s, &pred.version(), &id.version(), None).map_err(e)? {
@@ -446,7 +445,8 @@ fn run(a: Args) -> Res<()> {
         }
         Some("summary") => {
             let r = derived::derive(s, b3(), &SUMMARY, &at()?.version()).map_err(e)?;
-            out!("{}", derived::value(s, &r).map_err(e)?);
+            let v = derived::value(s, &r).map_err(e)?;
+            out!("{v}");
         }
         Some("path-log") => {
             let p = Path::new(arg(1, "PATH")?).map_err(e)?;

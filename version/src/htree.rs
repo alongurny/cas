@@ -454,25 +454,42 @@ pub struct Changed {
 }
 
 /// A stored history opened for reading single nodes and for small updates:
-/// the root and the parts above the leaves are read, the leaves when asked.
+/// the root is read at once, the parts above the leaves when first needed
+/// (a command that wants only the tips reads no part), the leaves when
+/// asked.
 pub struct Stored<'s> {
     store: &'s dyn Store,
     pub root: Root,
     /// The leaves in order, each by its last node id.
-    leaves: Vec<(NodeId, View)>,
+    leaf_list: std::sync::OnceLock<Vec<(NodeId, View)>>,
     cache: Mutex<HashMap<String, Leaf>>,
 }
 
 impl<'s> Stored<'s> {
     /// Open the history at `r` (`None`: the empty history).
     pub fn open(store: &'s dyn Store, r: Option<&View>) -> Result<Stored<'s>> {
-        let mut s = Stored { store, root: Root::default(), leaves: Vec::new(), cache: Mutex::new(HashMap::new()) };
+        let mut s = Stored { store, root: Root::default(), leaf_list: Default::default(), cache: Default::default() };
         let Some(r) = r else { return Ok(s) };
         if r.format() != root_format() {
             return Err(Error::UnknownFormat(format!("{} is not the history format", r.format())));
         }
         s.root = Root::decode(&read_blob(store, r.key())?).map_err(|e| malformed(r.key(), e))?;
-        let Some(top) = s.root.nodes.clone() else { return Ok(s) };
+        Ok(s)
+    }
+
+    /// The leaves in order, each by its last node id: the parts above them
+    /// are read and checked on the first call.
+    fn leaves(&self) -> Result<&[(NodeId, View)]> {
+        if let Some(l) = self.leaf_list.get() {
+            return Ok(l);
+        }
+        let l = self.read_upper()?;
+        Ok(self.leaf_list.get_or_init(|| l))
+    }
+
+    fn read_upper(&self) -> Result<Vec<(NodeId, View)>> {
+        let store = self.store;
+        let Some(top) = self.root.nodes.clone() else { return Ok(Vec::new()) };
         let part = read_parts(store, &[&top])?.pop().unwrap();
         part.check_place(None, true).map_err(|e| malformed(top.key(), e))?;
         if let Part::Inner { parts, .. } = &part
@@ -487,9 +504,8 @@ impl<'s> Stored<'s> {
             if l == 0 {
                 let (last, view, part) = level.pop().unwrap();
                 let Part::Leaf(n) = part else { unreachable!() };
-                s.cache.lock().unwrap().insert(view.key().to_string(), Arc::new(n));
-                s.leaves = vec![(last, view)];
-                return Ok(s);
+                self.cache.lock().unwrap().insert(view.key().to_string(), Arc::new(n));
+                return Ok(vec![(last, view)]);
             }
             let children: Vec<(NodeId, View)> = level
                 .iter()
@@ -499,8 +515,7 @@ impl<'s> Stored<'s> {
                 })
                 .collect();
             if l == 1 {
-                s.leaves = children;
-                return Ok(s);
+                return Ok(children);
             }
             let views: Vec<&View> = children.iter().map(|(_, v)| v).collect();
             let parts = read_parts(store, &views)?;
@@ -520,12 +535,12 @@ impl<'s> Stored<'s> {
     }
 
     /// The number of leaves.
-    pub fn leaf_count(&self) -> usize {
-        self.leaves.len()
+    pub fn leaf_count(&self) -> Result<usize> {
+        Ok(self.leaves()?.len())
     }
 
     fn leaf(&self, i: usize) -> Result<Leaf> {
-        let (key, view) = &self.leaves[i];
+        let (key, view) = &self.leaves()?[i];
         if let Some(l) = self.cache.lock().unwrap().get(view.key()) {
             return Ok(l.clone());
         }
@@ -542,11 +557,12 @@ impl<'s> Stored<'s> {
 
     /// The nodes of a leaf read for position `i`, checked to be in place.
     fn checked_leaf(&self, i: usize, key: &NodeId, view: &View, part: Part) -> Result<BTreeMap<NodeId, Entry>> {
-        let prev = i.checked_sub(1).map(|j| &self.leaves[j].0);
+        let leaves = self.leaves()?;
+        let prev = i.checked_sub(1).map(|j| &leaves[j].0);
         if part.level() != 0 || part.last() != key {
             return Err(malformed(view.key(), "a part is not where its parent says"));
         }
-        part.check_place(prev, i + 1 == self.leaves.len()).map_err(|e| malformed(view.key(), e))?;
+        part.check_place(prev, i + 1 == self.leaves()?.len()).map_err(|e| malformed(view.key(), e))?;
         let Part::Leaf(n) = part else { unreachable!() };
         Ok(n)
     }
@@ -560,12 +576,12 @@ impl<'s> Stored<'s> {
     pub fn read_log(&self) -> Result<Vec<LogRecord>> {
         let key = self.root.nodes.as_ref().map_or("", |v| v.key()).to_string();
         let bad = |e: String| malformed(&key, e);
-        let views: Vec<&View> = self.leaves.iter().map(|(_, v)| v).collect();
+        let views: Vec<&View> = self.leaves()?.iter().map(|(_, v)| v).collect();
         let parts = read_parts(self.store, &views)?;
         let mut ids: Vec<NodeId> = Vec::new();
         let mut entries: Vec<Entry> = Vec::new();
         for (i, part) in parts.into_iter().enumerate() {
-            let (k, view) = &self.leaves[i];
+            let (k, view) = &self.leaves()?[i];
             for (id, e) in self.checked_leaf(i, k, view, part)? {
                 ids.push(id);
                 entries.push(e);
@@ -647,13 +663,14 @@ impl<'s> Stored<'s> {
     }
 
     /// The leaf that holds `id` if any node does.
-    fn leaf_of(&self, id: &NodeId) -> Option<usize> {
-        let i = self.leaves.partition_point(|(k, _)| k < id);
-        (i < self.leaves.len()).then_some(i)
+    fn leaf_of(&self, id: &NodeId) -> Result<Option<usize>> {
+        let leaves = self.leaves()?;
+        let i = leaves.partition_point(|(k, _)| k < id);
+        Ok((i < leaves.len()).then_some(i))
     }
 
     pub fn get(&self, id: &NodeId) -> Result<Option<HistNode>> {
-        match self.leaf_of(id) {
+        match self.leaf_of(id)? {
             None => Ok(None),
             Some(i) => Ok(self.leaf(i)?.get(id).map(|e| e.node.clone())),
         }
@@ -665,7 +682,7 @@ impl<'s> Stored<'s> {
     pub fn with_key_prefix(&self, format: &str, prefix: &str, limit: usize) -> Result<Vec<NodeId>> {
         let lo = format!("{format} {prefix}");
         let mut out = Vec::new();
-        let Some(mut i) = self.leaf_of_str(&lo) else { return Ok(out) };
+        let Some(mut i) = self.leaf_of_str(&lo)? else { return Ok(out) };
         loop {
             let leaf = self.leaf(i)?;
             for id in leaf.keys().filter(|id| id.as_str() >= lo.as_str()) {
@@ -675,20 +692,21 @@ impl<'s> Stored<'s> {
                 out.push(id.clone());
             }
             i += 1;
-            if i == self.leaves.len() {
+            if i == self.leaves()?.len() {
                 return Ok(out);
             }
         }
     }
 
-    fn leaf_of_str(&self, id: &str) -> Option<usize> {
-        let i = self.leaves.partition_point(|(k, _)| k.as_str() < id);
-        (i < self.leaves.len()).then_some(i)
+    fn leaf_of_str(&self, id: &str) -> Result<Option<usize>> {
+        let leaves = self.leaves()?;
+        let i = leaves.partition_point(|(k, _)| k.as_str() < id);
+        Ok((i < leaves.len()).then_some(i))
     }
 
     /// A node with its generation.
     pub fn entry(&self, id: &NodeId) -> Result<Option<Entry>> {
-        match self.leaf_of(id) {
+        match self.leaf_of(id)? {
             None => Ok(None),
             Some(i) => Ok(self.leaf(i)?.get(id).cloned()),
         }
@@ -729,15 +747,18 @@ impl<'s> Stored<'s> {
     /// Every leaf's nodes, in order.
     fn all_leaves(&self) -> Result<Vec<Leaf>> {
         let cached: Vec<Option<Leaf>> = {
+            // The leaves first: listing them may fill the cache.
+            let leaves = self.leaves()?;
             let c = self.cache.lock().unwrap();
-            self.leaves.iter().map(|(_, v)| c.get(v.key()).cloned()).collect()
+            leaves.iter().map(|(_, v)| c.get(v.key()).cloned()).collect()
         };
-        let todo: Vec<usize> = (0..self.leaves.len()).filter(|&i| cached[i].is_none()).collect();
-        let views: Vec<&View> = todo.iter().map(|&i| &self.leaves[i].1).collect();
+        let todo: Vec<usize> = (0..self.leaves()?.len()).filter(|&i| cached[i].is_none()).collect();
+        let leaves = self.leaves()?;
+        let views: Vec<&View> = todo.iter().map(|&i| &leaves[i].1).collect();
         let parts = read_parts(self.store, &views)?;
         let mut out = cached;
         for (i, part) in todo.into_iter().zip(parts) {
-            let (key, view) = &self.leaves[i];
+            let (key, view) = &self.leaves()?[i];
             out[i] = Some(self.place(i, key, view, part)?);
         }
         Ok(out.into_iter().map(Option::unwrap).collect())
@@ -795,7 +816,7 @@ impl<'s> Stored<'s> {
         changes: &BTreeMap<NodeId, Option<HistNode>>,
     ) -> Result<View> {
         let mut out = Out { alg, puts: Vec::new() };
-        let n = self.leaves.len();
+        let n = self.leaves()?.len();
         // Generations of the changed nodes, from their predecessors: other
         // changed nodes first (in an order where each follows those it is
         // after), then stored ones. A changed node must not change the
@@ -846,14 +867,14 @@ impl<'s> Stored<'s> {
                     fresh.insert(id.clone(), e.clone());
                 }
             } else {
-                by_leaf.entry(self.leaf_of(id).unwrap_or(n - 1)).or_default().push((id, c));
+                by_leaf.entry(self.leaf_of(id)?.unwrap_or(n - 1)).or_default().push((id, c));
             }
         }
         let mut leaves = if n == 0 { out.leaves(fresh) } else { Vec::new() };
         let mut i = 0;
         while i < n {
             if !by_leaf.contains_key(&i) {
-                leaves.push(self.leaves[i].clone());
+                leaves.push(self.leaves()?[i].clone());
                 i += 1;
                 continue;
             }
@@ -887,11 +908,11 @@ impl<'s> Stored<'s> {
     /// the nodes the differing leaves share unchanged. Only the leaves that
     /// differ are read.
     pub fn changed(&self, new: &Stored) -> Result<Changed> {
-        let mine: BTreeSet<&str> = self.leaves.iter().map(|(_, v)| v.key()).collect();
-        let theirs: BTreeSet<&str> = new.leaves.iter().map(|(_, v)| v.key()).collect();
+        let mine: BTreeSet<&str> = self.leaves()?.iter().map(|(_, v)| v.key()).collect();
+        let theirs: BTreeSet<&str> = new.leaves()?.iter().map(|(_, v)| v.key()).collect();
         let collect = |s: &Stored, other: &BTreeSet<&str>| -> Result<BTreeMap<NodeId, HistNode>> {
             let mut out = BTreeMap::new();
-            for (i, (_, v)) in s.leaves.iter().enumerate() {
+            for (i, (_, v)) in s.leaves()?.iter().enumerate() {
                 if !other.contains(v.key()) {
                     out.extend(s.leaf(i)?.iter().map(|(k, e)| (k.clone(), e.node.clone())));
                 }
