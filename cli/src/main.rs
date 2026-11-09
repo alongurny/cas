@@ -5,6 +5,11 @@
 //! A served store with access control (spec/access.md) needs
 //! `--token-file FILE`; tokens are never taken from the environment.
 
+/// glibc's malloc spent a quarter of fsck finding room for the values
+/// deltas decode into (git.git fsck 37.6 -> 25.3 s, gc 15.9 -> 13.4 s).
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use cas_core::algo::{self, Algorithm};
 use cas_core::client::HttpStore;
 use cas_core::disk::DiskBackend;

@@ -149,6 +149,9 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
   varint lengths (pack 176 -> 157 MB, git's 155 MB; with the index 177 MB
   against git's 169 MB of pack, idx and rev). The cost: import 89 -> ~100 s, fsck 29 -> 35 s, checkout user CPU
   0.23 -> 0.42 s (longer chains).
+- **Allocator:** the CLI uses mimalloc. glibc's malloc spent a quarter
+  of fsck finding room for the values deltas decode into: fsck 37.6 ->
+  25.3 s (git 28.6), gc 15.9 -> 13.4 s, import 108 -> 102 s.
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
   (git's 423k objects); a delta names its base by 33 bytes (git's
   offset deltas take 2 to 4); path-log reads the whole history (1 s)

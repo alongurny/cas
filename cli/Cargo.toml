@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 cas-core = { path = ".." }
 cas-version = { path = "../version" }
+mimalloc = "0.1.52"
 
 [features]
 # Plain HTTP for benchmarks against git (bench/); never in a normal build.
