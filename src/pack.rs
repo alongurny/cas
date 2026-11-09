@@ -249,23 +249,24 @@ impl Idx {
     }
 
     /// Where `d` is in fixed records `r` (sorted by digest): interpolation
-    /// search, the digests being uniform, every other step a bisection so
-    /// that no input costs more than twice a binary search.
+    /// search, the digests being uniform (a few probes for any size), with
+    /// a bisection after any step that did not halve the interval, so no
+    /// input costs more than twice a binary search.
     fn find_fixed(r: &[u8], d: &[u8; 32]) -> Option<u64> {
         let key = |i: usize| -> &[u8] { &r[i * FIXED..i * FIXED + 32] };
-        let prefix = |k: &[u8]| u64::from_be_bytes(k[..8].try_into().unwrap()) as u128;
+        let prefix = |k: &[u8]| u64::from_be_bytes(k[..8].try_into().unwrap()) as f64;
         let t = prefix(d);
         let (mut lo, mut hi) = (0usize, r.len() / FIXED);
-        let (mut lo_k, mut hi_k) = (0u128, 1u128 << 64);
+        let (mut lo_k, mut hi_k) = (0f64, 18446744073709551616f64);
         let mut bisect = false;
         while lo < hi {
+            let size = hi - lo;
             let mid = if bisect || hi_k <= lo_k {
-                (lo + hi) / 2
+                lo + size / 2
             } else {
-                let est = lo + ((t.saturating_sub(lo_k)) * (hi - lo) as u128 / (hi_k - lo_k)) as usize;
-                est.clamp(lo, hi - 1)
+                let est = lo as f64 + (t - lo_k) / (hi_k - lo_k) * size as f64;
+                (est as usize).clamp(lo, hi - 1)
             };
-            bisect = !bisect;
             let k = key(mid);
             match k.cmp(&d[..]) {
                 std::cmp::Ordering::Equal => {
@@ -275,6 +276,7 @@ impl Idx {
                 std::cmp::Ordering::Less => (lo, lo_k) = (mid + 1, prefix(k)),
                 std::cmp::Ordering::Greater => (hi, hi_k) = (mid, prefix(k)),
             }
+            bisect = (hi - lo) * 2 > size;
         }
         None
     }
@@ -999,8 +1001,13 @@ impl Packs {
         if depth == 0
             && let Some(v) = self.bases.lock().unwrap().get(name)
         {
-            // Still held (a removed name stays readable only as a base).
-            if self.locate_mapped(name, false)?.is_some() {
+            // Still held: it was when decoded, and a removal since is in the
+            // removed set (a removed name stays readable only as a base).
+            // Packs dropped here clear the cache; another process's gc may
+            // drop what nothing reaches, and a read racing with that may
+            // see it either way.
+            self.look(false)?;
+            if !self.state.read().unwrap().removed.contains(name) {
                 return Ok(Some(as_file(&v)));
             }
         }
@@ -1312,6 +1319,7 @@ impl Packs {
     /// Delete the packs `ids` (already copied into a new one) and forget
     /// removals, which no remaining pack holds.
     pub fn drop_packs(&self, ids: &[String]) -> io::Result<()> {
+        *self.bases.lock().unwrap() = BaseCache::default();
         for id in ids {
             // The index first: a pack without one is ignored.
             let _ = fs::remove_file(self.dir.join(format!("{id}.idx")));

@@ -185,8 +185,13 @@ fn dag(s: &Session, edges: &[(usize, usize)]) -> (History, Vec<NodeId>) {
         let v = put(s, b3(), "raw", format!("d{i}").as_bytes()).unwrap();
         let mut after = BTreeMap::new();
         if i > 0 {
-            after.insert(ids[a % i].clone(), Step::default());
-            after.insert(ids[b % i].clone(), Step::default());
+            // Changelogs on some steps, compatible on others (for read_log's notes).
+            let st = |k: usize| Step {
+                changelog: k.is_multiple_of(2).then(|| format!("s{i}.{k}")),
+                compatible: k.is_multiple_of(3),
+            };
+            after.insert(ids[a % i].clone(), st(a));
+            after.insert(ids[b % i].clone(), st(b));
         }
         ids.push(h.add(&v, after, None).unwrap());
     }
@@ -212,6 +217,29 @@ proptest! {
         prop_assert_eq!(st.merge_bases(a, b).unwrap(), h.merge_bases(a, b));
         prop_assert_eq!(history::read(&s, &r).unwrap(), h);
     }
+
+    /// read_log gives the log, predecessors by position and notes the
+    /// whole history gives.
+    #[test]
+    fn read_log_agrees_with_the_whole_history(
+        edges in proptest::collection::vec((0usize..1000, 0usize..1000), 1..120),
+    ) {
+        let s = store();
+        let (h, _) = dag(&s, &edges);
+        let r = history::write(&s, b3(), &h).unwrap();
+        let got = Stored::open(&s, Some(&r)).unwrap().read_log().unwrap();
+        let log = h.log();
+        let pos: BTreeMap<&NodeId, usize> = log.iter().enumerate().map(|(i, id)| (id, i)).collect();
+        prop_assert_eq!(got.len(), log.len());
+        for (rec, id) in got.iter().zip(&log) {
+            prop_assert_eq!(&rec.id, id);
+            let n = &h.nodes[id];
+            let after: Vec<(usize, bool)> = n.after.iter().map(|(p, st)| (pos[p], st.compatible)).collect();
+            prop_assert_eq!(&rec.after, &after);
+            let notes: Vec<&str> = n.after.values().filter_map(|st| st.changelog.as_deref()).collect();
+            prop_assert_eq!(&rec.notes, &notes.join(" / "));
+        }
+    }
 }
 
 #[test]
@@ -229,6 +257,9 @@ fn a_wrong_generation_is_refused() {
     let bytes = Root { nodes: Some(View::new(top.format(), &key).unwrap()), ..root }.encode();
     let rk = b3().key(&bytes);
     s.write(&rk, &bytes, &Expect::Absent).unwrap();
-    let err = history::read(&s, &View::new(r.format(), &rk).unwrap()).unwrap_err().to_string();
+    let bad = View::new(r.format(), &rk).unwrap();
+    let err = history::read(&s, &bad).unwrap_err().to_string();
+    assert!(err.contains("generation"), "{err}");
+    let err = Stored::open(&s, Some(&bad)).unwrap().read_log().err().unwrap().to_string();
     assert!(err.contains("generation"), "{err}");
 }

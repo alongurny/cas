@@ -436,6 +436,15 @@ fn read_parts(store: &dyn Store, views: &[&View]) -> Result<Vec<Part>> {
 
 type Leaf = Arc<BTreeMap<NodeId, Entry>>;
 
+/// One node of [`Stored::read_log`].
+pub struct LogRecord {
+    pub id: NodeId,
+    /// Positions of the predecessors in the log, with whether each step is
+    /// compatible.
+    pub after: Vec<(usize, bool)>,
+    pub notes: String,
+}
+
 /// What [`Stored::changed`] finds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Changed {
@@ -526,15 +535,115 @@ impl<'s> Stored<'s> {
 
     /// Check a leaf read for position `i` and cache it.
     fn place(&self, i: usize, key: &NodeId, view: &View, part: Part) -> Result<Leaf> {
+        let l = Arc::new(self.checked_leaf(i, key, view, part)?);
+        self.cache.lock().unwrap().insert(view.key().to_string(), l.clone());
+        Ok(l)
+    }
+
+    /// The nodes of a leaf read for position `i`, checked to be in place.
+    fn checked_leaf(&self, i: usize, key: &NodeId, view: &View, part: Part) -> Result<BTreeMap<NodeId, Entry>> {
         let prev = i.checked_sub(1).map(|j| &self.leaves[j].0);
         if part.level() != 0 || part.last() != key {
             return Err(malformed(view.key(), "a part is not where its parent says"));
         }
         part.check_place(prev, i + 1 == self.leaves.len()).map_err(|e| malformed(view.key(), e))?;
         let Part::Leaf(n) = part else { unreachable!() };
-        let l = Arc::new(n);
-        self.cache.lock().unwrap().insert(view.key().to_string(), l.clone());
-        Ok(l)
+        Ok(n)
+    }
+
+    /// The history's log (as [`History::log`]) with each node's
+    /// predecessors by position in it, whether each step is compatible,
+    /// and its notes (the steps' changelogs joined by " / "): checked as
+    /// [`Stored::read_all_with_log`] checks, without building a
+    /// [`History`]. Nodes are numbered in id order, which is the leaves'
+    /// order, so no map of ids is needed.
+    pub fn read_log(&self) -> Result<Vec<LogRecord>> {
+        let key = self.root.nodes.as_ref().map_or("", |v| v.key()).to_string();
+        let bad = |e: String| malformed(&key, e);
+        let views: Vec<&View> = self.leaves.iter().map(|(_, v)| v).collect();
+        let parts = read_parts(self.store, &views)?;
+        let mut ids: Vec<NodeId> = Vec::new();
+        let mut entries: Vec<Entry> = Vec::new();
+        for (i, part) in parts.into_iter().enumerate() {
+            let (k, view) = &self.leaves[i];
+            for (id, e) in self.checked_leaf(i, k, view, part)? {
+                ids.push(id);
+                entries.push(e);
+            }
+        }
+        let find = |id: &NodeId| ids.binary_search(id).ok();
+        if let Some((t, n)) = self.root.tags.iter().find(|(_, n)| find(n).is_none()) {
+            return Err(bad(format!("tag {t} names {n}, which is not a node")));
+        }
+        let n = ids.len();
+        let mut preds: Vec<Vec<(usize, bool)>> = Vec::with_capacity(n);
+        for (id, e) in ids.iter().zip(&entries) {
+            let mut ps = Vec::with_capacity(e.node.after.len());
+            for (p, step) in &e.node.after {
+                let i = find(p).ok_or_else(|| bad(format!("{id} follows {p}, which is not a node")))?;
+                ps.push((i, step.compatible));
+            }
+            preds.push(ps);
+        }
+        let mut followers = vec![0usize; n];
+        for ps in &preds {
+            for &(p, _) in ps {
+                followers[p] += 1;
+            }
+        }
+        // The tips are the nodes no other follows; the log puts them first.
+        let tips = (0..n).filter(|&i| followers[i] == 0);
+        if !tips.map(|i| &ids[i]).eq(self.root.tips.iter()) {
+            return Err(bad("the root's tips are not the history's tips".into()));
+        }
+        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> =
+            (0..n).filter(|&i| followers[i] == 0).map(std::cmp::Reverse).collect();
+        let mut log = Vec::with_capacity(n);
+        while let Some(std::cmp::Reverse(i)) = ready.pop() {
+            for &(p, _) in &preds[i] {
+                followers[p] -= 1;
+                if followers[p] == 0 {
+                    ready.push(std::cmp::Reverse(p));
+                }
+            }
+            log.push(i);
+        }
+        if log.len() != n {
+            return Err(bad("the order has a cycle".into()));
+        }
+        // Every stored generation is right: oldest first, each after its
+        // predecessors.
+        let mut generation = vec![0u64; n];
+        for &i in log.iter().rev() {
+            let want = 1 + preds[i].iter().map(|&(p, _)| generation[p]).max().unwrap_or(0);
+            if entries[i].generation != want {
+                return Err(bad(format!("{} has generation {}, not {want}", ids[i], entries[i].generation)));
+            }
+            generation[i] = want;
+        }
+        let mut pos = vec![0usize; n];
+        for (at, &i) in log.iter().enumerate() {
+            pos[i] = at;
+        }
+        let mut ids: Vec<Option<NodeId>> = ids.into_iter().map(Some).collect();
+        let mut entries: Vec<Option<Entry>> = entries.into_iter().map(Some).collect();
+        Ok(log
+            .iter()
+            .map(|&i| {
+                let e = entries[i].take().unwrap();
+                let mut logs = e.node.after.into_values().filter_map(|s| s.changelog);
+                let notes = match (logs.next(), logs.next()) {
+                    (None, _) => String::new(),
+                    (Some(a), None) => a,
+                    (Some(a), Some(b)) => [a, b].into_iter().chain(logs).collect::<Vec<_>>().join(" / "),
+                };
+                LogRecord {
+                    id: ids[i].take().unwrap(),
+                    after: preds[i].iter().map(|&(p, c)| (pos[p], c)).collect(),
+                    notes,
+                }
+            })
+            .collect())
     }
 
     /// The leaf that holds `id` if any node does.

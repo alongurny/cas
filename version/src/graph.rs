@@ -256,14 +256,14 @@ impl Graph {
         // Each version is looked at as a node and again as its successor's
         // predecessor; remember the answers by version key.
         // Directory blobs shared between versions are read once.
-        let memo = std::cell::RefCell::new(HashMap::new());
+        let memo = std::cell::RefCell::new(cas_core::keyhash::KeyMap::default());
         let blobs = std::cell::RefCell::new(crate::dir::FindMemo::new());
-        let at = |i: usize| -> Result<Option<View>> {
+        let at = |i: usize| -> Result<std::rc::Rc<Option<View>>> {
             let v = self.nodes[i].id.version();
             if let Some(n) = memo.borrow().get(v.key()) {
-                return Ok(Clone::clone(n));
+                return Ok(std::rc::Rc::clone(n));
             }
-            let n = crate::tree::object_at_memo(store, &v, path, &mut blobs.borrow_mut())?;
+            let n = std::rc::Rc::new(crate::tree::object_at_memo(store, &v, path, &mut blobs.borrow_mut())?);
             memo.borrow_mut().insert(v.key().to_string(), n.clone());
             Ok(n)
         };
@@ -353,8 +353,18 @@ pub fn graph_or_order(store: &dyn Store, input: &View) -> Result<Graph> {
     match derived::readable_cache(store, &GRAPH, input)? {
         Some(r) => read(store, &r),
         None => {
-            let (h, log) = crate::history::Stored::open(store, Some(input))?.read_all_with_log()?;
-            Ok(Graph::unfiltered_in(&h, log))
+            let log = crate::history::Stored::open(store, Some(input))?.read_log()?;
+            Ok(Graph {
+                nodes: log
+                    .into_iter()
+                    .map(|r| Record {
+                        filter: if r.after.is_empty() { Filter::Root } else { Filter::Full },
+                        id: r.id,
+                        after: r.after,
+                        notes: r.notes,
+                    })
+                    .collect(),
+            })
         }
     }
 }

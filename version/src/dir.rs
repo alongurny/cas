@@ -135,7 +135,29 @@ impl Dir {
 
 /// Answers of [`Dir::find_memo`] by (name, blob key): the blob's level and
 /// greatest name (to check it against any parent naming it), and the entry.
-pub type FindMemo = std::collections::HashMap<(String, String), (u64, Option<String>, Option<View>)>;
+/// By name, then blob key (looked up without allocating either; blob keys
+/// hash by their digest's last digits).
+#[derive(Default)]
+pub struct FindMemo(std::collections::HashMap<String, cas_core::keyhash::KeyMap<std::rc::Rc<Found>>>);
+
+type Found = (u64, Option<String>, Option<View>);
+
+impl FindMemo {
+    pub fn new() -> FindMemo {
+        FindMemo::default()
+    }
+
+    fn get(&self, name: &str, key: &str) -> Option<std::rc::Rc<Found>> {
+        self.0.get(name)?.get(key).cloned()
+    }
+
+    fn insert(&mut self, name: &str, key: &str, f: std::rc::Rc<Found>) {
+        match self.0.get_mut(name) {
+            Some(m) => m.insert(key.to_string(), f),
+            None => self.0.entry(name.to_string()).or_default().insert(key.to_string(), f),
+        };
+    }
+}
 
 impl Dir {
     /// [`Dir::find`] that remembers its answer for every blob it reads, so
@@ -143,27 +165,21 @@ impl Dir {
     pub fn find_memo(&self, store: &dyn Store, key: &str, name: &str, memo: &mut FindMemo) -> Result<Option<View>> {
         match self {
             Dir::Text => {
-                if let Some((_, _, v)) = memo.get(&(name.to_string(), key.to_string())) {
-                    return Ok(v.clone());
+                if let Some(f) = memo.get(name, key) {
+                    return Ok(f.2.clone());
                 }
                 let v = Dir::text_find(key, &crate::read_blob(store, key)?, name)?;
-                memo.insert((name.to_string(), key.to_string()), (0, None, v.clone()));
+                memo.insert(name, key, std::rc::Rc::new((0, None, v.clone())));
                 Ok(v)
             }
-            Dir::Tree => Ok(tree_find_memo(store, key, name, memo)?.2),
+            Dir::Tree => Ok(tree_find_memo(store, key, name, memo)?.2.clone()),
         }
     }
 }
 
-fn tree_find_memo(
-    store: &dyn Store,
-    key: &str,
-    name: &str,
-    memo: &mut FindMemo,
-) -> Result<(u64, Option<String>, Option<View>)> {
-    let id = (name.to_string(), key.to_string());
-    if let Some(a) = memo.get(&id) {
-        return Ok(a.clone());
+fn tree_find_memo(store: &dyn Store, key: &str, name: &str, memo: &mut FindMemo) -> Result<std::rc::Rc<Found>> {
+    if let Some(a) = memo.get(name, key) {
+        return Ok(a);
     }
     let bytes = crate::read_blob(store, key)?;
     let (level, last, hit) = scan(&bytes, name).map_err(|e| malformed(key, e))?;
@@ -173,16 +189,17 @@ fn tree_find_memo(
         let found = match hit {
             None => None,
             Some(part) => {
-                let (l, got, v) = tree_find_memo(store, part.key(), name, memo)?;
-                if l + 1 != level || got.as_deref() != Some(part.format()) {
+                let f = tree_find_memo(store, part.key(), name, memo)?;
+                if f.0 + 1 != level || f.1.as_deref() != Some(part.format()) {
                     return Err(malformed(part.key(), "a blob is not where its parent says"));
                 }
-                v
+                f.2.clone()
             }
         };
         (level, last, found)
     };
-    memo.insert(id, a.clone());
+    let a = std::rc::Rc::new(a);
+    memo.insert(name, key, a.clone());
     Ok(a)
 }
 

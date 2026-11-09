@@ -152,6 +152,11 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
 - **Allocator:** the CLI uses mimalloc. glibc's malloc spent a quarter
   of fsck finding room for the values deltas decode into: fsck 37.6 ->
   25.3 s (git 28.6), gc 15.9 -> 13.4 s, import 108 -> 102 s.
+- **log and path-log:** the log is read straight from the history's
+  leaves, numbered in id order, with the same checks as a whole read but
+  no map of node ids; a value decoded as a base answers a read without
+  a second index lookup; path-log's memo maps take `&str` keys. log 0.72
+  -> 0.45 s (git 0.62), path-log 1.67 -> 1.21 s (git 0.71).
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
   (git's 423k objects); a delta names its base by 33 bytes (git's
   offset deltas take 2 to 4); path-log reads the whole history (1 s)
