@@ -279,6 +279,17 @@ pub fn tree_encode(blob: &Blob) -> Vec<u8> {
 /// may not be one: that depends on the blobs beside it), and the canonical
 /// encoding.
 pub fn tree_decode(b: &[u8]) -> std::result::Result<Blob, String> {
+    decode(b, true)
+}
+
+/// [`tree_decode`] without checking where the blob is cut, the one check
+/// that hashes every name: for reads whose answer only guides a choice (gc's
+/// delta hints), not what is kept.
+pub fn tree_decode_uncut(b: &[u8]) -> std::result::Result<Blob, String> {
+    decode(b, false)
+}
+
+fn decode(b: &[u8], check_cut: bool) -> std::result::Result<Blob, String> {
     if b.is_empty() {
         return Ok(Blob::Items(Vec::new()));
     }
@@ -340,7 +351,7 @@ pub fn tree_decode(b: &[u8]) -> std::result::Result<Blob, String> {
     if names.windows(2).any(|w| w[0] >= w[1]) {
         return Err("names out of order".into());
     }
-    if names[..names.len() - 1].iter().any(|n| u64::from(height(n)) > level) {
+    if check_cut && names[..names.len() - 1].iter().any(|n| u64::from(height(n)) > level) {
         return Err(format!("a blob at level {level} is not cut by name"));
     }
     if used.contains(&false) {
@@ -349,7 +360,7 @@ pub fn tree_decode(b: &[u8]) -> std::result::Result<Blob, String> {
     // With the shortest varints, the longest shared prefixes, sorted and
     // used tables and sorted names, these bytes are what `tree_encode`
     // writes: checked in the tests rather than by encoding again here.
-    debug_assert!(tree_encode(&blob) == b);
+    debug_assert!(!check_cut || tree_encode(&blob) == b);
     Ok(blob)
 }
 

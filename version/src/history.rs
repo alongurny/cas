@@ -20,7 +20,11 @@ impl NodeId {
             Some((v, n)) => (v, Some(n)),
             None => (s, None),
         };
-        View::parse(v).map_err(|_| format!("node id {s:?}: not a view"))?;
+        // A view: two blob keys and a space (checked in place, as an id is
+        // parsed for every node a history read touches).
+        if !v.split_once(' ').is_some_and(|(f, k)| crate::is_blob_key(f) && crate::is_blob_key(k)) {
+            return Err(format!("node id {s:?}: not a view"));
+        }
         if let Some(n) = n
             && (n.starts_with('0')
                 || n.parse::<u64>().map_or(true, |n| n < 2)

@@ -5,6 +5,7 @@
 //! phase: a blob is removed only when two runs in a row found it
 //! unreachable, so a writer has until the next run to link what it wrote.
 
+use crate::dir::{Blob, tree_decode_uncut};
 use crate::formats::{self, METAFORMAT};
 use crate::history::{self, NodeId};
 use crate::sync::children;
@@ -198,12 +199,109 @@ fn pair(
     if !new.is_dir() {
         return Ok(());
     }
+    if let Some(o) = old
+        && is_tree(o)
+        && is_tree(new)
+    {
+        return pair_trees(store, o, new, order, hints, walked, placed);
+    }
     let olds: HashMap<String, View> = match old.filter(|o| o.is_dir()) {
         Some(o) => tree::load(store, o)?.into_iter().map(|i| (i.name, i.child)).collect(),
         None => HashMap::new(),
     };
     for item in tree::load(store, new)? {
         pair(store, olds.get(&item.name), &item.child, order, hints, walked, placed)?;
+    }
+    Ok(())
+}
+
+fn is_tree(v: &View) -> bool {
+    v.known_format().is_some_and(|f| f.alias == "tree")
+}
+
+/// A `tree` directory's blobs below its top: the inner ones, and the leaves
+/// as (greatest name, key), in name order.
+/// Inner blob keys, and leaves as (greatest name, key).
+type Parts = (Vec<String>, Vec<(String, String)>);
+
+fn tree_parts(store: &dyn Store, top: &str) -> Result<Parts> {
+    let (mut inner, mut leaves) = (Vec::new(), Vec::new());
+    // (greatest name, key, known to be a leaf): the parts of a level 1 blob
+    // are leaves, read only if they differ.
+    let mut todo = vec![(String::new(), top.to_string(), false)];
+    while let Some((last, key, leaf)) = todo.pop() {
+        if leaf {
+            leaves.push((last, key));
+            continue;
+        }
+        let bytes = crate::read_blob(store, &key)?;
+        match tree_decode_uncut(&bytes).map_err(|e| crate::malformed(&key, e))? {
+            Blob::Items(_) => leaves.push((last, key)),
+            Blob::Parts { level, parts } => {
+                if key != top {
+                    inner.push(key);
+                }
+                todo.extend(parts.into_iter().rev().map(|(n, k)| (n, k, level == 1)));
+            }
+        }
+    }
+    Ok((inner, leaves))
+}
+
+/// [`pair`] of two `tree` directories, reading only the leaves that differ:
+/// the entries of a leaf both share are the same. Each new blob of the
+/// directory is hinted to an old one covering the same names.
+fn pair_trees(
+    store: &dyn Store,
+    old: &View,
+    new: &View,
+    order: &mut Vec<String>,
+    hints: &mut HashMap<String, String>,
+    walked: &mut HashSet<String>,
+    placed: &dyn Fn(&str) -> bool,
+) -> Result<()> {
+    let (oi, ol) = tree_parts(store, old.key())?;
+    let (ni, nl) = tree_parts(store, new.key())?;
+    let old_keys: HashSet<&str> = ol.iter().map(|l| l.1.as_str()).chain(oi.iter().map(String::as_str)).collect();
+    let new_keys: HashSet<&str> = nl.iter().map(|l| l.1.as_str()).chain(ni.iter().map(String::as_str)).collect();
+    let old_only: Vec<&(String, String)> = ol.iter().filter(|l| !new_keys.contains(l.1.as_str())).collect();
+    let new_only: Vec<&(String, String)> = nl.iter().filter(|l| !old_keys.contains(l.1.as_str())).collect();
+    // Inner blobs by position; leaves by the names they cover.
+    let oi_only: Vec<&String> = oi.iter().filter(|k| !new_keys.contains(k.as_str())).collect();
+    for (i, k) in ni.iter().filter(|k| !old_keys.contains(k.as_str())).enumerate() {
+        if walked.insert(k.clone()) && !placed(k) {
+            order.push(k.clone());
+            if !oi_only.is_empty() {
+                hints.entry(k.clone()).or_insert_with(|| oi_only[i.min(oi_only.len() - 1)].clone());
+            }
+        }
+    }
+    for (last, k) in &new_only {
+        if walked.insert(k.clone()) && !placed(k) {
+            order.push(k.clone());
+            // The first old leaf whose names reach this one's last.
+            let j = old_only.partition_point(|o| o.0 < *last).min(old_only.len().saturating_sub(1));
+            if let Some(o) = old_only.get(j) {
+                hints.entry(k.clone()).or_insert_with(|| o.1.clone());
+            }
+        }
+    }
+    let mut olds: HashMap<String, View> = HashMap::new();
+    for (_, k) in &old_only {
+        if let Blob::Items(items) =
+            tree_decode_uncut(&crate::read_blob(store, k)?).map_err(|e| crate::malformed(k, e))?
+        {
+            olds.extend(items.into_iter().map(|i| (i.name, i.child)));
+        }
+    }
+    for (_, k) in &new_only {
+        if let Blob::Items(items) =
+            tree_decode_uncut(&crate::read_blob(store, k)?).map_err(|e| crate::malformed(k, e))?
+        {
+            for item in items {
+                pair(store, olds.get(&item.name), &item.child, order, hints, walked, placed)?;
+            }
+        }
     }
     Ok(())
 }
