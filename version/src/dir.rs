@@ -7,6 +7,7 @@
 use crate::{Result, View, is_blob_key, malformed, valid_name};
 use cas_core::Store;
 use cas_core::algo::{self, Algorithm};
+use cas_core::keyhash::DigestSet;
 use std::collections::BTreeSet;
 
 /// One entry of a directory.
@@ -78,14 +79,9 @@ impl Dir {
     /// [`Dir::blob_children`] without the checks of the encoding and
     /// without the children `skip` says to leave out, for walks over blobs
     /// read before (gc's mark).
-    pub(crate) fn blob_children_light(
-        &self,
-        key: &str,
-        bytes: &[u8],
-        skip: &dyn Fn(&str) -> bool,
-    ) -> Result<Vec<View>> {
+    pub(crate) fn blob_children_light(&self, key: &str, bytes: &[u8], skip: &DigestSet) -> Result<Vec<View>> {
         match self {
-            Dir::Text => Ok(self.blob_children(key, bytes)?.into_iter().filter(|v| !skip(v.key())).collect()),
+            Dir::Text => Ok(self.blob_children(key, bytes)?.into_iter().filter(|v| !skip.contains(v.key())).collect()),
             Dir::Tree => tree_children(bytes, skip).map_err(|e| malformed(key, e)),
         }
     }
@@ -294,7 +290,7 @@ impl<'a> LeafIter<'a> {
 /// The views a `tree` blob holds, in one pass that allocates only them:
 /// for walks such as gc's mark, which need the children and not the
 /// names. Checks bounds and indices, not the canonical form.
-pub(crate) fn tree_children(b: &[u8], skip: &dyn Fn(&str) -> bool) -> std::result::Result<Vec<View>, String> {
+pub(crate) fn tree_children(b: &[u8], skip: &DigestSet) -> std::result::Result<Vec<View>, String> {
     if b.is_empty() {
         return Ok(Vec::new());
     }
@@ -317,14 +313,17 @@ pub(crate) fn tree_children(b: &[u8], skip: &dyn Fn(&str) -> bool) -> std::resul
         r.take(len)?;
         let fi = if level == 0 { Some(r.varint()? as usize) } else { None };
         let a = *algs.get(r.varint()? as usize).ok_or("algorithm index out of range")?;
+        let digest = r.take(a.digest_len)?;
+        // Most entries of a walk are already known: asked by digest, they
+        // cost no hex.
+        if skip.contains_digest(a.name, digest) {
+            continue;
+        }
         buf.clear();
         buf.extend_from_slice(a.name.as_bytes());
         buf.push(b':');
-        hex_into(&mut buf, r.take(a.digest_len)?);
+        hex_into(&mut buf, digest);
         let key = std::str::from_utf8(&buf).map_err(|_| "algorithm name is not UTF-8")?;
-        if skip(key) {
-            continue;
-        }
         let format = match fi {
             Some(fi) => formats.get(fi).ok_or("format index out of range")?.clone(),
             None => tree_format().to_string(),

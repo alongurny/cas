@@ -168,8 +168,12 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
   tree entries against the first parent) and records the graph's filters
   with the ancestry. path-log no longer diffs every commit first: 1.16 ->
   0.31 s (git 0.71); import pays about 3.5 s for it.
+- **gc mark by digest:** gc's mark and clone's copier keep the keys they
+  have seen as 32 digest bytes, and a directory blob's entries are looked
+  up by their digest, not spelled out in hex first (the walk reads 20M
+  entries, nearly all already seen). gc 16 -> 11 s (git 11.3).
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
-  (git's 423k objects); gc and import are slower than git.
+  (git's 423k objects); import is slower than git.
 
 Earlier notes, before that round:
 

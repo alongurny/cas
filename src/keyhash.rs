@@ -41,9 +41,118 @@ pub type KeyState = BuildHasherDefault<KeyHasher>;
 pub type KeySet = std::collections::HashSet<String, KeyState>;
 pub type KeyMap<V> = std::collections::HashMap<String, V, KeyState>;
 
+/// Hashes a digest by its first eight bytes, which are already uniform.
+#[derive(Default)]
+pub struct DigestHasher(u64);
+
+impl Hasher for DigestHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, b: &[u8]) {
+        for &x in b {
+            self.0 = (self.0 ^ u64::from(x)).wrapping_mul(0x100000001b3);
+        }
+    }
+
+    fn write_u64(&mut self, x: u64) {
+        self.0 = x;
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Digest([u8; 32]);
+
+impl std::hash::Hash for Digest {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        h.write_u64(u64::from_le_bytes(self.0[..8].try_into().unwrap()));
+    }
+}
+
+/// A set of blob keys that holds `blake3` keys as their 32 digest bytes,
+/// so a walk over directory blobs can ask about an entry's digest without
+/// spelling it out in hex. Other keys are kept as strings.
+#[derive(Default)]
+pub struct DigestSet {
+    b3: std::collections::HashSet<Digest, BuildHasherDefault<DigestHasher>>,
+    other: KeySet,
+}
+
+impl DigestSet {
+    fn b3_of(k: &str) -> Option<Digest> {
+        k.strip_prefix("blake3:").and_then(crate::pack::hex32).map(Digest)
+    }
+
+    /// Adds `k`; false if it was already there.
+    pub fn insert(&mut self, k: &str) -> bool {
+        match Self::b3_of(k) {
+            Some(d) => self.b3.insert(d),
+            None => !self.other.contains(k) && self.other.insert(k.to_string()),
+        }
+    }
+
+    pub fn contains(&self, k: &str) -> bool {
+        match Self::b3_of(k) {
+            Some(d) => self.b3.contains(&d),
+            None => self.other.contains(k),
+        }
+    }
+
+    /// Whether the key `alg:hex(digest)` is in the set.
+    pub fn contains_digest(&self, alg: &str, digest: &[u8]) -> bool {
+        if alg == "blake3"
+            && let Ok(d) = <[u8; 32]>::try_from(digest)
+        {
+            return self.b3.contains(&Digest(d));
+        }
+        let mut k = String::with_capacity(alg.len() + 1 + 2 * digest.len());
+        k.push_str(alg);
+        k.push(':');
+        for b in digest {
+            k.push_str(&format!("{b:02x}"));
+        }
+        self.other.contains(&k)
+    }
+
+    pub fn len(&self) -> usize {
+        self.b3.len() + self.other.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl<S: AsRef<str>> FromIterator<S> for DigestSet {
+    fn from_iter<I: IntoIterator<Item = S>>(it: I) -> Self {
+        let mut s = DigestSet::default();
+        for k in it {
+            s.insert(k.as_ref());
+        }
+        s
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_sets_answer_by_key_and_by_digest() {
+        let alg = crate::algo::lookup("blake3").unwrap();
+        let keys: Vec<String> = (0..1000u32).map(|i| alg.key(&i.to_le_bytes())).collect();
+        let mut s: DigestSet = keys[..500].iter().collect();
+        assert!(s.insert("sha256:00ff") && !s.insert("sha256:00ff") && !s.insert(&keys[0]));
+        assert_eq!(s.len(), 501);
+        for (i, k) in keys.iter().enumerate() {
+            let digest = (0..32).map(|j| u8::from_str_radix(&k[7 + 2 * j..9 + 2 * j], 16).unwrap()).collect::<Vec<_>>();
+            assert_eq!(s.contains(k), i < 500);
+            assert_eq!(s.contains_digest("blake3", &digest), i < 500);
+        }
+        assert!(s.contains("sha256:00ff") && s.contains_digest("sha256", &[0, 255]));
+        assert!(!s.contains("blake3:00") && !s.contains(&keys[0].to_uppercase()));
+    }
 
     #[test]
     fn keys_spread_and_other_strings_still_hash() {

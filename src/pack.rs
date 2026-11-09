@@ -223,7 +223,7 @@ const HEX: [u8; 256] = {
 
 /// The 32 digest bytes of a canonical (lowercase) 64-digit hex string. A
 /// table lookup per digit: parsing names was most of an index lookup.
-fn hex32(h: &str) -> Option<[u8; 32]> {
+pub(crate) fn hex32(h: &str) -> Option<[u8; 32]> {
     let b: &[u8; 64] = h.as_bytes().try_into().ok()?;
     let mut d = [0u8; 32];
     let mut bad = 0u8;

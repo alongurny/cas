@@ -14,7 +14,7 @@ use crate::uni::Value;
 use crate::{Result, View, by_alias, is_blob_key, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::key::{Parsed, classify};
-use cas_core::keyhash::KeySet;
+use cas_core::keyhash::DigestSet;
 use cas_core::{Expect, Span, Store, list_all};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -83,9 +83,9 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
 }
 
 /// Every blob reachable from the variables in `store`.
-pub fn mark(store: &dyn Store) -> Result<KeySet> {
+pub fn mark(store: &dyn Store) -> Result<DigestSet> {
     let keys = variables(store)?;
-    let mut marked = KeySet::default();
+    let mut marked = DigestSet::default();
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
     let mut todo: Vec<View> = Vec::new();
     for k in &keys {
@@ -107,10 +107,10 @@ pub fn mark(store: &dyn Store) -> Result<KeySet> {
         if formats_seen.insert(r.format().to_string()) {
             raw.push(r.format().to_string());
         }
-        if !marked.insert(r.key().to_string()) {
+        if !marked.insert(r.key()) {
             continue;
         }
-        match children_light(store, &r, &|k| marked.contains(k)) {
+        match children_light(store, &r, &marked) {
             Ok(c) => {
                 todo.extend(c);
                 // Versions oldest first, each walked before the next, as
@@ -128,7 +128,7 @@ pub fn mark(store: &dyn Store) -> Result<KeySet> {
     }
     while let Some(k) = raw.pop() {
         if is_blob_key(&k)
-            && marked.insert(k.clone())
+            && marked.insert(&k)
             && let Some(spec) = spec_of(store, &k)?
         {
             raw.push(spec);
@@ -137,7 +137,7 @@ pub fn mark(store: &dyn Store) -> Result<KeySet> {
     // Specs of the formats this crate knows, which it may have published.
     for f in formats::all() {
         if marked.contains(f.id()) {
-            marked.insert(blake3().key(f.spec.as_bytes()));
+            marked.insert(&blake3().key(f.spec.as_bytes()));
         }
     }
     Ok(marked)
@@ -167,7 +167,7 @@ pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
         .into_iter()
         .filter(|k| matches!(classify(k), Some(Parsed::Blob { .. })))
         .collect();
-    let unreachable: BTreeSet<String> = blobs.iter().filter(|k| !marked.contains(*k)).cloned().collect();
+    let unreachable: BTreeSet<String> = blobs.iter().filter(|k| !marked.contains(k)).cloned().collect();
     let mut removed = Vec::new();
     for k in unreachable.intersection(&old) {
         store.remove(k, &Expect::Absent)?;

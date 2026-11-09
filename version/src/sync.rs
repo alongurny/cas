@@ -11,6 +11,7 @@
 use crate::formats::{self, Kind};
 use crate::history;
 use crate::{Error, Result, View, is_blob_key, read_blob};
+use cas_core::keyhash::DigestSet;
 use cas_core::keyhash::{KeyMap, KeySet};
 use cas_core::store::Put;
 use cas_core::{Error as CoreError, Expect, Form, Span, Store, Stored};
@@ -45,10 +46,10 @@ pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
 
 /// [`children`] without checking a directory blob's encoding, and without
 /// those `skip` says to leave out: for gc.
-pub(crate) fn children_light(store: &dyn Store, r: &View, skip: &dyn Fn(&str) -> bool) -> Result<Vec<View>> {
+pub(crate) fn children_light(store: &dyn Store, r: &View, skip: &DigestSet) -> Result<Vec<View>> {
     match r.known_format().map(|f| &f.kind) {
         Some(Kind::Dir(d)) => d.blob_children_light(r.key(), &read_blob(store, r.key())?, skip),
-        _ => Ok(children(store, r)?.into_iter().filter(|v| !skip(v.key())).collect()),
+        _ => Ok(children(store, r)?.into_iter().filter(|v| !skip.contains(v.key())).collect()),
     }
 }
 
@@ -87,13 +88,13 @@ fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -
 pub(crate) fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
     match r.known_format().map(|f| &f.kind) {
         Some(Kind::Dir(d)) => Ok(Some(d.blob_children(r.key(), bytes)?)),
-        _ => children_of_light(r, bytes, &|_| false),
+        _ => children_of_light(r, bytes, &DigestSet::default()),
     }
 }
 
 /// [`children_of`] leaving out the views `skip` names; a directory blob is
 /// read in one pass that checks bounds, not its canonical form.
-fn children_of_light(r: &View, bytes: &[u8], skip: &dyn Fn(&str) -> bool) -> Result<Option<Vec<View>>> {
+fn children_of_light(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<Vec<View>>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(d), _)) => Ok(Some(d.blob_children_light(r.key(), bytes, skip)?)),
         Some((_, "history")) => {
@@ -152,7 +153,7 @@ fn copy_history(
     for (v, p) in versions.into_iter().zip(present) {
         if p {
             c.n.present += 1;
-            c.done.insert(v.key().to_string());
+            c.done.insert(v.key());
         } else {
             missing.push(v);
         }
@@ -173,7 +174,7 @@ struct Copier<'a> {
     formats_seen: BTreeSet<String>,
     /// Keys known to be in the destination, complete, or written to
     /// `pending` after everything they hold.
-    done: KeySet,
+    done: DigestSet,
     /// Writes not yet sent, children before parents.
     pending: Vec<Put>,
     pending_bytes: usize,
@@ -340,7 +341,7 @@ impl<'a> Copier<'a> {
                 if let Some(f) = form {
                     forms.insert(r.key().to_string(), f);
                 }
-                let kids = children_of_light(&r, &bytes, &|k| self.done.contains(k)).map_err(|e| {
+                let kids = children_of_light(&r, &bytes, &self.done).map_err(|e| {
                     // Unreadable as sent: report bytes that are not the key's.
                     match cas_core::key::classify(r.key()) {
                         Some(cas_core::key::Parsed::Blob { alg, .. })
@@ -396,7 +397,7 @@ impl<'a> Copier<'a> {
                             ready.push(Put { form: w.form, ..Put::blob(parent, w.bytes) });
                         }
                     }
-                    self.done.insert(k);
+                    self.done.insert(&k);
                 }
                 if ready.is_empty() {
                     break;
