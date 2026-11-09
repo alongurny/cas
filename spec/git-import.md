@@ -20,6 +20,12 @@ with a `#n` id. Every step is marked breaking, the default.
 
 Empty directories do not exist in git, so none are created.
 
+Into a local disk store, each file is written as a delta against its path's previous version and
+each directory blob against the blob that covered the same names before, as git fast-import does.
+These are the deltas a gc would pick, so the import ends by merging its packs into one sealed pack
+(as a repack leaves it): the first gc reuses its frames instead of trying each delta again
+(git.git: first gc 53 s -> 15 s).
+
 ## Dogfooding (2026-11-08)
 
 Measured with the release build on the Thesis repository (4,532 commits; 105 MB packed in git,

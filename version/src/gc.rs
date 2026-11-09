@@ -55,8 +55,18 @@ fn spec_of(store: &dyn Store, key: &str) -> Result<Option<String>> {
 /// Record the ancestry (spec/functions/ancestry.md) of every history a
 /// variable holds that has none yet, as git gc writes its commit-graph.
 /// Best effort for each history.
+/// Every variable in `store`, without listing the blake3 blobs: no
+/// variable starts with `blake3:` (spec section 2: such a key is a blob key
+/// or invalid), so the keys on either side of that range are listed.
+fn variables(store: &dyn Store) -> Result<Vec<String>> {
+    let mut keys = list_all(store, &Span { from: None, to: Some(b"blake3:".to_vec()) })?;
+    keys.extend(list_all(store, &Span { from: Some(b"blake3;".to_vec()), to: None })?);
+    keys.retain(|k| matches!(classify(k), Some(Parsed::Var)));
+    Ok(keys)
+}
+
 pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()> {
-    for k in list_all(store, &Span::all())? {
+    for k in variables(store)? {
         if !matches!(classify(&k), Some(Parsed::Var)) || k.starts_with("derived") {
             continue;
         }
@@ -74,7 +84,7 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
 
 /// Every blob reachable from the variables in `store`.
 pub fn mark(store: &dyn Store) -> Result<KeySet> {
-    let keys = list_all(store, &Span::all())?;
+    let keys = variables(store)?;
     let mut marked = KeySet::default();
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
     let mut todo: Vec<View> = Vec::new();
@@ -182,7 +192,7 @@ pub fn delta_hints(store: &dyn Store, placed: &dyn Fn(&str) -> bool) -> Result<(
     let mut order = Vec::new();
     let mut hints = HashMap::new();
     let mut walked = HashSet::new();
-    for k in list_all(store, &Span::all())? {
+    for k in variables(store)? {
         if !matches!(classify(&k), Some(Parsed::Var)) {
             continue;
         }

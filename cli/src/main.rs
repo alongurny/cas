@@ -599,6 +599,14 @@ fn run(a: Args) -> Res<()> {
             formats::publish(s).map_err(e)?;
             let v = history::save(s, b3(), name, None, &h).map_err(|x| format!("{name}: {x}"))?;
             cas_version::ancestry::record(s, b3(), &v, &h);
+            // Its deltas are a repack's (each file against its path's last
+            // version): one sealed pack, so a gc reuses them.
+            if !a.store.starts_with("http://")
+                && !a.store.starts_with("https://")
+                && let Ok(disk) = DiskBackend::open(&a.store)
+            {
+                disk.seal_packs().map_err(e)?;
+            }
             out!(
                 "{} commits, {} trees, {} files, {} submodules skipped, {} nodes, {} tags in {:.1}s",
                 n.commits,

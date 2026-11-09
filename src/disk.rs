@@ -30,6 +30,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// A whole frame whose data is shorter than its hinted base's key and
+/// this is not tried as a delta again by a repack.
+const SMALL_GAIN: usize = 64;
+
 pub struct DiskBackend {
     root: PathBuf,
     lock: Mutex<File>,
@@ -210,6 +214,14 @@ impl DiskBackend {
     /// safe while another process writes to the store, like `sweep_chunks`.
     /// Whether the last repack placed `key` (it is in the sealed pack), so a
     /// repack needs no delta hint for it or for what it holds.
+    /// Merge the packs into one sealed pack ([`crate::pack::Packs::seal_all`]).
+    pub fn seal_packs(&self) -> io::Result<()> {
+        match &self.packs {
+            Some(p) => p.seal_all(&self.root.join("tmp")),
+            None => Ok(()),
+        }
+    }
+
     pub fn sealed(&self, key: &str) -> io::Result<bool> {
         Ok(match &self.packs {
             Some(p) => p.sealed_frame(key)?.is_some(),
@@ -222,8 +234,8 @@ impl DiskBackend {
         let Some(packs) = &self.packs else { return Err(io::Error::other("only encoded stores have packs")) };
         let old_packs = packs.ids()?;
         let mut loose_blobs = Vec::new();
-        for k in self.all_keys()? {
-            if matches!(classify(&k), Some(Parsed::Blob { .. })) && self.path(&k).exists() {
+        for k in self.loose_keys()? {
+            if matches!(classify(&k), Some(Parsed::Blob { .. })) {
                 loose_blobs.push(k);
             }
         }
@@ -312,8 +324,17 @@ impl DiskBackend {
                 // pick, or there is no hint; a whole frame when there is no
                 // base to try.
                 let hint = hints.get(n).filter(|b| present.contains(*b));
+                // So is a small whole frame: a delta names its base (a key),
+                // so it cannot save much there, and each gc would try it again.
                 match packs.frame(n)? {
-                    Some(f) if hint.is_none() || (f.base.is_some() && f.base.as_ref() == hint) => Ok(Tried::Reuse(f)),
+                    Some(f)
+                        if hint.is_none()
+                            || (f.base.is_some() && f.base.as_ref() == hint)
+                            || (f.base.is_none()
+                                && hint.is_some_and(|h| f.bytes.len() - f.data_at < h.len() + SMALL_GAIN)) =>
+                    {
+                        Ok(Tried::Reuse(f))
+                    }
                     _ => new_entry(n),
                 }
             })?;
@@ -615,6 +636,17 @@ impl DiskBackend {
     }
 
     fn all_keys(&self) -> io::Result<Vec<String>> {
+        let mut keys = self.loose_keys()?;
+        if let Some(p) = &self.packs {
+            keys.extend(p.all()?.into_iter().filter(|n| !n.starts_with('#')));
+            keys.sort_unstable();
+            keys.dedup();
+        }
+        Ok(keys)
+    }
+
+    /// The variables and the blobs kept as files, not in packs.
+    fn loose_keys(&self) -> io::Result<Vec<String>> {
         let mut keys = Vec::new();
         var_names(&self.root.join("vars"), String::new(), &mut keys)?;
         for alg in fs::read_dir(self.root.join("blobs"))? {
@@ -625,11 +657,6 @@ impl DiskBackend {
                     keys.push(format!("{alg_name}:{}", blob?.file_name().to_string_lossy()));
                 }
             }
-        }
-        if let Some(p) = &self.packs {
-            keys.extend(p.all()?.into_iter().filter(|n| !n.starts_with('#')));
-            keys.sort_unstable();
-            keys.dedup();
         }
         Ok(keys)
     }
@@ -1093,7 +1120,7 @@ impl Backend for DiskBackend {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
                 Err(e) => return Err(e),
             },
-            None => self.all_keys()?,
+            None => self.loose_keys()?,
         };
         // Packed blobs in the span.
         let mut candidates = candidates;
@@ -1201,6 +1228,32 @@ mod tests {
         assert_eq!(fs::read(b.path(&k2)).unwrap(), big(2, 100_000));
         drop(b);
         assert!(!DiskBackend::open(dir.path()).unwrap().chunked());
+    }
+
+    #[test]
+    fn sealing_merges_the_packs_and_a_repack_reuses_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = DiskBackend::open(dir.path()).unwrap();
+        let key = |v: &[u8]| crate::algo::lookup("blake3").unwrap().key(v);
+        let vals: Vec<Vec<u8>> = (0..6u8).map(|i| vec![i; 3000]).collect();
+        let keys: Vec<String> = vals.iter().map(|v| key(v)).collect();
+        for pair in keys.iter().zip(&vals).collect::<Vec<_>>().chunks(2) {
+            let batch: Vec<(&str, &[u8])> = pair.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+            b.put_blobs(&batch).unwrap();
+        }
+        assert!(!b.sealed(&keys[0]).unwrap());
+        b.seal_packs().unwrap();
+        let packs = fs::read_dir(dir.path().join("packs"))
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "pack"))
+            .count();
+        assert_eq!(packs, 1);
+        for (k, v) in keys.iter().zip(&vals) {
+            assert!(b.sealed(k).unwrap());
+            assert_eq!(DiskBackend::open(dir.path()).unwrap().get(k).unwrap().as_ref(), Some(v));
+        }
+        let r = b.repack(&[], &Default::default()).unwrap();
+        assert_eq!(r.whole, keys.len());
     }
 
     #[test]

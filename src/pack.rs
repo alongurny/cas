@@ -101,6 +101,25 @@ impl Drop for Map {
 struct Idx {
     bytes: IdxBytes,
     n: usize,
+    /// Lookups by binary search so far; past [`HASH_AFTER`] a hash table
+    /// of the records is built (a gc or clone looks up every key, in up
+    /// to a dozen packs, and each search step is a cache miss).
+    searches: std::sync::atomic::AtomicU32,
+    table: std::sync::OnceLock<Vec<u32>>,
+}
+
+/// Binary searches in one index before it gets a hash table.
+const HASH_AFTER: u32 = 4096;
+
+/// A name's slot hash: its last 8 bytes (a digest's hex is uniform), mixed.
+fn name_hash(name: &[u8]) -> u64 {
+    let mut t = [0u8; 8];
+    let tail = &name[name.len().saturating_sub(8)..];
+    t[..tail.len()].copy_from_slice(tail);
+    let mut h = u64::from_le_bytes(t) ^ (name.len() as u64).rotate_left(56);
+    h ^= h >> 33;
+    h = h.wrapping_mul(0xff51afd7ed558ccd);
+    h ^ (h >> 33)
 }
 
 enum IdxBytes {
@@ -151,7 +170,7 @@ impl Idx {
         if b.len() < 12 + n * REC {
             return Err(bad(format!("{id}.idx: truncated")));
         }
-        Ok(Idx { bytes, n })
+        Ok(Idx { bytes, n, searches: Default::default(), table: Default::default() })
     }
 
     /// Record `i`'s name bytes; a record pointing outside the file reads
@@ -175,10 +194,14 @@ impl Idx {
 
     /// The first record whose name is not less than `name`.
     fn lower_bound(&self, name: &str) -> usize {
+        self.lower_bound_bytes(name.as_bytes())
+    }
+
+    fn lower_bound_bytes(&self, name: &[u8]) -> usize {
         let (mut lo, mut hi) = (0, self.n);
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if self.name_bytes(mid) < name.as_bytes() {
+            if self.name_bytes(mid) < name {
                 lo = mid + 1;
             } else {
                 hi = mid;
@@ -188,8 +211,45 @@ impl Idx {
     }
 
     fn get(&self, name: &str) -> Option<u64> {
-        let i = self.lower_bound(name);
-        (i < self.n && self.name_bytes(i) == name.as_bytes()).then(|| self.offset(i))
+        let name = name.as_bytes();
+        let table = match self.table.get() {
+            Some(t) => Some(t),
+            None if self.searches.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= HASH_AFTER => {
+                Some(self.table.get_or_init(|| self.build_table()))
+            }
+            None => None,
+        };
+        let i = match table {
+            Some(t) => {
+                // Open addressing, a power of two at least twice n; slot
+                // values are record + 1, 0 empty.
+                let mask = t.len() - 1;
+                let mut at = name_hash(name) as usize & mask;
+                loop {
+                    match t[at] {
+                        0 => return None,
+                        r if self.name_bytes(r as usize - 1) == name => break r as usize - 1,
+                        _ => at = (at + 1) & mask,
+                    }
+                }
+            }
+            None => self.lower_bound_bytes(name),
+        };
+        (i < self.n && self.name_bytes(i) == name).then(|| self.offset(i))
+    }
+
+    fn build_table(&self) -> Vec<u32> {
+        let size = (self.n * 2).next_power_of_two().max(2);
+        let mut t = vec![0u32; size];
+        let mask = size - 1;
+        for i in 0..self.n {
+            let mut at = name_hash(self.name_bytes(i)) as usize & mask;
+            while t[at] != 0 {
+                at = (at + 1) & mask;
+            }
+            t[at] = i as u32 + 1;
+        }
+        t
     }
 }
 
@@ -837,7 +897,35 @@ impl Packs {
         if first == last {
             return Ok(());
         }
-        let merge = &ids[first..];
+        self.merge(&ids[first..], tmp)?;
+        Ok(())
+    }
+
+    /// Merge every pack into one and record it as the sealed pack, as a
+    /// repack would: for a writer whose deltas are as good as a repack's
+    /// (git import, against each path's last version), so the next gc
+    /// reuses them instead of trying each again. Best effort, like
+    /// [`Packs::compact`].
+    pub fn seal_all(&self, tmp: &Path) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let lock = File::create(self.dir.join("compact.lock"))?;
+        // SAFETY: flock on a descriptor we own; released when it closes.
+        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Ok(());
+        }
+        self.refresh()?;
+        let ids = self.state.read().unwrap().packs.clone();
+        let id = match ids.as_slice() {
+            [] => return Ok(()),
+            [one] => one.clone(),
+            _ => self.merge(&ids, tmp)?,
+        };
+        self.seal(&id, tmp)
+    }
+
+    /// Copy the frames of packs `merge` (oldest first; a name's first frame
+    /// wins) into one new pack, then drop them. The new pack's id.
+    fn merge(&self, merge: &[String], tmp: &Path) -> io::Result<String> {
         let mut w = self.writer(tmp)?;
         let mut seen = std::collections::HashSet::new();
         for id in merge {
@@ -860,13 +948,14 @@ impl Packs {
                 w.add_frame(name, &map.bytes()[at..at + len])?;
             }
         }
-        w.finish()?;
+        let new = w.finish()?;
         for id in merge {
             let _ = fs::remove_file(self.dir.join(format!("{id}.idx")));
             let _ = fs::remove_file(self.dir.join(format!("{id}.pack")));
         }
         File::open(&self.dir)?.sync_all()?;
-        self.refresh()
+        self.refresh()?;
+        Ok(new)
     }
 
     /// Start a pack; temp files go in `tmp`.
