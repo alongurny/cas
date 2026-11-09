@@ -145,10 +145,13 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
   search (index 43 -> 20 MB, store 292 MB). Old frames and indexes still
   read. Then import-git's delta bases from the parent commits instead of
   the last version imported at a path (store 292 -> 192 MB, import ~4 s
-  slower). The cost: import 89 -> ~100 s, fsck 29 -> 35 s, checkout user CPU
+  slower), and frames without their own name (the index has it) and with
+  varint lengths (pack 176 -> 157 MB, git's 155 MB; with the index 177 MB
+  against git's 169 MB of pack, idx and rev). The cost: import 89 -> ~100 s, fsck 29 -> 35 s, checkout user CPU
   0.23 -> 0.42 s (longer chains).
-- **Left:** the store is 192 MB against git's 162 MB pack (frame
-  headers 37 MB: each frame's name and a delta's base by name); path-log reads the whole history (1 s)
+- **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
+  (git's 423k objects); a delta names its base by 33 bytes (git's
+  offset deltas take 2 to 4); path-log reads the whole history (1 s)
   before the root blobs; fsck and import are slower than git.
 
 Earlier notes, before that round:
