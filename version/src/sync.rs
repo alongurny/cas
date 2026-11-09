@@ -462,7 +462,19 @@ pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(O
         None => Expect::Absent,
     };
     match dst.write(to, head.to_string().as_bytes(), &expect) {
-        Ok(()) => Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied)),
+        Ok(()) => {
+            // Note what it replaced, so the destination's graph and
+            // ancestry of the new history start from the old one's.
+            if let Some(t) = &theirs
+                && let Some(alg) = cas_core::key::classify(head.key()).and_then(|k| match k {
+                    cas_core::key::Parsed::Blob { alg, .. } => cas_core::algo::lookup(alg),
+                    cas_core::key::Parsed::Var => None,
+                })
+            {
+                crate::graph::record_after_save(dst, alg, t, &head);
+            }
+            Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied))
+        }
         // The destination moved while we copied; the copy is still valid.
         Err(CoreError::Conflict) => Err(Error::Diverged(to.to_string())),
         Err(e) => Err(e.into()),

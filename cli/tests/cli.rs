@@ -260,3 +260,19 @@ fn a_sparse_checkout_commits_only_its_paths() {
     assert!(cas(&store, &["ls"]).contains("README"));
     assert_eq!(cas(&store, &["status", p]), "");
 }
+
+#[test]
+fn diff_and_merge_base_with_the_ancestry_gc_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("a"), "1\n").unwrap();
+    let w = work.to_str().unwrap();
+    let first = cas(&store, &["commit", w, "-m", "first"]);
+    std::fs::write(work.join("a"), "2\n").unwrap();
+    let second = cas(&store, &["commit", w, "-m", "second"]);
+    let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
+    cas(&store, &["gc"]);
+    assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      a");
+    assert_eq!(cas(&store, &["merge-base", &short(&first), &short(&second)]), first);
+}

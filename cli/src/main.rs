@@ -417,15 +417,6 @@ fn run(a: Args) -> Res<()> {
         Some("diff") => {
             let id = at()?;
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
-            // With the ancestry of this very history, only its root is read.
-            if let Some(ix) = cas_version::ancestry::exact(s, &v)
-                && let Some(bases) = quick_merge_bases(s, &v, &ix, &arg(1, "A")?, &arg(2, "B")?)
-            {
-                for b in bases {
-                    out!("{b}");
-                }
-                return Ok(());
-            }
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
             let preds: Vec<NodeId> = st.get(&id).map_err(e)?.map(|n| n.after.into_keys().collect()).unwrap_or_default();
             let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
