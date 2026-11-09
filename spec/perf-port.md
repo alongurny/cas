@@ -66,9 +66,15 @@ durable.
 
 ## Results
 
-Rerun on 2026-11-08 at aef38de: packs, heads, the graph index, the stat
-cache and pack compaction, both tools over plain TCP. Times in seconds.
-Earlier runs are in this file's history.
+Rerun on 2026-11-09 at 7071b7c: the history stored as a tree of parts
+(formats/history-part.md), with packs, the graph index, the stat cache and
+pack compaction, both tools over plain TCP. Times in seconds. Earlier runs
+are in this file's history.
+
+The two commit rows were measured at 7071b7c, where `commit` still read
+the whole history to find the base of a sparse checkout; with that fixed
+(the commit after it), a commit of an unchanged git.git checkout takes
+0.13 s (git 0.20 s).
 
 ### Thesis
 
@@ -76,24 +82,24 @@ Earlier runs are in this file's history.
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.039 | 0.078 | 2.0 |
-| rev-list -- PATH, most-changed file (p0001) | 0.052 | 0.078 | 1.5 |
-| count commits (p5600) | 0.040 | 0.039 | 1.0 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.004 | 0.007 | 1.8 |
-| diff of the last step (p4000) | 0.004 | 0.005 | 1.2 |
-| checkout the tip into an empty dir (p0006) | 0.149 | 0.121 | 0.8 |
-| commit, nothing changed (p0005 status) | 0.126 | 0.018 | 0.1 |
-| commit 500 new files (p0008 odb-fsync) | 0.213 | 0.378 | 1.8 |
-| clone over the network (p5601) | 2.501 | 9.018 | 3.6 |
-| clone without blobs (p5600) | 0.301 | - | - |
-| fetch one file, no clone (cas only) | 0.159 | 0.005 | 0.0 |
-| push one new commit | 0.114 | 0.496 | 4.4 |
-| list every object (p1006 cat-file --batch-all-objects) | 0.044 | 0.565 | 12.8 |
-| merge-base of the tip and a node 100 back (p6010) | 0.004 | 0.076 | 19.0 |
-| last-modified of the root's entries (p8020) | - | 0.026 | - |
-| fsck (p1450) | 2.818 | 3.560 | 1.3 |
-| fast-import (p9300) / import-git | 32.982 | 7.398 | 0.2 |
-| gc (p5600) | 0.672 | 7.000 | 10.4 |
+| rev-list --all (p0001) | 0.038 | 0.061 | 1.6 |
+| rev-list -- PATH, most-changed file (p0001) | 0.051 | 0.073 | 1.4 |
+| count commits (p5600) | 0.038 | 0.041 | 1.1 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.003 | 0.006 | 2.0 |
+| diff of the last step (p4000) | 0.003 | 0.006 | 2.0 |
+| checkout the tip into an empty dir (p0006) | 0.162 | 0.138 | 0.9 |
+| commit, nothing changed (p0005 status) | 0.117 | 0.054 | 0.5 |
+| commit 500 new files (p0008 odb-fsync) | 0.286 | 0.272 | 1.0 |
+| clone over the network (p5601) | 2.618 | 8.783 | 3.4 |
+| clone without blobs (p5600) | 0.285 | - | - |
+| fetch one file, no clone (cas only) | 0.157 | 0.005 | 0.0 |
+| push one new commit | 0.109 | 0.234 | 2.1 |
+| list every object (p1006 cat-file --batch-all-objects) | 0.041 | 0.523 | 12.8 |
+| merge-base of the tip and a node 100 back (p6010) | 0.003 | 0.053 | 17.7 |
+| last-modified of the root's entries (p8020) | - | 0.027 | - |
+| fsck (p1450) | 2.833 | 3.306 | 1.2 |
+| fast-import (p9300) / import-git | 33.311 | 6.881 | 0.2 |
+| gc (p5600) | 0.654 | 6.820 | 10.4 |
 
 ### git.git
 
@@ -102,24 +108,24 @@ one-time work: path-log includes building the graph (about 35 s).
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.630 | 2.609 | 4.1 |
-| rev-list -- PATH, most-changed file (p0001) | 0.604 | 41.661 | 69.0 |
-| count commits (p5600) | 0.700 | 0.853 | 1.2 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.007 | 0.037 | 5.3 |
-| diff of the last step (p4000) | 0.005 | 0.033 | 6.6 |
-| checkout the tip into an empty dir (p0006) | 0.394 | 0.329 | 0.8 |
-| commit, nothing changed (p0005 status) | 0.104 | 0.130 | 1.2 |
-| commit 500 new files (p0008 odb-fsync) | 0.266 | 0.421 | 1.6 |
-| clone over the network (p5601) | 18.132 | 199.880 | 11.0 |
-| clone without blobs (p5600) | 7.380 | - | - |
-| fetch one file, no clone (cas only) | 0.183 | 0.006 | 0.0 |
-| push one new commit | 0.138 | 6.079 | 44.1 |
-| list every object (p1006 cat-file --batch-all-objects) | 0.600 | 68.589 | 114.3 |
-| merge-base of the tip and a node 100 back (p6010) | 0.009 | 3.341 | 371.2 |
-| last-modified of the root's entries (p8020) | - | 72.806 | - |
-| fsck (p1450) | 26.519 | 299.173 | 11.3 |
-| fast-import (p9300) / import-git | 78.618 | 257.338 | 3.3 |
-| gc (p5600) | 9.660 | 512.567 | 53.1 |
+| rev-list --all (p0001) | 0.690 | 1.782 | 2.6 |
+| rev-list -- PATH, most-changed file (p0001) | 0.634 | 40.922 | 64.5 |
+| count commits (p5600) | 0.617 | 0.799 | 1.3 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.006 | 0.045 | 7.5 |
+| diff of the last step (p4000) | 0.005 | 0.035 | 7.0 |
+| checkout the tip into an empty dir (p0006) | 0.304 | 0.337 | 1.1 |
+| commit, nothing changed (p0005 status) | 0.204 | 0.380 | 1.9 |
+| commit 500 new files (p0008 odb-fsync) | 0.440 | 0.538 | 1.2 |
+| clone over the network (p5601) | 17.895 | 206.738 | 11.6 |
+| clone without blobs (p5600) | 7.686 | - | - |
+| fetch one file, no clone (cas only) | 0.182 | 0.011 | 0.1 |
+| push one new commit | 0.133 | 1.089 | 8.2 |
+| list every object (p1006 cat-file --batch-all-objects) | 0.510 | 68.912 | 135.1 |
+| merge-base of the tip and a node 100 back (p6010) | 0.013 | 1.838 | 141.4 |
+| last-modified of the root's entries (p8020) | - | 70.628 | - |
+| fsck (p1450) | 25.208 | 236.050 | 9.4 |
+| fast-import (p9300) / import-git | 78.994 | 252.876 | 3.2 |
+| gc (p5600) | 11.156 | 463.080 | 41.5 |
 
 ## What the numbers say
 
@@ -127,11 +133,13 @@ one-time work: path-log includes building the graph (about 35 s).
   path history, ls, diff, merge-base and fsck are within 2 times git;
   checkout, commit and import are faster; fetching one file without a
   clone takes 5 ms.
-- **git.git still pays for the size of one history object.** Every
-  command that needs more than the heads reads and parses all 82,725
-  nodes: rev-list (2.6 s), merge-base (3.3 s), push (6.1 s), and a commit
-  rewrites it. The fix is a history format that grows by a node without
-  rewriting the rest (step 3, still open).
+- **The history tree** removed the cost of one big history object from
+  the commands that need a few nodes. On git.git: push 6.1 → 1.1 s, a
+  commit 2.8 → 0.13 s, tagging (which read and rewrote the whole history)
+  0.04 s, merge-base 3.3 → 1.8 s, fsck
+  299 → 236 s. merge-base, rev-list and objects still read every node:
+  an ancestry walk that reads leaves on demand (or generation numbers in
+  the graph) is next for merge-base.
 - **Tree reads are the next cost.** path-log after the graph build and
   last-modified read thousands of 85 KB root directories, each chunked and
   verified. A cache of decoded directories and delta bases (git's p0003)

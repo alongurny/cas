@@ -245,7 +245,13 @@ fn run(a: Args) -> Res<()> {
             let dir = arg(1, "DIR")?;
             // The stat cache in DIR spares rehashing unchanged files; a sparse
             // checkout keeps the rest of the history's head.
-            let head = load(s, name)?.1.tip().map(|t| t.version());
+            let head = match history::head(s, name).map_err(e)? {
+                Some(v) => {
+                    let tips = history::Stored::open(s, Some(&v)).map_err(e)?.root.tips;
+                    if tips.len() == 1 { tips.first().map(NodeId::version) } else { None }
+                }
+                None => None,
+            };
             let root = fs::import_worktree(
                 s,
                 b3(),
