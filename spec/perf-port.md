@@ -103,31 +103,47 @@ the whole history to find the base of a sparse checkout; with that fixed
 
 ### git.git
 
-82,725 commits, git 2.43.0, one run each (REPEAT=1), so a first run pays
-one-time work: path-log includes building the graph (about 35 s).
+82,725 commits, git 2.43.0, one run each (REPEAT=1), 2026-11-09 after
+the single-thread round (cas at 3e5dd56 plus the bench build). git's
+clone uses four threads; with `pack.threads=1` it takes 28.5 s.
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.690 | 1.782 | 2.6 |
-| rev-list -- PATH, most-changed file (p0001) | 0.634 | 40.922 | 64.5 |
-| count commits (p5600) | 0.617 | 0.799 | 1.3 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.006 | 0.045 | 7.5 |
-| diff of the last step (p4000) | 0.005 | 0.035 | 7.0 |
-| checkout the tip into an empty dir (p0006) | 0.304 | 0.337 | 1.1 |
-| commit, nothing changed (p0005 status) | 0.204 | 0.380 | 1.9 |
-| commit 500 new files (p0008 odb-fsync) | 0.440 | 0.538 | 1.2 |
-| clone over the network (p5601) | 17.895 | 206.738 | 11.6 |
-| clone without blobs (p5600) | 7.686 | - | - |
-| fetch one file, no clone (cas only) | 0.182 | 0.011 | 0.1 |
-| push one new commit | 0.133 | 1.089 | 8.2 |
-| list every object (p1006 cat-file --batch-all-objects) | 0.510 | 68.912 | 135.1 |
-| merge-base of the tip and a node 100 back (p6010) | 0.013 | 1.838 | 141.4 |
-| last-modified of the root's entries (p8020) | - | 70.628 | - |
-| fsck (p1450) | 25.208 | 236.050 | 9.4 |
-| fast-import (p9300) / import-git | 78.994 | 252.876 | 3.2 |
-| gc (p5600) | 11.156 | 463.080 | 41.5 |
+| rev-list --all (p0001) | 0.688 | 0.939 | 1.4 |
+| rev-list -- PATH, most-changed file (p0001) | 0.644 | 1.822 | 2.8 |
+| count commits (p5600) | 0.720 | 1.075 | 1.5 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.006 | 0.015 | 2.5 |
+| diff of the last step (p4000) | 0.004 | 0.008 | 2.0 |
+| checkout the tip into an empty dir (p0006) | 0.620 | 0.749 | 1.2 |
+| commit, nothing changed (p0005 status) | 0.218 | 0.417 | 1.9 |
+| commit 500 new files (p0008 odb-fsync) | 0.389 | 0.606 | 1.6 |
+| clone over the network (p5601) | 17.165 | 23.019 | 1.3 |
+| clone without blobs (p5600) | 7.044 | - | - |
+| fetch one file, no clone (cas only) | 0.176 | 0.009 | 0.1 |
+| push one new commit | 0.131 | 0.059 | 0.5 |
+| list every object (p1006 cat-file --batch-all-objects) | 0.747 | 0.253 | 0.3 |
+| merge-base of the tip and a node 100 back (p6010) | 0.009 | 0.019 | 2.1 |
+| last-modified of the root's entries (p8020) | - | 19.260 | - |
+| fsck (p1450) | 26.967 | 29.268 | 1.1 |
+| fast-import (p9300) / import-git | 80.694 | 89.241 | 1.1 |
+| gc (p5600) | 10.707 | 15.304 | 1.4 |
 
 ## What the numbers say
+
+- **git.git, 2026-11-09:** every measured command is within 3 times git
+  on one thread, and push, listing objects and fetching one file are
+  faster. What changed: the ancestry blob (merge-base 1.8 s -> 19 ms),
+  path-log reading shared directory blobs once (41 -> 1.8 s), batched git
+  reads and per-path deltas in import-git (253 -> 89 s, store 2.0 GB ->
+  506 MB), clone that hashes each value once and keeps a batch's delta
+  bases (207 -> 23 s), and import-git sealing its pack so the first gc
+  reuses its deltas (463 -> 15 s).
+- **Left:** the store is 506 MB against git's 162 MB pack (a whole value
+  every eleventh version of a file at delta depth 10, and 71-byte base
+  keys in each delta); path-log reads the whole history (1 s) before the
+  root blobs; fsck and import are 10% slower than git.
+
+Earlier notes, before that round:
 
 - **Thesis is at git's speed or better** for everyday commands: log,
   path history, ls, diff, merge-base and fsck are within 2 times git;
