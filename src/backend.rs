@@ -28,6 +28,13 @@ pub trait Backend: Send + Sync {
     /// Up to `limit` keys in `span`, ascending bytewise.
     fn list(&self, span: &Span, limit: usize) -> io::Result<Vec<String>>;
 
+    /// Whether `key` is held: by default a `list` of the span holding only it.
+    fn has(&self, key: &str) -> io::Result<bool> {
+        let mut end = key.as_bytes().to_vec();
+        end.push(0);
+        Ok(self.list(&Span { from: Some(key.as_bytes().to_vec()), to: Some(end) }, 1)?.iter().any(|k| k == key))
+    }
+
     /// Whether this backend keeps chunks (spec/wire.md, chunked transfer).
     /// The chunk methods below are used only when it does.
     fn chunked(&self) -> bool {

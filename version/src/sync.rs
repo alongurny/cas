@@ -101,7 +101,7 @@ pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
         let versions = h.log().into_iter().rev().map(|id| id.version()).collect();
         return copy_history(src, dst, root, versions, HashSet::new());
     }
-    Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: HashSet::new() }.copy_root(root)
+    Copier::new(src, dst, HashSet::new()).copy_root(root)
 }
 
 /// Copy the history at `root` in `src` into `dst`: first `versions`
@@ -118,7 +118,7 @@ fn copy_history(
     versions: Vec<View>,
     known: HashSet<String>,
 ) -> Result<Copied> {
-    let mut c = Copier { src, dst, n: Copied::default(), formats_seen: BTreeSet::new(), done: known };
+    let mut c = Copier::new(src, dst, known);
     let mut seen = HashSet::new();
     let versions: Vec<View> = versions.into_iter().filter(|v| seen.insert(v.key().to_string())).collect();
     // One batched check for all of them first: a push of one commit finds
@@ -141,16 +141,24 @@ fn copy_history(
 }
 
 /// Node versions copied together when a history is copied.
-pub const ROOTS_PER_ROUND: usize = 256;
+pub const ROOTS_PER_ROUND: usize = 1024;
 
 struct Copier<'a> {
     src: &'a dyn Store,
     dst: &'a dyn Store,
     n: Copied,
     formats_seen: BTreeSet<String>,
-    /// Keys known to be in the destination, complete.
+    /// Keys known to be in the destination, complete, or written to
+    /// `pending` after everything they hold.
     done: HashSet<String>,
+    /// Writes not yet sent, children before parents.
+    pending: Vec<Put>,
+    pending_bytes: usize,
 }
+
+/// Bytes of writes gathered into one `write_many`: a disk store makes each
+/// call one pack, so few large calls spare it merging many small packs.
+const WRITE_BYTES: usize = 128 << 20;
 
 /// A container read from the source, waiting for its children.
 struct Waiting {
@@ -159,10 +167,34 @@ struct Waiting {
     left: usize,
 }
 
-impl Copier<'_> {
+impl<'a> Copier<'a> {
+    fn new(src: &'a dyn Store, dst: &'a dyn Store, done: HashSet<String>) -> Copier<'a> {
+        Copier {
+            src,
+            dst,
+            n: Copied::default(),
+            formats_seen: BTreeSet::new(),
+            done,
+            pending: Vec::new(),
+            pending_bytes: 0,
+        }
+    }
+
     fn copy_root(mut self, root: &View) -> Result<Copied> {
         self.copy_many(std::slice::from_ref(root))?;
+        self.flush()?;
         Ok(self.n)
+    }
+
+    /// Send the gathered writes, in order: the closure invariant holds at
+    /// every point, since a parent follows its children in the list.
+    fn flush(&mut self) -> Result<()> {
+        if !self.pending.is_empty() {
+            self.dst.write_many(&self.pending).map_err(|(_, e)| Error::from(e))?;
+            self.pending.clear();
+            self.pending_bytes = 0;
+        }
+        Ok(())
     }
 
     fn copy_many(&mut self, roots: &[View]) -> Result<()> {
@@ -223,8 +255,12 @@ impl Copier<'_> {
             // Write what is ready; each write may free the containers above it.
             loop {
                 self.n.blobs += ready.len();
-                dst.write_many(&ready).map_err(|(_, e)| Error::from(e))?;
-                resolved.extend(ready.drain(..).map(|p| p.key));
+                resolved.extend(ready.iter().map(|p| p.key.clone()));
+                self.pending_bytes += ready.iter().map(|p| p.value.len()).sum::<usize>();
+                self.pending.append(&mut ready);
+                if self.pending_bytes >= WRITE_BYTES {
+                    self.flush()?;
+                }
                 for k in resolved.drain(..) {
                     for parent in parents.remove(&k).unwrap_or_default() {
                         let w = waiting.get_mut(&parent).expect("a waiting parent");

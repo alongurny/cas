@@ -421,7 +421,7 @@ impl DiskBackend {
     }
 
     fn has_blob(&self, key: &str) -> io::Result<bool> {
-        Ok(self.path(key).exists() || self.packs.as_ref().map_or(Ok(false), |p| p.contains(key))?)
+        Ok(self.packs.as_ref().map_or(Ok(false), |p| p.contains(key))? || self.path(key).exists())
     }
 
     fn has_chunk(&self, hex: &str) -> io::Result<bool> {
@@ -697,6 +697,13 @@ fn read_opt(path: &Path) -> io::Result<Option<Vec<u8>>> {
 }
 
 impl Backend for DiskBackend {
+    fn has(&self, key: &str) -> io::Result<bool> {
+        match classify(key) {
+            Some(Parsed::Blob { .. }) => self.has_blob(key),
+            _ => Ok(self.path(key).exists()),
+        }
+    }
+
     fn get(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
         match classify(key) {
             Some(Parsed::Blob { .. }) => self.blob_file(key)?.map(|f| self.decode(f)).transpose(),

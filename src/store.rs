@@ -272,6 +272,23 @@ impl CoreStore {
         Ok(ListPage { keys, rest })
     }
 
+    /// Each key gated as the `list` of the span holding only it, as
+    /// [`has_by_list`], and answered by the backend directly.
+    fn has_many(&self, who: &Who, keys: &[String]) -> Result<Vec<bool>> {
+        keys.iter()
+            .map(|k| {
+                let mut end = k.as_bytes().to_vec();
+                end.push(0);
+                self.gate(who, Op::List { span: &Span { from: Some(k.as_bytes().to_vec()), to: Some(end) } })?;
+                // A key that is not valid is in no store.
+                if self.check_key(k).is_err() {
+                    return Ok(false);
+                }
+                Ok(self.backend.has(k)?)
+            })
+            .collect()
+    }
+
     /// All of `span` in one backend pass, gated as one `list` of it.
     fn list_all(&self, who: &Who, span: &Span) -> Result<Vec<String>> {
         self.gate(who, Op::List { span })?;
@@ -357,6 +374,10 @@ impl Store for Session {
 
     fn list_all(&self, span: &Span) -> Result<Vec<String>> {
         self.store.list_all(&self.who, span)
+    }
+
+    fn has_many(&self, keys: &[String]) -> Result<Vec<bool>> {
+        self.store.has_many(&self.who, keys)
     }
 
     fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
