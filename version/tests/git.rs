@@ -80,3 +80,78 @@ fn a_git_history_imports_with_its_shape_tags_and_messages() {
     let out = tmp.path().join("out");
     assert_eq!(fs::checkout(&s, &v, None, &out).unwrap(), 5);
 }
+
+/// The filters import-git computes from git trees say "changed" for every
+/// path a diff of the versions finds changed: path-log through them gives
+/// what a walk of every step gives, for every path, across adds, deletes,
+/// a file turned directory, mode changes and a merge.
+#[test]
+fn import_filters_agree_with_diffs() {
+    use cas_version::graph::{Filter, Graph};
+    let tmp = tempfile::tempdir().unwrap();
+    let r = tmp.path();
+    run(r, &["init", "-q", "-b", "main"]);
+    let w = |p: &str, s: &str| {
+        let f = r.join(p);
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        std::fs::write(f, s).unwrap();
+    };
+    w("a/x", "1");
+    w("a/b/y", "1");
+    w("c", "1");
+    run(r, &["add", "-A"]);
+    run(r, &["commit", "-q", "-m", "one"]);
+    run(r, &["checkout", "-q", "-b", "side"]);
+    w("a/b/y", "2");
+    w("d/e/f", "1");
+    run(r, &["add", "-A"]);
+    run(r, &["commit", "-q", "-m", "side"]);
+    run(r, &["checkout", "-q", "main"]);
+    std::fs::remove_file(r.join("c")).unwrap();
+    w("c/inner", "now a dir");
+    run(r, &["add", "-A"]);
+    run(r, &["commit", "-q", "-m", "file to dir"]);
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(r.join("a/x"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    run(r, &["commit", "-q", "-am", "mode"]);
+    run(r, &["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+    std::fs::remove_dir_all(r.join("a/b")).unwrap();
+    run(r, &["add", "-A"]);
+    run(r, &["commit", "-q", "-m", "drop a dir"]);
+
+    let s = store();
+    let (h, _, filters) = git::import_with_filters(&s, b3(), r, "HEAD").unwrap();
+    assert_eq!(filters.len(), h.nodes.len());
+    let ours = Graph::build(
+        &s,
+        &h,
+        Some(&Graph {
+            nodes: filters
+                .iter()
+                .map(|(id, f)| cas_version::graph::Record {
+                    id: id.clone(),
+                    after: Vec::new(),
+                    notes: String::new(),
+                    filter: f.clone(),
+                })
+                .collect(),
+        }),
+        1,
+    )
+    .unwrap();
+    let all = Graph::unfiltered(&h);
+    assert!(ours.nodes.iter().any(|r| matches!(r.filter, Filter::Bloom(_))));
+    for p in ["a", "a/x", "a/b", "a/b/y", "c", "c/inner", "d", "d/e", "d/e/f", "zz", "a/zz"] {
+        let p = Path::new(p).unwrap();
+        assert_eq!(ours.path_log(&s, &p).unwrap(), all.path_log(&s, &p).unwrap(), "{p:?}");
+    }
+    // A step with one predecessor has the filter its diff gives.
+    for r in &ours.nodes {
+        let n = &h.nodes[&r.id];
+        if n.after.len() == 1 {
+            let p = n.after.keys().next().unwrap();
+            let changes = cas_version::diff(&s, &p.version(), &r.id.version(), None).unwrap();
+            assert_eq!(r.filter, Filter::of(changes.iter().map(|c| &c.path)), "{}", r.id);
+        }
+    }
+}

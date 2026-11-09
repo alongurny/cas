@@ -600,10 +600,13 @@ fn run(a: Args) -> Res<()> {
             let repo = arg(1, "REPO")?;
             let rev = a.rest.get(2).cloned().unwrap_or_else(|| "HEAD".into());
             let start = std::time::Instant::now();
-            let (h, n) = cas_version::git::import(s, b3(), repo.as_ref(), &rev).map_err(e)?;
+            let (h, n, filters) = cas_version::git::import_with_filters(s, b3(), repo.as_ref(), &rev).map_err(e)?;
             formats::publish(s).map_err(e)?;
             let v = history::save(s, b3(), name, None, &h).map_err(|x| format!("{name}: {x}"))?;
             cas_version::ancestry::record(s, b3(), &v, &h);
+            // The graph too (git's commit-graph with changed-path filters):
+            // path-log and last-modified skip the steps it rules out.
+            graph::record_with(s, b3(), &v, &h, filters).map_err(e)?;
             // Its deltas are a repack's (each file against its path's last
             // version): one sealed pack, so a gc reuses them.
             if !a.store.starts_with("http://")

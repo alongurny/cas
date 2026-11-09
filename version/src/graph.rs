@@ -382,6 +382,22 @@ pub fn graph(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result
     Ok(g)
 }
 
+/// Record the graph of `h`, saved at `input`, with the step filters
+/// `filters` by node (as import-git computes them from the git trees it
+/// reads); a node without one is diffed.
+pub fn record_with(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    input: &View,
+    h: &History,
+    filters: HashMap<NodeId, Filter>,
+) -> Result<()> {
+    let nodes = filters.into_iter().map(|(id, filter)| Record { id, after: Vec::new(), notes: String::new(), filter });
+    let g = Graph::build(store, h, Some(&Graph { nodes: nodes.collect() }), threads())?;
+    derived::record(store, alg, &GRAPH, input, &g.encode());
+    Ok(())
+}
+
 /// After a history was saved at `new`, replacing `old`: note `old`, so the
 /// next graph of `new` starts from `old`'s instead of from nothing. A save
 /// stays cheap; the diffs happen when a graph is asked for. Best effort.

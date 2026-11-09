@@ -69,3 +69,6 @@ Findings:
    stores deltas between similar files, which content-defined chunks only partly match.
 4. Submodules have no CAS form yet. A natural one is a view of the submodule's own history (or
    version), which needs a format for it.
+5. import-git records the derived graph too: it diffs each commit's raw git trees against its
+   first parent while it reads them, so the graph's changed-path filters cost no second walk
+   (path-log on git.git 1.16 -> 0.31 s).

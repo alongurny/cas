@@ -160,9 +160,16 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
 - **Offset deltas:** a delta on a base earlier in the same pack names it
   by distance, as git's do: no index lookup per chain link. Pack 157 ->
   143 MB (git's 155 MB).
+- **Index lookups:** a key's hex is parsed by table, and a fixed section
+  that has served many lookups builds a fanout by leading digest bits:
+  835 -> 350 ns a lookup.
+- **Changed paths at import:** import-git already reads both git trees of
+  each commit, so it lists the changed paths there (a merge-join of raw
+  tree entries against the first parent) and records the graph's filters
+  with the ancestry. path-log no longer diffs every commit first: 1.16 ->
+  0.31 s (git 0.71); import pays about 3.5 s for it.
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
-  (git's 423k objects); path-log reads the whole history (1 s)
-  before the root blobs; fsck and import are slower than git.
+  (git's 423k objects); gc and import are slower than git.
 
 Earlier notes, before that round:
 
