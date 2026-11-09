@@ -43,8 +43,10 @@ const IDX_MAGIC: &[u8; 8] = b"CASIDX02";
 const REC: usize = 14;
 const FILE: u8 = 0;
 const DELTA: u8 = 1;
-/// Longest chain of deltas `repack` builds.
-pub const MAX_DEPTH: usize = 10;
+/// Longest chain of deltas a pack holds (git's default depth). At 10, a
+/// file's every eleventh version was whole: git.git's store took 506 MB,
+/// 350 MB at 50; reading the newest version of a file costs the most.
+pub const MAX_DEPTH: usize = 50;
 
 static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -309,7 +311,7 @@ pub struct Packs {
 const FRESH: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Bytes of base values kept.
-const BASE_CACHE_BYTES: usize = 96 << 20;
+const BASE_CACHE_BYTES: usize = 256 << 20;
 
 #[derive(Default)]
 struct BaseCache {
@@ -691,46 +693,47 @@ impl Packs {
     }
 
     fn file_at_depth(&self, name: &str, depth: usize) -> io::Result<Option<Vec<u8>>> {
-        if depth > MAX_DEPTH + 1 {
-            return Err(bad(format!("delta chain too long at {name}")));
-        }
-        // A base may have been removed: its dependents still need it.
-        let Some((loc, map)) = self.locate_mapped(name, depth > 0)? else { return Ok(None) };
+        let as_file = |v: &[u8]| {
+            let mut f = Vec::with_capacity(v.len() + 1);
+            f.push(0);
+            f.extend_from_slice(v);
+            f
+        };
         // A value decoded lately as a base (a walk often reads a chain from
         // its newest end) is not decoded again.
         if depth == 0
             && let Some(v) = self.bases.lock().unwrap().get(name)
         {
-            let mut f = Vec::with_capacity(v.len() + 1);
-            f.push(0);
-            f.extend_from_slice(&v);
-            return Ok(Some(f));
+            // Still held (a removed name stays readable only as a base).
+            if self.locate_mapped(name, false)?.is_some() {
+                return Ok(Some(as_file(&v)));
+            }
         }
-        let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
-        let kind = take(&mut b, 1)?[0];
-        let n = take_u16(&mut b)?;
-        take(&mut b, n)?;
-        let n = take_u32(&mut b)?;
-        let data = take(&mut b, n)?;
+        // A base may have been removed: its dependents still need it.
+        let Some((loc, map)) = self.locate_mapped(name, depth > 0)? else { return Ok(None) };
+        let (kind, data) = frame_data(&map, loc)?;
         match kind {
             FILE => Ok(Some(data.to_vec())),
             DELTA => {
-                let mut b = data;
-                let n = take_u16(&mut b)?;
-                let base = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?.to_string();
-                let size = take_u32(&mut b)?;
-                let base_value = self.base_value(&base, depth + 1)?;
-                let value = with_dict_decompress(&base_value, b, size)?;
-                let file = [&[0u8][..], &value].concat();
-                // A walk reads the next version at the same path soon, a
-                // delta on this one.
-                if depth == 0 {
-                    self.bases.lock().unwrap().put(name, std::sync::Arc::new(value));
-                }
-                Ok(Some(file))
+                let v = self.delta_value(name, data, depth)?;
+                Ok(Some(as_file(&v)))
             }
             k => Err(bad(format!("frame kind {k}"))),
         }
+    }
+
+    /// The value of the delta frame `data` of `name`, kept in the base
+    /// cache: a walk reads the next version at the same path soon, a delta
+    /// on this one.
+    fn delta_value(&self, name: &str, data: &[u8], depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let mut b = data;
+        let n = take_u16(&mut b)?;
+        let base = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?;
+        let size = take_u32(&mut b)?;
+        let base_value = self.base_value(base, depth + 1)?;
+        let v = std::sync::Arc::new(with_dict_decompress(&base_value, b, size)?);
+        self.bases.lock().unwrap().put(name, v.clone());
+        Ok(v)
     }
 
     /// The frame stored for `name`, as it is in its pack, to copy into
@@ -796,6 +799,16 @@ impl Packs {
     }
 }
 
+/// The kind and data of the frame at `loc`.
+fn frame_data(map: &Map, loc: Loc) -> io::Result<(u8, &[u8])> {
+    let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
+    let kind = take(&mut b, 1)?[0];
+    let n = take_u16(&mut b)?;
+    take(&mut b, n)?;
+    let n = take_u32(&mut b)?;
+    Ok((kind, take(&mut b, n)?))
+}
+
 fn frame_at(map: &Map, loc: Loc) -> io::Result<Option<Frame>> {
     {
         let at = loc.offset as usize;
@@ -827,10 +840,19 @@ impl Packs {
         if let Some(v) = self.bases.lock().unwrap().get(name) {
             return Ok(v);
         }
-        let file = self.file_at_depth(name, depth)?.ok_or_else(|| bad(format!("base {name} gone")))?;
-        let v = std::sync::Arc::new(plain_value(&file)?);
-        self.bases.lock().unwrap().put(name, v.clone());
-        Ok(v)
+        if depth > MAX_DEPTH + 1 {
+            return Err(bad(format!("delta chain too long at {name}")));
+        }
+        let (loc, map) = self.locate_mapped(name, true)?.ok_or_else(|| bad(format!("base {name} gone")))?;
+        match frame_data(&map, loc)? {
+            (FILE, data) => {
+                let v = std::sync::Arc::new(plain_value(data)?);
+                self.bases.lock().unwrap().put(name, v.clone());
+                Ok(v)
+            }
+            (DELTA, data) => self.delta_value(name, data, depth),
+            (k, _) => Err(bad(format!("frame kind {k}"))),
+        }
     }
 
     /// Names held in packs, in `[from, to)` (`to` open when `None`).

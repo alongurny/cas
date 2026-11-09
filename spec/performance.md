@@ -276,7 +276,7 @@ for both tools. Results are recorded per corpus:
   takes delta hints from `gc::delta_hints` (the same path in the previous
   version, and for a chunked file the chunk at the same position), and keeps
   a zstd-with-dictionary delta when it is smaller, with chains at most 10
-  deep. Thesis store 246 MB → 140 MB after gc (git 96 MB, 90 MB of it PDFs);
+  deep (50 since 2026-11-09, as git's default). Thesis store 246 MB → 140 MB after gc (git 96 MB, 90 MB of it PDFs);
   `import-git` now batches its writes, 27.9 s → 5.4 s.
 
 - 2026-11-08, step 3 begun, on git.git (82,725 nodes), each command was
