@@ -11,6 +11,7 @@
 use crate::formats::{self, Kind};
 use crate::history;
 use crate::{Error, Result, View, is_blob_key, read_blob};
+use cas_core::keyhash::{KeyMap, KeySet};
 use cas_core::store::Put;
 use cas_core::{Error as CoreError, Expect, Form, Span, Store, Stored};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -84,8 +85,17 @@ fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -
 /// The views inside `bytes`, the value of `r`, if its format holds any.
 /// `None` for formats that hold no views (files, unknown formats).
 pub(crate) fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
+    match r.known_format().map(|f| &f.kind) {
+        Some(Kind::Dir(d)) => Ok(Some(d.blob_children(r.key(), bytes)?)),
+        _ => children_of_light(r, bytes, &|_| false),
+    }
+}
+
+/// [`children_of`] leaving out the views `skip` names; a directory blob is
+/// read in one pass that checks bounds, not its canonical form.
+fn children_of_light(r: &View, bytes: &[u8], skip: &dyn Fn(&str) -> bool) -> Result<Option<Vec<View>>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
-        Some((Kind::Dir(d), _)) => Ok(Some(d.blob_children(r.key(), bytes)?)),
+        Some((Kind::Dir(d), _)) => Ok(Some(d.blob_children_light(r.key(), bytes, skip)?)),
         Some((_, "history")) => {
             let root = crate::htree::Root::decode(bytes).map_err(|e| crate::malformed(r.key(), e))?;
             Ok(Some(root.nodes.into_iter().collect()))
@@ -93,6 +103,10 @@ pub(crate) fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
         Some((_, "history-part")) => Ok(Some(crate::htree::part_children(r.key(), bytes)?)),
         _ => Ok(None),
     }
+}
+
+fn wrong_bytes(key: &str) -> Error {
+    Error::Store(CoreError::Unavailable(format!("the source sent wrong bytes for {key}")))
 }
 
 /// Copy everything reachable from `root` that `dst` lacks, children before
@@ -159,17 +173,22 @@ struct Copier<'a> {
     formats_seen: BTreeSet<String>,
     /// Keys known to be in the destination, complete, or written to
     /// `pending` after everything they hold.
-    done: HashSet<String>,
+    done: KeySet,
     /// Writes not yet sent, children before parents.
     pending: Vec<Put>,
     pending_bytes: usize,
+    /// The size of `pending` as the source keeps it (forms, else values).
+    pending_stored: usize,
     /// Where each pending write is in `pending`.
-    pending_at: HashMap<String, usize>,
+    pending_at: KeyMap<usize>,
 }
 
-/// Bytes of writes gathered into one `write_many`: a disk store makes each
-/// call one pack, so few large calls spare it merging many small packs.
-const WRITE_BYTES: usize = 128 << 20;
+/// Writes are gathered into one `write_many` until they hold this many
+/// bytes as the source stores them, or [`WRITE_BYTES`] as values: a disk
+/// store makes each call one pack, so few large calls spare it merging
+/// many small packs (cas_core's `BIG_PACK`).
+const WRITE_STORED: usize = 64 << 20;
+const WRITE_BYTES: usize = 1 << 30;
 
 /// A container read from the source, waiting for its children.
 struct Waiting {
@@ -186,10 +205,11 @@ impl<'a> Copier<'a> {
             dst,
             n: Copied::default(),
             formats_seen: BTreeSet::new(),
-            done,
+            done: done.into_iter().collect(),
             pending: Vec::new(),
             pending_bytes: 0,
-            pending_at: HashMap::new(),
+            pending_stored: 0,
+            pending_at: KeyMap::default(),
         }
     }
 
@@ -202,15 +222,16 @@ impl<'a> Copier<'a> {
     /// The values of the blobs `keys` from the source, each with the form
     /// the source keeps it in. A delta's base comes from this batch, the
     /// writes not yet sent or still waiting, or the destination; one whose base is in none
-    /// of them is read again as a value. Every value is checked against
-    /// its key.
-    fn read_values(&self, keys: &[String], waiting: &HashMap<String, Waiting>) -> Result<Vec<(Vec<u8>, Option<Form>)>> {
+    /// of them is read again as a value. Values are not checked against
+    /// their keys here: the destination does that as it writes them.
+    fn read_values(&self, keys: &[String], waiting: &KeyMap<Waiting>) -> Result<Vec<(Vec<u8>, Option<Form>)>> {
         let mut stored: Vec<Stored> = Vec::with_capacity(keys.len());
         for (k, s) in keys.iter().zip(self.src.read_stored_many(keys)) {
             stored.push(s?.ok_or_else(|| Error::Missing(k.clone()))?);
         }
         let mut values: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
-        let at: HashMap<&str, usize> = keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+        let at: HashMap<&str, usize, cas_core::keyhash::KeyState> =
+            keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
         let bad = |k: &str, e: std::io::Error| Error::Store(CoreError::Unavailable(format!("{k}: {e}")));
         let mut todo: Vec<usize> = Vec::new();
         for (i, s) in stored.iter().enumerate() {
@@ -226,16 +247,22 @@ impl<'a> Copier<'a> {
             let mut left = Vec::new();
             for i in todo {
                 let base = stored[i].base().unwrap();
-                let bv = match at.get(base) {
-                    Some(&j) => values[j].clone(),
+                // The base where it is, not copied.
+                let near: Option<&[u8]> = match at.get(base) {
+                    Some(&j) => values[j].as_deref(),
                     None => match (self.pending_at.get(base), waiting.get(base)) {
-                        (Some(&j), _) => Some(self.pending[j].value.clone()),
-                        (None, Some(w)) => Some(w.bytes.clone()),
-                        (None, None) => self.dst.read(base).ok().flatten(),
+                        (Some(&j), _) => Some(&self.pending[j].value),
+                        (None, Some(w)) => Some(&w.bytes),
+                        (None, None) => None,
                     },
                 };
-                match bv {
-                    Some(b) => values[i] = Some(stored[i].value(Some(&b)).map_err(|e| bad(&keys[i], e))?),
+                let decoded = match near {
+                    Some(b) => Some(stored[i].value(Some(b))),
+                    None if at.contains_key(base) => None,
+                    None => self.dst.read(base).ok().flatten().map(|b| stored[i].value(Some(&b))),
+                };
+                match decoded {
+                    Some(v) => values[i] = Some(v.map_err(|e| bad(&keys[i], e))?),
                     None => left.push(i),
                 }
             }
@@ -251,15 +278,11 @@ impl<'a> Copier<'a> {
                 stored[i] = Stored::Value(Vec::new());
             }
         }
+        // Not hashed here: the destination checks each value against its key
+        // as it writes it (see `flush`).
         let mut out = Vec::with_capacity(keys.len());
-        for ((k, v), s) in keys.iter().zip(values).zip(stored) {
-            let v = v.expect("every value decoded or read");
-            if let Some(cas_core::key::Parsed::Blob { alg, .. }) = cas_core::key::classify(k)
-                && cas_core::algo::lookup(alg).is_some_and(|a| a.key(&v) != *k)
-            {
-                return Err(Error::Store(CoreError::Unavailable(format!("the source sent wrong bytes for {k}"))));
-            }
-            out.push((v, s.into_form()));
+        for (v, s) in values.into_iter().zip(stored) {
+            out.push((v.expect("every value decoded or read"), s.into_form()));
         }
         Ok(out)
     }
@@ -268,21 +291,26 @@ impl<'a> Copier<'a> {
     /// every point, since a parent follows its children in the list.
     fn flush(&mut self) -> Result<()> {
         if !self.pending.is_empty() {
-            self.dst.write_many(&self.pending).map_err(|(_, e)| Error::from(e))?;
+            self.dst.write_many(&self.pending).map_err(|(i, e)| match e {
+                // The values come unchecked from the source.
+                CoreError::Invalid(cas_core::Invalid::HashMismatch) => wrong_bytes(&self.pending[i].key),
+                e => Error::from(e),
+            })?;
             self.pending.clear();
             self.pending_at.clear();
             self.pending_bytes = 0;
+            self.pending_stored = 0;
         }
         Ok(())
     }
 
     fn copy_many(&mut self, roots: &[View]) -> Result<()> {
         let (src, dst) = (self.src, self.dst);
-        let mut waiting: HashMap<String, Waiting> = HashMap::new();
+        let mut waiting: KeyMap<Waiting> = KeyMap::default();
         // Child key to the containers waiting on it.
-        let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+        let mut parents: KeyMap<Vec<String>> = KeyMap::default();
         let mut frontier: Vec<View> = roots.to_vec();
-        let mut queued: HashSet<String> = HashSet::new();
+        let mut queued = KeySet::default();
         while !frontier.is_empty() {
             let mut level: Vec<View> = Vec::new();
             for r in frontier.drain(..) {
@@ -307,16 +335,26 @@ impl<'a> Copier<'a> {
             }
             let keys: Vec<String> = want.iter().map(|r| r.key().to_string()).collect();
             let mut ready: Vec<Put> = Vec::new();
-            let mut forms: HashMap<String, Form> = HashMap::new();
+            let mut forms: KeyMap<Form> = KeyMap::default();
             for (r, (bytes, form)) in want.into_iter().zip(self.read_values(&keys, &waiting)?) {
                 if let Some(f) = form {
                     forms.insert(r.key().to_string(), f);
                 }
-                let Some(kids) = children_of(&r, &bytes)? else {
+                let kids = children_of_light(&r, &bytes, &|k| self.done.contains(k)).map_err(|e| {
+                    // Unreadable as sent: report bytes that are not the key's.
+                    match cas_core::key::classify(r.key()) {
+                        Some(cas_core::key::Parsed::Blob { alg, .. })
+                            if cas_core::algo::lookup(alg).is_some_and(|a| a.key(&bytes) != r.key()) =>
+                        {
+                            wrong_bytes(r.key())
+                        }
+                        _ => e,
+                    }
+                })?;
+                let Some(kids) = kids else {
                     ready.push(Put { form: forms.remove(r.key()), ..Put::blob(r.key(), bytes) });
                     continue;
                 };
-                let kids: BTreeSet<View> = kids.into_iter().collect();
                 let mut left = 0;
                 for k in kids {
                     if self.done.contains(k.key()) {
@@ -340,11 +378,13 @@ impl<'a> Copier<'a> {
                 self.n.blobs += ready.len();
                 resolved.extend(ready.iter().map(|p| p.key.clone()));
                 self.pending_bytes += ready.iter().map(|p| p.value.len()).sum::<usize>();
+                self.pending_stored +=
+                    ready.iter().map(|p| p.form.as_ref().map_or(p.value.len(), Form::size)).sum::<usize>();
                 for p in ready.drain(..) {
                     self.pending_at.insert(p.key.clone(), self.pending.len());
                     self.pending.push(p);
                 }
-                if self.pending_bytes >= WRITE_BYTES {
+                if self.pending_bytes >= WRITE_BYTES || self.pending_stored >= WRITE_STORED {
                     self.flush()?;
                 }
                 for k in resolved.drain(..) {

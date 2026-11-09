@@ -12,10 +12,12 @@
 //! Encoding (format 2) is invisible above the backend: a blob's key is still
 //! the hash of its whole content. A blob file starts with one byte: `0` raw
 //! bytes follow, `1` zstd-compressed bytes follow, `2` a zstd-compressed
-//! list of 32-byte chunk ids follows. Blobs over [`CHUNK_OVER`] bytes are cut
-//! at content-defined boundaries, so an edit inside a large blob (a history
-//! that gained a node) changes only the chunks around it, and the rest are
-//! shared on disk. Chunk files use the same `0`/`1` header.
+//! list of 32-byte chunk ids follows. Blobs over [`WHOLE_UP_TO`] bytes are cut
+//! at content-defined boundaries, so an edit inside a large blob changes only
+//! the chunks around it, and the rest are shared on disk. Smaller ones are
+//! kept whole, so a pack can keep them as deltas (as git does a file's
+//! versions), which an edit spread all over a file (a translation's line
+//! references) leaves small where it would change every chunk. Chunk files use the same `0`/`1` header.
 //! - `lock`, held exclusively around every variable CAS, so CAS is atomic across
 //!   threads and processes sharing the root.
 
@@ -38,6 +40,10 @@ pub struct DiskBackend {
 }
 
 pub use crate::chunk::CHUNK_OVER;
+
+/// The longest value a disk store keeps whole (compressed, or a delta in a
+/// pack); longer ones are kept in chunks. The longest a stored form may be.
+pub const WHOLE_UP_TO: usize = crate::store::MAX_FORM_LEN;
 const RAW: u8 = 0;
 const ZSTD: u8 = 1;
 const CHUNKED: u8 = 2;
@@ -105,7 +111,7 @@ impl DiskBackend {
         if !self.encoded {
             return Ok(value.to_vec());
         }
-        if value.len() <= CHUNK_OVER {
+        if value.len() <= WHOLE_UP_TO {
             return pack(value);
         }
         let mut ids = Vec::new();
@@ -123,13 +129,15 @@ impl DiskBackend {
         if !self.encoded {
             return Ok((value.to_vec(), Vec::new()));
         }
-        if value.len() <= CHUNK_OVER {
+        if value.len() <= WHOLE_UP_TO {
             return Ok((pack(value)?, Vec::new()));
         }
         let mut ids = Vec::new();
         let mut chunks = Vec::new();
-        for (id, piece) in crate::chunk::split(value) {
-            if !self.has_chunk(&hex::encode(id))? {
+        let pieces = crate::chunk::split(value);
+        let held = self.has_chunks(&pieces.iter().map(|(id, _)| hex::encode(id)).collect::<Vec<_>>())?;
+        for ((id, piece), held) in pieces.into_iter().zip(held) {
+            if !held {
                 chunks.push((id, pack(piece)?));
             }
             ids.extend_from_slice(&id);
@@ -436,6 +444,74 @@ impl DiskBackend {
         Ok(self.packs.as_ref().map_or(Ok(false), |p| p.contains(key))? || self.path(key).exists())
     }
 
+    /// The names in directory `dir` (none when it is absent): a batch of
+    /// lookups lists the loose directories once and stats only paths under
+    /// those present (a packed store keeps few loose files).
+    fn names_in(dir: &Path) -> io::Result<std::collections::HashSet<String>> {
+        let mut names = std::collections::HashSet::new();
+        match std::fs::read_dir(dir) {
+            Ok(rd) => {
+                for d in rd {
+                    names.insert(d?.file_name().to_string_lossy().into_owned());
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        Ok(names)
+    }
+
+    /// [`DiskBackend::has_blob`] of each key, under one look at the packs
+    /// and one listing of the loose directories.
+    fn has_blobs(&self, keys: &[&str]) -> io::Result<Vec<bool>> {
+        let mut dirs: std::collections::HashMap<&str, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        let packed = match &self.packs {
+            Some(p) => p.contains_many(keys)?,
+            None => vec![false; keys.len()],
+        };
+        keys.iter()
+            .zip(packed)
+            .map(|(k, packed)| {
+                if packed {
+                    return Ok(true);
+                }
+                let Some(Parsed::Blob { alg, digest_hex }) = classify(k) else { return Ok(false) };
+                let prefix = &digest_hex[..2.min(digest_hex.len())];
+                let present = match dirs.entry(alg) {
+                    std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::hash_map::Entry::Vacant(e) => {
+                        e.insert(Self::names_in(&self.root.join("blobs").join(alg))?)
+                    }
+                };
+                Ok(present.contains(prefix) && self.path(k).exists())
+            })
+            .collect()
+    }
+
+    /// [`DiskBackend::has_chunk`] of each id (hex), likewise.
+    fn has_chunks(&self, hexes: &[String]) -> io::Result<Vec<bool>> {
+        let names: Vec<String> = hexes.iter().map(|h| format!("#{h}")).collect();
+        let packed = match &self.packs {
+            Some(p) => p.contains_many(&names.iter().map(String::as_str).collect::<Vec<_>>())?,
+            None => vec![false; hexes.len()],
+        };
+        let mut dirs = None;
+        hexes
+            .iter()
+            .zip(packed)
+            .map(|(h, packed)| {
+                if packed {
+                    return Ok(true);
+                }
+                if dirs.is_none() {
+                    dirs = Some(Self::names_in(&self.root.join("chunks"))?);
+                }
+                Ok(dirs.as_ref().is_some_and(|d| d.contains(&h[..2])) && self.chunk_path(h).exists())
+            })
+            .collect()
+    }
+
     fn has_chunk(&self, hex: &str) -> io::Result<bool> {
         Ok(self.chunk_path(hex).exists()
             || self.packs.as_ref().map_or(Ok(false), |p| p.contains(&format!("#{hex}")))?)
@@ -663,6 +739,54 @@ enum Enc {
     Delta(String, Vec<u8>),
 }
 
+/// How a batch entry is written, with the delta chain depth it gives.
+#[derive(Clone, Copy)]
+enum Depth {
+    /// Whole, and a base at depth 0 if plain.
+    Whole(bool),
+    /// A delta, at this depth.
+    Delta(usize),
+}
+
+/// Decide entry `i` of a batch: a delta stays one while its base's chain
+/// (in the batch or the packs) is shorter than [`crate::pack::MAX_DEPTH`];
+/// else it is written whole. A chain in the batch is followed at most that
+/// far (`steps`), so a cycle of deltas a source sent ends in a whole entry.
+fn batch_depth(
+    enc: &[Enc],
+    at: &std::collections::HashMap<&str, usize>,
+    depth: &mut [Option<Depth>],
+    packs: &crate::pack::Packs,
+    i: usize,
+    steps: usize,
+) -> io::Result<Option<usize>> {
+    use crate::pack::MAX_DEPTH;
+    let as_base = |d: Depth| match d {
+        Depth::Whole(plain) => plain.then_some(0),
+        Depth::Delta(n) => Some(n),
+    };
+    if let Some(d) = depth[i] {
+        return Ok(as_base(d));
+    }
+    let d = match &enc[i] {
+        Enc::File(file, _) => Depth::Whole(matches!(file.first(), Some(&RAW | &ZSTD))),
+        Enc::Delta(base, _) => {
+            let bd = match at.get(base.as_str()) {
+                _ if steps > MAX_DEPTH => None,
+                Some(&j) => batch_depth(enc, at, depth, packs, j, steps + 1)?,
+                None => packs.depth(base)?,
+            };
+            match bd.filter(|d| *d < MAX_DEPTH) {
+                Some(d) => Depth::Delta(d + 1),
+                // Written whole from the value, which is not chunked here.
+                None => Depth::Whole(true),
+            }
+        }
+    };
+    depth[i] = Some(d);
+    Ok(as_base(d))
+}
+
 /// A repack's look at one entry: a stored frame to copy, or file bytes and
 /// the delta tried for them.
 enum Tried {
@@ -753,27 +877,24 @@ impl Backend for DiskBackend {
     }
 
     fn put_stored(&self, blobs: &[crate::store::StoredPut]) -> io::Result<()> {
-        use crate::pack::{Entry, MAX_DEPTH};
+        use crate::pack::Entry;
         use crate::store::Form;
         let Some(packs) = self.packs.as_ref().filter(|_| self.encoded && blobs.len() > 1) else {
             let plain: Vec<(&str, &[u8])> = blobs.iter().map(|b| (b.0, b.1)).collect();
             return self.put_blobs(&plain);
         };
-        let mut todo = Vec::new();
         let mut once = std::collections::HashSet::new();
-        for b in blobs {
-            // Each key once: two forms of one key in a batch could be deltas
-            // on each other.
-            if once.insert(b.0) && !self.has_blob(b.0)? {
-                todo.push(b);
-            }
-        }
+        // Each key once: two forms of one key in a batch could be deltas on
+        // each other.
+        let fresh: Vec<_> = blobs.iter().filter(|b| once.insert(b.0)).collect();
+        let held = self.has_blobs(&fresh.iter().map(|b| b.0).collect::<Vec<_>>())?;
+        let todo: Vec<_> = fresh.into_iter().zip(held).filter(|(_, h)| !h).map(|(b, _)| b).collect();
         // The values in this batch, for checking deltas on them.
         let batch: std::collections::HashMap<&str, &[u8]> = todo.iter().map(|b| (b.0, b.1)).collect();
         // A form is kept only when it decodes to the value: anything else is
         // compressed again, on every core.
         let encoded = parallel_map(&todo, |(key, v, form, like)| {
-            if v.len() <= CHUNK_OVER {
+            if v.len() <= WHOLE_UP_TO {
                 // A likely base: tried as a delta when no form came with it
                 // (git fast-import's delta against the path's last version).
                 if form.is_none()
@@ -784,7 +905,7 @@ impl Backend for DiskBackend {
                         None => self.get(base)?,
                     };
                     let (file, chunks) = self.encode_pure(v)?;
-                    if let Some(bv) = bv.filter(|b| b.len() <= CHUNK_OVER)
+                    if let Some(bv) = bv.filter(|b| b.len() <= WHOLE_UP_TO)
                         && let Some(Entry::Delta { z, .. }) = Entry::delta(base, &bv, v, &file)?
                     {
                         return Ok(Enc::Delta(base.to_string(), z));
@@ -800,7 +921,9 @@ impl Backend for DiskBackend {
                             Some(b) => Some(b.to_vec()),
                             None => self.get(base)?,
                         };
-                        if bv.is_some_and(|b| crate::pack::zstd_exact(Some(&b), z, v.len()).is_ok_and(|d| d == *v)) {
+                        let ok =
+                            bv.is_some_and(|b| crate::pack::zstd_exact(Some(&b), z, v.len()).is_ok_and(|d| d == *v));
+                        if ok {
                             return Ok(Enc::Delta(base.clone(), z.clone()));
                         }
                     }
@@ -816,41 +939,40 @@ impl Backend for DiskBackend {
             if let Enc::File(_, chunks) = e {
                 for (id, packed) in chunks {
                     let hex = hex::encode(id);
-                    if chunks_seen.insert(hex.clone()) && !self.has_chunk(&hex)? {
+                    if chunks_seen.insert(hex.clone()) {
                         w.add(&format!("#{hex}"), &Entry::File(packed.clone()))?;
                     }
                 }
             }
         }
-        // Chain depths of what this batch writes, for the deltas after them.
-        let mut depth: std::collections::HashMap<&str, Option<usize>> = std::collections::HashMap::new();
-        for ((key, value, _, _), e) in todo.iter().zip(encoded) {
-            match e {
-                Enc::File(file, _) => {
-                    depth.insert(key, matches!(file.first(), Some(&RAW | &ZSTD)).then_some(0));
+        // Chain depths of what this batch writes, a base later in the batch
+        // included (a copy brings a file's versions in no set order).
+        let at: std::collections::HashMap<&str, usize> = todo.iter().enumerate().map(|(i, b)| (b.0, i)).collect();
+        let mut depth: Vec<Option<Depth>> = vec![None; todo.len()];
+        for i in 0..todo.len() {
+            batch_depth(&encoded, &at, &mut depth, packs, i, 0)?;
+        }
+        for (((key, value, _, _), e), d) in todo.iter().zip(encoded).zip(depth) {
+            match (e, d) {
+                (Enc::Delta(base, z), Some(Depth::Delta(_))) => {
+                    w.add(key, &Entry::Delta { base, len: value.len(), z })?;
+                }
+                (Enc::Delta(..), _) => {
+                    let (file, _) = self.encode_pure(value)?;
                     w.add(key, &Entry::File(file))?;
                 }
-                Enc::Delta(base, z) => {
-                    let bd = match depth.get(base.as_str()) {
-                        Some(d) => *d,
-                        None => packs.depth(&base)?,
-                    };
-                    match bd.filter(|d| *d < MAX_DEPTH) {
-                        Some(d) => {
-                            depth.insert(key, Some(d + 1));
-                            w.add(key, &Entry::Delta { base, len: value.len(), z })?;
-                        }
-                        None => {
-                            let (file, _) = self.encode_pure(value)?;
-                            depth.insert(key, matches!(file.first(), Some(&RAW | &ZSTD)).then_some(0));
-                            w.add(key, &Entry::File(file))?;
-                        }
-                    }
-                }
+                (Enc::File(file, _), _) => w.add(key, &Entry::File(file))?,
             }
         }
         w.finish()?;
         packs.compact(&self.root.join("tmp"))
+    }
+
+    fn has_many(&self, keys: &[&str]) -> io::Result<Vec<bool>> {
+        if keys.iter().all(|k| matches!(classify(k), Some(Parsed::Blob { .. }))) {
+            return self.has_blobs(keys);
+        }
+        keys.iter().map(|k| self.has(k)).collect()
     }
 
     fn has(&self, key: &str) -> io::Result<bool> {
@@ -879,12 +1001,8 @@ impl Backend for DiskBackend {
     }
 
     fn put_blobs(&self, blobs: &[(&str, &[u8])]) -> io::Result<()> {
-        let mut todo: Vec<&(&str, &[u8])> = Vec::new();
-        for b in blobs {
-            if !self.has_blob(b.0)? {
-                todo.push(b);
-            }
-        }
+        let held = self.has_blobs(&blobs.iter().map(|b| b.0).collect::<Vec<_>>())?;
+        let todo: Vec<&(&str, &[u8])> = blobs.iter().zip(held).filter(|(_, h)| !h).map(|(b, _)| b).collect();
         // Compress on every core; then write in order, one sync for all.
         let encoded = parallel_map(&todo, |(_, v)| self.encode_pure(v))?;
         if let Some(packs) = &self.packs
@@ -896,7 +1014,7 @@ impl Backend for DiskBackend {
             for (_, (_, chunks)) in todo.iter().zip(&encoded) {
                 for (id, packed) in chunks {
                     let hex = hex::encode(id);
-                    if chunks_seen.insert(hex.clone()) && !self.has_chunk(&hex)? {
+                    if chunks_seen.insert(hex.clone()) {
                         w.add(&format!("#{hex}"), &crate::pack::Entry::File(packed.clone()))?;
                     }
                 }
@@ -1041,9 +1159,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let b = DiskBackend::open(dir.path()).unwrap();
         assert!(b.chunked());
-        let one = big(1, 300_000);
+        let one = big(1, WHOLE_UP_TO + 300_000);
         let mut two = one.clone();
-        two.splice(150_000..150_000, b"an edit in the middle".iter().copied());
+        two.splice(WHOLE_UP_TO..WHOLE_UP_TO, b"an edit in the middle".iter().copied());
         let (k1, k2) = ("blake3:".to_string() + &"1".repeat(64), "blake3:".to_string() + &"2".repeat(64));
         b.put_blob(&k1, &one).unwrap();
         let after_one = files(&dir.path().join("chunks"));
@@ -1094,7 +1212,7 @@ mod tests {
             (0..20_000u32).flat_map(|i| format!("line {i} of a file\n").into_bytes()).take(60_000).collect();
         let mut edited = base.clone();
         edited.splice(30_000..30_000, b"one edit ".iter().copied());
-        let large = big(9, 200_000);
+        let large = big(9, WHOLE_UP_TO + 200_000);
         let (k1, k2, k3) = (key(&base), key(&edited), key(&large));
         b.put_blobs(&[(&k1, &base), (&k2, &edited), (&k3, &large)]).unwrap();
         // One pack, no loose blob files.

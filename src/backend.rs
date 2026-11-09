@@ -48,6 +48,11 @@ pub trait Backend: Send + Sync {
         Ok(self.list(&Span { from: Some(key.as_bytes().to_vec()), to: Some(end) }, 1)?.iter().any(|k| k == key))
     }
 
+    /// [`Backend::has`] of each key, in order.
+    fn has_many(&self, keys: &[&str]) -> io::Result<Vec<bool>> {
+        keys.iter().map(|k| self.has(k)).collect()
+    }
+
     /// Whether this backend keeps chunks (spec/wire.md, chunked transfer).
     /// The chunk methods below are used only when it does.
     fn chunked(&self) -> bool {

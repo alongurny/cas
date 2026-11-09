@@ -38,7 +38,7 @@ Measured with the release build on the Thesis repository (4,532 commits; 105 MB 
 | private history, rebase, publish | 0.1 to 0.2 s each |
 | gc run | 1.5 s |
 
-With the encoded disk store (zstd, and chunking of blobs over 64 KiB):
+With the encoded disk store (zstd, and chunking of blobs over 1 MiB; smaller ones whole, so packs keep them as deltas):
 
 | operation | result |
 | --- | --- |

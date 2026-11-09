@@ -100,6 +100,16 @@ pub enum Form {
     Delta { base: String, z: Vec<u8> },
 }
 
+impl Form {
+    /// The bytes of the form (the compressed frame, and a delta's base key).
+    pub fn size(&self) -> usize {
+        match self {
+            Form::Zstd(z) => z.len(),
+            Form::Delta { base, z } => base.len() + z.len(),
+        }
+    }
+}
+
 /// The longest value sent in a form: longer ones go as values (a disk store
 /// keeps those in chunks), so a peer cannot make the reader reserve more.
 pub const MAX_FORM_LEN: usize = 1 << 20;
@@ -367,18 +377,17 @@ impl CoreStore {
     /// Each key gated as the `list` of the span holding only it, as
     /// [`has_by_list`], and answered by the backend directly.
     fn has_many(&self, who: &Who, keys: &[String]) -> Result<Vec<bool>> {
-        keys.iter()
-            .map(|k| {
-                let mut end = k.as_bytes().to_vec();
-                end.push(0);
-                self.gate(who, Op::List { span: &Span { from: Some(k.as_bytes().to_vec()), to: Some(end) } })?;
-                // A key that is not valid is in no store.
-                if self.check_key(k).is_err() {
-                    return Ok(false);
-                }
-                Ok(self.backend.has(k)?)
-            })
-            .collect()
+        let mut valid = Vec::with_capacity(keys.len());
+        for k in keys {
+            let mut end = k.as_bytes().to_vec();
+            end.push(0);
+            self.gate(who, Op::List { span: &Span { from: Some(k.as_bytes().to_vec()), to: Some(end) } })?;
+            // A key that is not valid is in no store.
+            valid.push(self.check_key(k).is_ok());
+        }
+        let asked: Vec<&str> = keys.iter().zip(&valid).filter(|(_, v)| **v).map(|(k, _)| k.as_str()).collect();
+        let mut held = self.backend.has_many(&asked)?.into_iter();
+        Ok(valid.into_iter().map(|v| v && held.next().unwrap_or(false)).collect())
     }
 
     /// All of `span` in one backend pass, gated as one `list` of it.

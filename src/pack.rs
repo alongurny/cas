@@ -231,6 +231,9 @@ impl State {
     }
 }
 
+/// The size from which [`Packs::compact`] leaves a pack alone.
+pub const BIG_PACK: u64 = 64 << 20;
+
 pub struct Packs {
     dir: PathBuf,
     state: RwLock<State>,
@@ -615,6 +618,13 @@ impl Packs {
         Ok(self.locate(name)?.is_some())
     }
 
+    /// [`Packs::contains`] of each name, under one fresh look.
+    pub fn contains_many(&self, names: &[&str]) -> io::Result<Vec<bool>> {
+        self.look(true)?;
+        let st = self.state.read().unwrap();
+        Ok(names.iter().map(|n| !st.removed.contains(*n) && st.get(n).is_some()).collect())
+    }
+
     /// The file bytes stored for `name` (deltas resolved to a `0`-header file).
     pub fn file(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
         self.file_at_depth(name, 0)
@@ -797,6 +807,9 @@ impl Packs {
     /// binary digits of n). Each entry is then copied at most log2 n times
     /// in all, and a lookup searches O(log n) packs. A factor of 2 instead
     /// copied two thirds more during a clone.
+    /// A pack of [`BIG_PACK`] bytes or more is left as it is (a clone writes
+    /// a few such; gc's repack rewrites them): merging them saved no lookup
+    /// worth a copy of the store.
     /// Frames are copied as they are, deltas included. Best effort: another
     /// process compacting at the same time makes this one skip.
     pub fn compact(&self, tmp: &Path) -> io::Result<()> {
@@ -812,8 +825,12 @@ impl Packs {
             st.packs.iter().cloned().zip(st.idx.iter().map(|i| i.n)).unzip()
         };
         let Some(last) = ids.len().checked_sub(1) else { return Ok(()) };
+        let big = |id: &str| fs::metadata(self.dir.join(format!("{id}.pack"))).is_ok_and(|m| m.len() >= BIG_PACK);
+        if big(&ids[last]) {
+            return Ok(());
+        }
         let (mut first, mut acc) = (last, sizes[last]);
-        while first > 0 && sizes[first - 1] <= acc {
+        while first > 0 && sizes[first - 1] <= acc && !big(&ids[first - 1]) {
             first -= 1;
             acc += sizes[first];
         }
@@ -860,7 +877,7 @@ impl Packs {
             std::process::id(),
             SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         );
-        let mut out = io::BufWriter::new(File::create(tmp.join(format!("{id}.pack")))?);
+        let mut out = io::BufWriter::with_capacity(1 << 20, File::create(tmp.join(format!("{id}.pack")))?);
         out.write_all(PACK_MAGIC)?;
         Ok(PackWriter {
             packs: self,
