@@ -140,11 +140,13 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
   reuses its deltas (463 -> 15 s).
 - **Store size since:** delta depth 50 (506 -> 384 MB) and pack frames
   that name a blob by its 32 digest bytes instead of its 71-byte key, in
-  the frame and again as a delta's base (384 -> 314 MB). Old frames still
+  the frame and again as a delta's base (384 -> 314 MB), and an index
+  whose keys are fixed 40-byte digest records found by interpolation
+  search (index 43 -> 20 MB, store 292 MB). Old frames and indexes still
   read. The cost: import 89 -> ~100 s, fsck 29 -> 35 s, checkout user CPU
   0.23 -> 0.42 s (longer chains).
-- **Left:** the store is 314 MB against git's 162 MB pack (names in the
-  index, a zstd frame per value); path-log reads the whole history (1 s)
+- **Left:** the store is 292 MB against git's 162 MB pack (281 MB of
+  pack: a zstd frame per value); path-log reads the whole history (1 s)
   before the root blobs; fsck and import are slower than git.
 
 Earlier notes, before that round:

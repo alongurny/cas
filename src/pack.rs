@@ -16,11 +16,15 @@
 //!   32 digest bytes of a `blake3:` key, `2` and those of a chunk, or `0`,
 //!   `len u16` and the name. Kinds 0 and 1, still read, are the same with
 //!   every name as `len u16, name` (73 bytes for a blake3 key, not 33).
-//! - `<id>.idx`: `CASIDX02`, a count `n u32`, then `n` records `name start
-//!   u32, name len u16, offset u64` sorted by name, then the names. A lookup
-//!   is a binary search in the file's bytes, as in git's pack index, so
-//!   opening a store does not read every name into a map. (`CASIDX01`, an
-//!   unsorted list `name len u16, name, offset u64`, is still read.) A pack
+//! - `<id>.idx`: `CASIDX03`, counts `keys u32, chunks u32`, then that many
+//!   records `digest [32], offset u64` sorted by digest, for `blake3:` keys
+//!   and then for chunks, then a `CASIDX02` index of the other names: a
+//!   count `n u32`, `n` records `name start u32, name len u16, offset u64`
+//!   sorted by name, then the names. A lookup is a search in the file's
+//!   bytes, as in git's pack index (interpolation, for digests), so opening
+//!   a store does not read every name into a map. (`CASIDX02` files, and
+//!   `CASIDX01`, an unsorted list `name len u16, name, offset u64`, are still
+//!   read.) A pack
 //!   counts only once its index exists; both are synced before the index is
 //!   renamed into place.
 //! - `removed`: names removed from packs, one per line, replaced atomically.
@@ -42,7 +46,8 @@ use std::time::SystemTime;
 
 const PACK_MAGIC: &[u8; 8] = b"CASPACK1";
 const IDX_MAGIC_V1: &[u8; 8] = b"CASIDX01";
-const IDX_MAGIC: &[u8; 8] = b"CASIDX02";
+const IDX_MAGIC_V2: &[u8; 8] = b"CASIDX02";
+const IDX_MAGIC: &[u8; 8] = b"CASIDX03";
 const REC: usize = 14;
 const FILE: u8 = 0;
 const DELTA: u8 = 1;
@@ -105,20 +110,33 @@ impl Drop for Map {
     }
 }
 
-/// One pack's index, in its file's (version 2) bytes: mapped, so opening
-/// a store reads none of an index it does not search.
+/// One pack's index, in its file's bytes: mapped, so opening a store reads
+/// none of an index it does not search.
+///
+/// Version 3 holds two sections of fixed records, `digest [32], offset
+/// u64` sorted by digest, for `blake3:` keys and for `#` chunk names,
+/// then a version 2 index of every other name. Version 2 files are all
+/// that last part.
 struct Idx {
     bytes: IdxBytes,
-    n: usize,
-    /// Lookups by binary search so far; past [`HASH_AFTER`] a hash table
-    /// of the records is built (a gc or clone looks up every key, in up
-    /// to a dozen packs, and each search step is a cache miss).
+    /// Records in the key and chunk sections.
+    keys: usize,
+    chunks: usize,
+    /// Where the version 2 part starts, and its record count.
+    base: usize,
+    strs: usize,
+    /// Lookups by binary search in the version 2 part so far; past
+    /// [`HASH_AFTER`] a hash table of its records is built (a gc or clone
+    /// of an old store looks up every key, in up to a dozen packs, and
+    /// each search step is a cache miss).
     searches: std::sync::atomic::AtomicU32,
     table: std::sync::OnceLock<Vec<u32>>,
 }
 
 /// Binary searches in one index before it gets a hash table.
 const HASH_AFTER: u32 = 4096;
+/// A fixed record: 32 digest bytes and an offset.
+const FIXED: usize = 40;
 
 /// A name's slot hash: its last 8 bytes (a digest's hex is uniform), mixed.
 fn name_hash(name: &[u8]) -> u64 {
@@ -129,6 +147,23 @@ fn name_hash(name: &[u8]) -> u64 {
     h ^= h >> 33;
     h = h.wrapping_mul(0xff51afd7ed558ccd);
     h ^ (h >> 33)
+}
+
+/// The 32 digest bytes of a canonical (lowercase) 64-digit hex string.
+fn hex32(h: &str) -> Option<[u8; 32]> {
+    let mut d = [0u8; 32];
+    (h.len() == 64
+        && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        && hex::decode_to_slice(h, &mut d).is_ok())
+    .then_some(d)
+}
+
+/// The fixed sections' name prefixes, in section order.
+const SECTIONS: [&str; 2] = ["blake3:", "#"];
+
+/// Which fixed section `name` belongs in, and its digest.
+fn fixed_name(name: &str) -> Option<(usize, [u8; 32])> {
+    SECTIONS.iter().enumerate().find_map(|(s, p)| name.strip_prefix(p).and_then(hex32).map(|d| (s, d)))
 }
 
 enum IdxBytes {
@@ -146,10 +181,10 @@ impl IdxBytes {
 }
 
 impl Idx {
-    /// The index file at `path`, mapped when it is version 2.
+    /// The index file at `path`, mapped when it is version 2 or 3.
     fn open(id: &str, path: &Path) -> io::Result<Idx> {
         let m = Map::open(path)?;
-        if m.bytes().starts_with(IDX_MAGIC) {
+        if m.bytes().starts_with(IDX_MAGIC) || m.bytes().starts_with(IDX_MAGIC_V2) {
             return Idx::check(id, IdxBytes::Mapped(m));
         }
         Idx::parse(id, m.bytes().to_vec())
@@ -167,7 +202,7 @@ impl Idx {
             }
             return Idx::parse(id, encode_idx(entries));
         }
-        if magic != IDX_MAGIC {
+        if magic != IDX_MAGIC && magic != IDX_MAGIC_V2 {
             return Err(bad(format!("{id}.idx: not an index")));
         }
         Idx::check(id, IdxBytes::Owned(bytes))
@@ -175,17 +210,73 @@ impl Idx {
 
     fn check(id: &str, bytes: IdxBytes) -> io::Result<Idx> {
         let b = bytes.get();
-        let n = u32::from_be_bytes(b.get(8..12).ok_or_else(|| bad("idx truncated"))?.try_into().unwrap()) as usize;
-        if b.len() < 12 + n * REC {
-            return Err(bad(format!("{id}.idx: truncated")));
+        let truncated = || bad(format!("{id}.idx: truncated"));
+        let u32_at = |at: usize| -> io::Result<usize> {
+            Ok(u32::from_be_bytes(b.get(at..at + 4).ok_or_else(truncated)?.try_into().unwrap()) as usize)
+        };
+        let (keys, chunks, base) = if b.starts_with(IDX_MAGIC) {
+            let (k, c) = (u32_at(8)?, u32_at(12)?);
+            (k, c, 16 + (k + c) * FIXED)
+        } else {
+            (0, 0, 0)
+        };
+        if b.get(base..base + 8) != Some(&IDX_MAGIC_V2[..]) {
+            return Err(bad(format!("{id}.idx: not an index")));
         }
-        Ok(Idx { bytes, n, searches: Default::default(), table: Default::default() })
+        let strs = u32_at(base + 8)?;
+        if b.len() < base + 12 + strs * REC {
+            return Err(truncated());
+        }
+        Ok(Idx { bytes, keys, chunks, base, strs, searches: Default::default(), table: Default::default() })
     }
 
-    /// Record `i`'s name bytes; a record pointing outside the file reads
-    /// as empty (and so never matches).
+    /// Every name in the index.
+    fn len(&self) -> usize {
+        self.keys + self.chunks + self.strs
+    }
+
+    /// Fixed section `s`'s records.
+    fn fixed(&self, s: usize) -> &[u8] {
+        let start = 16 + if s == 0 { 0 } else { self.keys * FIXED };
+        let n = if s == 0 { self.keys } else { self.chunks };
+        &self.bytes.get()[start..start + n * FIXED]
+    }
+
+    /// Where `d` is in fixed records `r` (sorted by digest): interpolation
+    /// search, the digests being uniform, every other step a bisection so
+    /// that no input costs more than twice a binary search.
+    fn find_fixed(r: &[u8], d: &[u8; 32]) -> Option<u64> {
+        let key = |i: usize| -> &[u8] { &r[i * FIXED..i * FIXED + 32] };
+        let prefix = |k: &[u8]| u64::from_be_bytes(k[..8].try_into().unwrap()) as u128;
+        let t = prefix(d);
+        let (mut lo, mut hi) = (0usize, r.len() / FIXED);
+        let (mut lo_k, mut hi_k) = (0u128, 1u128 << 64);
+        let mut bisect = false;
+        while lo < hi {
+            let mid = if bisect || hi_k <= lo_k {
+                (lo + hi) / 2
+            } else {
+                let est = lo + ((t.saturating_sub(lo_k)) * (hi - lo) as u128 / (hi_k - lo_k)) as usize;
+                est.clamp(lo, hi - 1)
+            };
+            bisect = !bisect;
+            let k = key(mid);
+            match k.cmp(&d[..]) {
+                std::cmp::Ordering::Equal => {
+                    let o = &r[mid * FIXED + 32..(mid + 1) * FIXED];
+                    return Some(u64::from_be_bytes(o.try_into().unwrap()));
+                }
+                std::cmp::Ordering::Less => (lo, lo_k) = (mid + 1, prefix(k)),
+                std::cmp::Ordering::Greater => (hi, hi_k) = (mid, prefix(k)),
+            }
+        }
+        None
+    }
+
+    /// Version 2 record `i`'s name bytes; a record pointing outside the
+    /// file reads as empty (and so never matches).
     fn name_bytes(&self, i: usize) -> &[u8] {
-        let b = self.bytes.get();
+        let b = &self.bytes.get()[self.base..];
         let r = &b[12 + i * REC..12 + (i + 1) * REC];
         let start = u32::from_be_bytes(r[..4].try_into().unwrap()) as usize;
         let len = u16::from_be_bytes(r[4..6].try_into().unwrap()) as usize;
@@ -197,17 +288,13 @@ impl Idx {
     }
 
     fn offset(&self, i: usize) -> u64 {
-        let r = &self.bytes.get()[12 + i * REC..12 + (i + 1) * REC];
+        let r = &self.bytes.get()[self.base + 12 + i * REC..self.base + 12 + (i + 1) * REC];
         u64::from_be_bytes(r[6..].try_into().unwrap())
     }
 
-    /// The first record whose name is not less than `name`.
-    fn lower_bound(&self, name: &str) -> usize {
-        self.lower_bound_bytes(name.as_bytes())
-    }
-
-    fn lower_bound_bytes(&self, name: &[u8]) -> usize {
-        let (mut lo, mut hi) = (0, self.n);
+    /// The first version 2 record whose name is not less than `name`.
+    fn lower_bound(&self, name: &[u8]) -> usize {
+        let (mut lo, mut hi) = (0, self.strs);
         while lo < hi {
             let mid = (lo + hi) / 2;
             if self.name_bytes(mid) < name {
@@ -220,6 +307,15 @@ impl Idx {
     }
 
     fn get(&self, name: &str) -> Option<u64> {
+        if let Some((s, d)) = fixed_name(name) {
+            if let Some(o) = Idx::find_fixed(self.fixed(s), &d) {
+                return Some(o);
+            }
+            // A version 2 file holds keys among its strings.
+            if self.base != 0 {
+                return None;
+            }
+        }
         let name = name.as_bytes();
         let table = match self.table.get() {
             Some(t) => Some(t),
@@ -242,16 +338,16 @@ impl Idx {
                     }
                 }
             }
-            None => self.lower_bound_bytes(name),
+            None => self.lower_bound(name),
         };
-        (i < self.n && self.name_bytes(i) == name).then(|| self.offset(i))
+        (i < self.strs && self.name_bytes(i) == name).then(|| self.offset(i))
     }
 
     fn build_table(&self) -> Vec<u32> {
-        let size = (self.n * 2).next_power_of_two().max(2);
+        let size = (self.strs * 2).next_power_of_two().max(2);
         let mut t = vec![0u32; size];
         let mask = size - 1;
-        for i in 0..self.n {
+        for i in 0..self.strs {
             let mut at = name_hash(self.name_bytes(i)) as usize & mask;
             while t[at] != 0 {
                 at = (at + 1) & mask;
@@ -260,22 +356,121 @@ impl Idx {
         }
         t
     }
+
+    /// The names not less than `from` with their offsets, in name order.
+    fn entries_from<'a>(&'a self, from: &str) -> impl Iterator<Item = io::Result<(String, u64)>> + 'a {
+        // Each section is sorted, and so is each as strings (a common
+        // prefix, then lowercase hex); merge the three.
+        let mut fixed: Vec<(usize, usize)> = (0..SECTIONS.len())
+            .map(|s| {
+                let (p, r) = (SECTIONS[s], self.fixed(s));
+                let n = r.len() / FIXED;
+                let start = if from <= p {
+                    0
+                } else if let Some(rest) = from.strip_prefix(p) {
+                    // The first record whose hex is not less than rest.
+                    let (mut lo, mut hi) = (0, n);
+                    while lo < hi {
+                        let mid = (lo + hi) / 2;
+                        if hex::encode(&r[mid * FIXED..mid * FIXED + 32]).as_str() < rest {
+                            lo = mid + 1;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                    lo
+                } else {
+                    n
+                };
+                (start, n)
+            })
+            .collect();
+        let mut str_at = self.lower_bound(from.as_bytes());
+        let mut heads: [Option<(String, u64)>; 2] = [None, None];
+        std::iter::from_fn(move || {
+            for s in 0..SECTIONS.len() {
+                if heads[s].is_none() && fixed[s].0 < fixed[s].1 {
+                    let i = fixed[s].0;
+                    let rec = &self.fixed(s)[i * FIXED..(i + 1) * FIXED];
+                    heads[s] = Some((
+                        format!("{}{}", SECTIONS[s], hex::encode(&rec[..32])),
+                        u64::from_be_bytes(rec[32..].try_into().unwrap()),
+                    ));
+                    fixed[s].0 += 1;
+                }
+            }
+            let str_head = (str_at < self.strs).then(|| self.name(str_at));
+            let str_head = match str_head {
+                Some(Err(e)) => return Some(Err(e)),
+                Some(Ok(n)) => Some(n),
+                None => None,
+            };
+            // The least of the heads.
+            let mut best: Option<usize> = None;
+            for s in 0..SECTIONS.len() {
+                if let Some((n, _)) = &heads[s] {
+                    let better = match best {
+                        None => str_head.is_none_or(|h| n.as_str() < h),
+                        Some(b) => n < &heads[b].as_ref().unwrap().0,
+                    };
+                    if better {
+                        best = Some(s);
+                    }
+                }
+            }
+            match best {
+                Some(s) => heads[s].take().map(Ok),
+                None => {
+                    let n = str_head?.to_string();
+                    let o = self.offset(str_at);
+                    str_at += 1;
+                    Some(Ok((n, o)))
+                }
+            }
+        })
+    }
 }
 
-/// A version 2 index of `entries` (name, frame offset).
+/// A version 3 index of `entries` (name, frame offset).
 fn encode_idx(mut entries: Vec<(String, u64)>) -> Vec<u8> {
     entries.sort();
     entries.dedup_by(|a, b| a.0 == b.0);
+    let mut fixed: [Vec<([u8; 32], u64)>; 2] = [Vec::new(), Vec::new()];
+    let mut strs = Vec::new();
+    for (name, off) in entries {
+        match fixed_name(&name) {
+            Some((s, d)) => fixed[s].push((d, off)),
+            None => strs.push((name, off)),
+        }
+    }
     let mut out = IDX_MAGIC.to_vec();
+    for f in &fixed {
+        out.extend_from_slice(&(f.len() as u32).to_be_bytes());
+    }
+    for f in &mut fixed {
+        // Sorted by name is sorted by digest already; keep it explicit.
+        f.sort();
+        for (d, off) in f.iter() {
+            out.extend_from_slice(d);
+            out.extend_from_slice(&off.to_be_bytes());
+        }
+    }
+    out.extend_from_slice(&encode_v2(&strs));
+    out
+}
+
+/// A version 2 index of sorted, distinct `entries`.
+fn encode_v2(entries: &[(String, u64)]) -> Vec<u8> {
+    let mut out = IDX_MAGIC_V2.to_vec();
     out.extend_from_slice(&(entries.len() as u32).to_be_bytes());
     let mut at = 12 + entries.len() * REC;
-    for (name, off) in &entries {
+    for (name, off) in entries {
         out.extend_from_slice(&(at as u32).to_be_bytes());
         out.extend_from_slice(&(name.len() as u16).to_be_bytes());
         out.extend_from_slice(&off.to_be_bytes());
         at += name.len();
     }
-    for (name, _) in &entries {
+    for (name, _) in entries {
         out.extend_from_slice(name.as_bytes());
     }
     out
@@ -384,13 +579,6 @@ fn put_name(out: &mut Vec<u8>, name: &str) {
 /// `2` and those of a chunk (`#hex`), else `0` and the name as
 /// [`put_name`] writes it. A blake3 key takes 33 bytes, not 73.
 fn put_bin_name(out: &mut Vec<u8>, name: &str) {
-    let hex32 = |h: &str| -> Option<[u8; 32]> {
-        let mut d = [0u8; 32];
-        (h.len() == 64
-            && h.bytes().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
-            && hex::decode_to_slice(h, &mut d).is_ok())
-        .then_some(d)
-    };
     if let Some(d) = name.strip_prefix("blake3:").and_then(hex32) {
         out.push(1);
         out.extend_from_slice(&d);
@@ -920,13 +1108,13 @@ impl Packs {
         let mut out = BTreeSet::new();
         for idx in &st.idx {
             let mut taken = 0;
-            for i in idx.lower_bound(from)..idx.n {
-                let k = idx.name(i)?;
-                if to.is_some_and(|t| k >= t) || taken >= limit {
+            for e in idx.entries_from(from) {
+                let (k, _) = e?;
+                if to.is_some_and(|t| k.as_str() >= t) || taken >= limit {
                     break;
                 }
-                if !st.removed.contains(k) {
-                    out.insert(k.to_string());
+                if !st.removed.contains(&k) {
+                    out.insert(k);
                     taken += 1;
                 }
             }
@@ -956,7 +1144,7 @@ impl Packs {
         self.refresh()?;
         let (ids, sizes): (Vec<String>, Vec<usize>) = {
             let st = self.state.read().unwrap();
-            st.packs.iter().cloned().zip(st.idx.iter().map(|i| i.n)).unzip()
+            st.packs.iter().cloned().zip(st.idx.iter().map(|i| i.len())).unzip()
         };
         let Some(last) = ids.len().checked_sub(1) else { return Ok(()) };
         let big = |id: &str| fs::metadata(self.dir.join(format!("{id}.pack"))).is_ok_and(|m| m.len() >= BIG_PACK);
@@ -1005,15 +1193,15 @@ impl Packs {
         for id in merge {
             let idx = Idx::open(id, &self.dir.join(format!("{id}.idx")))?;
             let map = Map::open(&self.dir.join(format!("{id}.pack")))?;
-            for i in 0..idx.n {
-                let name = idx.name(i)?;
-                if !seen.insert(name.to_string()) {
+            for e in idx.entries_from("") {
+                let (name, at) = e?;
+                if !seen.insert(name.clone()) {
                     continue;
                 }
-                let at = idx.offset(i) as usize;
+                let at = at as usize;
                 let b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
                 let (_, _, _, len) = parse_frame(b)?;
-                w.add_frame(name, &map.bytes()[at..at + len])?;
+                w.add_frame(&name, &map.bytes()[at..at + len])?;
             }
         }
         let new = w.finish()?;
@@ -1130,7 +1318,7 @@ mod tests {
         }
         let idx = Idx::parse("x", v1).unwrap();
         assert_eq!((idx.get("a"), idx.get("m"), idx.get("zz"), idx.get("b")), (Some(8), Some(20), Some(30), None));
-        assert_eq!(idx.name(idx.lower_bound("b")).unwrap(), "m");
+        assert_eq!(idx.entries_from("b").next().unwrap().unwrap().0, "m");
     }
 
     /// Frames with string names (kinds 0 and 1, written before binary
@@ -1206,11 +1394,50 @@ mod tests {
         assert_eq!(other.all().unwrap(), names);
     }
 
+    /// Keys and chunk names go in fixed digest sections, other names in
+    /// the string part; lookups and ordered listing agree with a sorted
+    /// list of every name, and a version 2 index of them still reads.
+    #[test]
+    fn a_version_3_index_matches_a_sorted_list() {
+        let mut names: Vec<String> = (0..300u32)
+            .map(|i| {
+                let d = hex::encode(blake3::hash(&i.to_be_bytes()).as_bytes());
+                match i % 3 {
+                    0 => format!("blake3:{d}"),
+                    1 => format!("#{d}"),
+                    _ => format!("blake3:{}", d.to_uppercase()),
+                }
+            })
+            .collect();
+        names.extend(["a", "blake3:", "blake3:0", "blake3:zz", "#", "$", "z"].map(String::from));
+        let entries: Vec<(String, u64)> = names.iter().enumerate().map(|(i, n)| (n.clone(), i as u64 * 7)).collect();
+        let mut sorted = entries.clone();
+        sorted.sort();
+        let v3 = Idx::parse("x", encode_idx(entries.clone())).unwrap();
+        let v2 = Idx::parse("x", encode_v2(&sorted)).unwrap();
+        assert_eq!((v3.keys, v3.chunks, v3.strs), (100, 100, 107));
+        for idx in [&v3, &v2] {
+            for (n, o) in &entries {
+                assert_eq!(idx.get(n), Some(*o), "{n}");
+            }
+            assert_eq!(idx.get(&format!("blake3:{}", "0".repeat(64))), None);
+            let all: Vec<_> = idx.entries_from("").map(Result::unwrap).collect();
+            assert_eq!(all, sorted);
+            for from in ["", "#", "#8", "$", "a", "blake3:", "blake3:7f", "blake3:F", "blake3;", "zz"] {
+                let got: Vec<_> = idx.entries_from(from).map(|e| e.unwrap().0).collect();
+                let want: Vec<_> = sorted.iter().filter(|(n, _)| n.as_str() >= from).map(|(n, _)| n.clone()).collect();
+                assert_eq!(got, want, "from {from}");
+            }
+        }
+    }
+
     #[test]
     fn a_damaged_index_is_refused_or_matches_nothing() {
         assert!(Idx::parse("x", b"CASIDX02\0\0\0\x05".to_vec()).is_err());
+        assert!(Idx::parse("x", b"CASIDX03\0\0\0\x01\0\0\0\0".to_vec()).is_err());
         let mut bytes = encode_idx(vec![("k".into(), 8)]);
-        bytes[12..16].copy_from_slice(&u32::MAX.to_be_bytes());
+        // The version 2 part starts at 16; its one record's name start.
+        bytes[28..32].copy_from_slice(&u32::MAX.to_be_bytes());
         assert_eq!(Idx::parse("x", bytes).unwrap().get("k"), None);
     }
 }
