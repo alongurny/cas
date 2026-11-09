@@ -4,9 +4,10 @@
 
 use crate::dir::Item;
 use crate::formats::{Format, Kind};
-use crate::{Change, Edit, Error, Node, Path, Result, View, read_blob, write_blob};
+use crate::{Change, Edit, Error, Node, Path, Result, View, read_blob};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
+use cas_core::store::Put;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
@@ -22,7 +23,7 @@ fn dir_format(r: &View) -> Result<&'static Format> {
 
 pub(crate) fn load(store: &dyn Store, r: &View) -> Result<Vec<Item>> {
     let Kind::Dir(d) = &dir_format(r)?.kind else { unreachable!() };
-    d.decode(r.key(), &read_blob(store, r.key())?)
+    d.load(store, r.key(), &read_blob(store, r.key())?)
 }
 
 /// Write a directory in `format` unless it is `old` already.
@@ -34,14 +35,20 @@ fn put(
     old: Option<&View>,
 ) -> Result<View> {
     let Kind::Dir(d) = &format.kind else { unreachable!() };
-    let bytes = d.encode(items);
+    let (top, blobs) = d.blobs(alg, items);
     if let Some(old) = old
-        && old.key() == alg.key(&bytes)
+        && old.key() == top
         && old.format() == format.id()
     {
         return Ok(old.clone());
     }
-    Ok(View { format: format.id().to_string(), key: write_blob(store, alg, &bytes)? })
+    // Children first (the closure invariant); blobs the store has already
+    // (a big directory's unchanged parts) are skipped.
+    let keys: Vec<String> = blobs.iter().map(|(k, _)| k.clone()).collect();
+    let have = if keys.len() > 1 { store.has_many(&keys)? } else { vec![false; keys.len()] };
+    let puts: Vec<Put> = blobs.into_iter().zip(have).filter(|(_, h)| !h).map(|((k, b), _)| Put::blob(k, b)).collect();
+    store.write_many(&puts).map_err(|(_, e)| Error::Store(e))?;
+    Ok(View { format: format.id().to_string(), key: top })
 }
 
 type Group<'e, T> = Vec<(&'e [&'e str], &'e T)>;
@@ -196,7 +203,7 @@ fn resolve(store: &dyn Store, root: &View, path: Option<&Path>) -> Result<At> {
     for name in path.names() {
         let At::Dir(r) = at else { return Ok(At::Nothing) };
         let Kind::Dir(d) = &dir_format(&r)?.kind else { unreachable!() };
-        at = match d.find(r.key(), &read_blob(store, r.key())?, name)? {
+        at = match d.find(store, r.key(), &read_blob(store, r.key())?, name)? {
             Some(child) => At::of(child),
             None => return Ok(At::Nothing),
         };

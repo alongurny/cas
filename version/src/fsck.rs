@@ -65,7 +65,7 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
         r.checked += 1;
         // A directory is decoded once, for its check and its children.
         let kids = match by_id(v.format()).map(|f| &f.kind) {
-            Some(Kind::Dir(d)) => d.decode(v.key(), &bytes).map(|items| items.into_iter().map(|i| i.child).collect()),
+            Some(Kind::Dir(d)) => d.blob_children(v.key(), &bytes),
             Some(_) => by_id(v.format())
                 .unwrap()
                 .check(v.key(), &bytes)

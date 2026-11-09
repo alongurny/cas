@@ -10,7 +10,8 @@ A function is identified by the key of its **function object**, a `uni-bin` map:
 
     {'input': <format id>, 'name': <label>, 'output': <format id>, 'spec': <blob key>}
 
-The `input` format is what X must be in. The `output` format is what results are in (`uni-bin` for
+The `input` format is what X must be in; a function of a directory takes a directory in any
+directory format (`dir`, `tree`). The `output` format is what results are in (`uni-bin` for
 every function so far). `spec` is the key of the document defining the function, and `name` is
 only a label. As with formats, changing a definition gives a new id, so results of old and new
 definitions never mix. `derived::publish` writes the object and spec into a store. Later, a spec

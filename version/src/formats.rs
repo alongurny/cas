@@ -42,7 +42,7 @@ impl Format {
     /// Whether `bytes`, stored at `key`, are valid in this format.
     pub fn check(&self, key: &str, bytes: &[u8]) -> Result<()> {
         match &self.kind {
-            Kind::Dir(d) => d.decode(key, bytes).map(|_| ()),
+            Kind::Dir(d) => d.check(key, bytes),
             Kind::Leaf(check) => check(bytes).map_err(|r| malformed(key, r)),
         }
     }
@@ -99,6 +99,7 @@ fn uni_text(b: &[u8]) -> std::result::Result<(), String> {
 static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
     vec![
         format("dir", include_str!("../../spec/formats/dir.md"), Kind::Dir(&dir::DIR)),
+        format("tree", include_str!("../../spec/formats/tree.md"), Kind::Dir(&dir::TREE)),
         format("raw", include_str!("../../spec/formats/raw.md"), Kind::Leaf(any)),
         format("exec", include_str!("../../spec/formats/exec.md"), Kind::Leaf(any)),
         format("symlink", include_str!("../../spec/formats/symlink.md"), Kind::Leaf(symlink)),

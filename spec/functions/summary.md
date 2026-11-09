@@ -1,6 +1,6 @@
 # Function: summary
 
-Input: a directory (format `dir`). Output: a `uni-bin` map
+Input: a directory, in any directory format (`dir`, `tree`). Output: a `uni-bin` map
 
     {'dirs': D, 'files': F}
 

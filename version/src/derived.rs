@@ -58,7 +58,10 @@ pub fn publish(store: &dyn Store, f: &Function) -> Result<()> {
 }
 
 fn check_input(f: &Function, input: &View) -> Result<()> {
-    if input.format() == by_alias(f.input).unwrap().id() {
+    let want = by_alias(f.input).unwrap();
+    // A function of a directory takes one in any directory format.
+    let both_dirs = matches!(want.kind, crate::formats::Kind::Dir(_)) && input.is_dir();
+    if input.format() == want.id() || both_dirs {
         Ok(())
     } else {
         Err(Error::UnknownFormat(format!("{} takes {} input, not {}", f.name, f.input, input.format())))

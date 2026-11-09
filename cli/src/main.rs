@@ -184,6 +184,21 @@ fn e(x: impl std::fmt::Display) -> String {
     x.to_string()
 }
 
+/// The one node whose version key starts with `prefix`, in a directory
+/// format, found from one range of the history's tree. `None` when no
+/// such node or several: the whole history then decides.
+fn by_prefix(st: &history::Stored, prefix: &str) -> Res<Option<NodeId>> {
+    if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
+        return Ok(None);
+    }
+    let prefix = if prefix.contains(':') { prefix.to_string() } else { format!("blake3:{prefix}") };
+    let mut hits = Vec::new();
+    for f in formats::all().iter().filter(|f| matches!(f.kind, formats::Kind::Dir(_))) {
+        hits.extend(st.with_key_prefix(f.id(), &prefix, 2).map_err(e)?);
+    }
+    Ok(if hits.len() == 1 { hits.pop() } else { None })
+}
+
 fn load(s: &dyn Store, name: &str) -> Res<(Option<View>, History)> {
     history::load(s, name).map_err(e)
 }
@@ -252,6 +267,9 @@ fn run(a: Args) -> Res<()> {
         {
             return Ok(id);
         }
+        if let Some(id) = by_prefix(&st, &a.node)? {
+            return Ok(id);
+        }
         node(&st.read_all().map_err(e)?, &a.node, name)
     };
     match a.rest.first().map(String::as_str) {
@@ -269,7 +287,7 @@ fn run(a: Args) -> Res<()> {
             let root = fs::import_worktree(
                 s,
                 b3(),
-                formats::by_alias("dir").unwrap(),
+                formats::by_alias("tree").unwrap(),
                 dir.as_ref(),
                 Some(&a.store),
                 head.as_ref(),
@@ -282,7 +300,7 @@ fn run(a: Args) -> Res<()> {
         Some(cmd @ ("status" | "reset" | "clean")) => {
             let dir = arg(1, "DIR")?;
             let v = at()?.version();
-            let dirf = formats::by_alias("dir").unwrap();
+            let dirf = formats::by_alias("tree").unwrap();
             if cmd == "status" {
                 for c in fs::status(s, b3(), dirf, dir.as_ref(), Some(&a.store), &v).map_err(e)? {
                     let mark = match (&c.old, &c.new) {
@@ -300,7 +318,7 @@ fn run(a: Args) -> Res<()> {
         Some("stash") => {
             let pop = a.rest.get(1).is_some_and(|x| x == "pop");
             let dir = arg(if pop { 2 } else { 1 }, "DIR")?;
-            let dirf = formats::by_alias("dir").unwrap();
+            let dirf = formats::by_alias("tree").unwrap();
             let stash = format!("stash/{name}");
             if pop {
                 let (old, mut h) = load(s, &stash)?;
@@ -405,7 +423,10 @@ fn run(a: Args) -> Res<()> {
                 }
                 match NodeId::parse(what) {
                     Ok(id) if st.contains(&id).map_err(e)? => Ok(id),
-                    _ => node(&st.read_all().map_err(e)?, what, name),
+                    _ => match by_prefix(&st, what)? {
+                        Some(id) => Ok(id),
+                        None => node(&st.read_all().map_err(e)?, what, name),
+                    },
                 }
             };
             let (x, y) = (find(&arg(1, "A")?)?, find(&arg(2, "B")?)?);

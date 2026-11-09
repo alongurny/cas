@@ -487,6 +487,33 @@ impl<'s> Stored<'s> {
         }
     }
 
+    /// The nodes whose version has format `format` and a key starting with
+    /// `prefix`, at most `limit` of them: one range of the tree, so one
+    /// leaf or two.
+    pub fn with_key_prefix(&self, format: &str, prefix: &str, limit: usize) -> Result<Vec<NodeId>> {
+        let lo = format!("{format} {prefix}");
+        let mut out = Vec::new();
+        let Some(mut i) = self.leaf_of_str(&lo) else { return Ok(out) };
+        loop {
+            let leaf = self.leaf(i)?;
+            for id in leaf.keys().filter(|id| id.as_str() >= lo.as_str()) {
+                if !id.as_str().starts_with(&lo) || out.len() == limit {
+                    return Ok(out);
+                }
+                out.push(id.clone());
+            }
+            i += 1;
+            if i == self.leaves.len() {
+                return Ok(out);
+            }
+        }
+    }
+
+    fn leaf_of_str(&self, id: &str) -> Option<usize> {
+        let i = self.leaves.partition_point(|(k, _)| k.as_str() < id);
+        (i < self.leaves.len()).then_some(i)
+    }
+
     /// A node with its generation.
     pub fn entry(&self, id: &NodeId) -> Result<Option<Entry>> {
         match self.leaf_of(id) {

@@ -153,8 +153,8 @@ fn an_interrupted_copy_resumes() {
                 // destination has can be walked in full there.
                 assert_eq!(history::head(&*dst, "main").unwrap(), None);
                 let formats::Kind::Dir(d) = &formats::by_alias("dir").unwrap().kind else { unreachable!() };
-                let items = d.decode(v.key(), &src.read(v.key()).unwrap().unwrap()).unwrap();
-                let present: Vec<_> = items.iter().filter(|i| sync::has(&*dst, i.child.key()).unwrap()).collect();
+                let kids = d.blob_children(v.key(), &src.read(v.key()).unwrap().unwrap()).unwrap();
+                let present: Vec<_> = kids.iter().filter(|c| sync::has(&*dst, c.key()).unwrap()).collect();
                 // Breadth first, files arrive before the directories naming them.
                 if budget == 40 {
                     let files = walk(&*src, &v, None).filter_map(|r| match r.unwrap().1 {
@@ -163,8 +163,8 @@ fn an_interrupted_copy_resumes() {
                     });
                     assert!(files.filter(|f| sync::has(&*dst, f.key()).unwrap()).count() > 0);
                 }
-                for i in present {
-                    assert_eq!(walk(&*dst, &i.child, None).filter(|r| r.is_err()).count(), 0);
+                for c in present {
+                    assert_eq!(walk(&*dst, c, None).filter(|r| r.is_err()).count(), 0);
                 }
             }
             Err(e) => panic!("{e}"),

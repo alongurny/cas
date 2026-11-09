@@ -20,6 +20,11 @@ fn dir() -> &'static Format {
     formats::by_alias("dir").unwrap()
 }
 
+/// The directory formats: `dir` (text) and `tree` (binary, chunked).
+fn dirf(w: usize) -> &'static Format {
+    formats::by_alias(["dir", "tree"][w]).unwrap()
+}
+
 fn store() -> Session {
     CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive()).session(Who::anonymous())
 }
@@ -157,9 +162,9 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(300))]
 
     #[test]
-    fn roundtrip(m in map_strategy()) {
+    fn roundtrip(w in 0usize..2, m in map_strategy()) {
         let s = store();
-        let root = build(&s, b3(), dir(), &m).unwrap();
+        let root = build(&s, b3(), dirf(w), &m).unwrap();
         prop_assert_eq!(walked(&s, &root, None), as_vec(&m));
         for a in NAMES {
             for p in std::iter::once(a.to_string()).chain(NAMES.iter().map(|b| format!("{a}/{b}"))) {
@@ -170,12 +175,12 @@ proptest! {
     }
 
     #[test]
-    fn history_independent(m in map_strategy(), extra in map_strategy(), order in prop::collection::vec(any::<usize>(), 48)) {
+    fn history_independent(w in 0usize..2, m in map_strategy(), extra in map_strategy(), order in prop::collection::vec(any::<usize>(), 48)) {
         let s = store();
-        let direct = build(&s, b3(), dir(), &m).unwrap();
+        let direct = build(&s, b3(), dirf(w), &m).unwrap();
         // Set the entries one at a time in a scrambled order, after paths
         // outside `m` that are removed again at the end.
-        let mut root = build(&s, b3(), dir(), &Map::new()).unwrap();
+        let mut root = build(&s, b3(), dirf(w), &Map::new()).unwrap();
         let extra: Vec<Path> = extra.keys().filter(|p| m.keys().all(|q| !p.starts_with(q) && !q.starts_with(p))).cloned().collect();
         for p in &extra {
             root = update(&s, b3(), &root, &BTreeMap::from([(p.clone(), Edit::Set(Node::Dir))])).unwrap();
@@ -195,13 +200,13 @@ proptest! {
     }
 
     #[test]
-    fn update_matches_model(m in map_strategy(), edits in edits_strategy()) {
+    fn update_matches_model(w in 0usize..2, m in map_strategy(), edits in edits_strategy()) {
         let s = store();
-        let root = build(&s, b3(), dir(), &m).unwrap();
+        let root = build(&s, b3(), dirf(w), &m).unwrap();
         match (update(&s, b3(), &root, &edits), model_update(&m, &edits)) {
             (Ok(new), Some(want)) => {
                 prop_assert_eq!(walked(&s, &new, None), as_vec(&want));
-                prop_assert_eq!(new, build(&s, b3(), dir(), &want).unwrap());
+                prop_assert_eq!(new, build(&s, b3(), dirf(w), &want).unwrap());
             }
             (Err(Error::PathConflict(_)), None) => {}
             (got, want) => panic!("update gave {got:?}, model {want:?}"),
@@ -209,10 +214,10 @@ proptest! {
     }
 
     #[test]
-    fn prefix_walk_and_diff(a in map_strategy(), edits in edits_strategy(), prefix in path_strategy()) {
+    fn prefix_walk_and_diff(w in 0usize..2, a in map_strategy(), edits in edits_strategy(), prefix in path_strategy()) {
         let s = store();
         let b = model_update(&a, &edits).unwrap_or_else(|| a.clone());
-        let (ra, rb) = (build(&s, b3(), dir(), &a).unwrap(), build(&s, b3(), dir(), &b).unwrap());
+        let (ra, rb) = (build(&s, b3(), dirf(w), &a).unwrap(), build(&s, b3(), dirf(w), &b).unwrap());
         let want: Vec<(Path, Node)> = a.iter().filter(|(p, _)| p.starts_with(&prefix)).map(|(p, n)| (p.clone(), n.clone())).collect();
         prop_assert_eq!(walked(&s, &ra, Some(&prefix)), want);
         for pre in [None, Some(&prefix)] {

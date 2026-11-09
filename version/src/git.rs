@@ -3,7 +3,7 @@
 //! become history nodes, commit messages become step changelogs, and git
 //! tags become history tags. Runs the `git` command; reads only.
 
-use crate::dir::{DIR, Item};
+use crate::dir::{Item, TREE};
 use crate::history::{History, NodeId, Step};
 use crate::{Error, Result, View, by_alias};
 use cas_core::Store;
@@ -85,6 +85,8 @@ struct Importer<'a> {
     pending: Vec<Put>,
     pending_bytes: usize,
     trees: HashMap<String, View>,
+    /// `tree` blobs queued already: big directories share most of theirs.
+    chunks: std::collections::HashSet<String>,
     files: HashMap<(String, &'static str), View>,
     n: Imported,
 }
@@ -150,8 +152,14 @@ impl Importer<'_> {
         }
         // Git sorts directories as if their names ended in '/'; dir sorts by name.
         items.sort_by(|a, b| a.name.cmp(&b.name));
-        // `put` checks the encoding, so names the dir format refuses fail here.
-        let v = self.put("dir", DIR.encode(&items))?;
+        // `put` checks each blob, so names the format refuses fail here.
+        let (top, blobs) = TREE.blobs(self.alg, &items);
+        for (k, b) in blobs {
+            if self.chunks.insert(k) {
+                self.put("tree", b)?;
+            }
+        }
+        let v = View { format: by_alias("tree").unwrap().id().to_string(), key: top };
         self.trees.insert(id.to_string(), v.clone());
         self.n.trees += 1;
         Ok(v)
@@ -170,6 +178,7 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
         alg,
         cat: CatFile::start(repo)?,
         trees: HashMap::new(),
+        chunks: Default::default(),
         files: HashMap::new(),
         n: Imported::default(),
         pending: Vec::new(),

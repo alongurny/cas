@@ -8,10 +8,9 @@
 //! everything it refers to, so a store that has a blob has all of it, and
 //! a walk can stop at the first blob the destination already holds.
 
-use crate::dir::Item;
 use crate::formats::{self, Kind};
 use crate::history;
-use crate::{Error, Result, View, is_blob_key, read_blob, tree};
+use crate::{Error, Result, View, is_blob_key, read_blob};
 use cas_core::store::Put;
 use cas_core::{Error as CoreError, Expect, Span, Store};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -37,7 +36,7 @@ pub struct Copied {
 /// opaque, so their blobs are copied without following anything.
 pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
-        Some((Kind::Dir(_), _)) => Ok(tree::load(store, r)?.into_iter().map(|Item { child, .. }| child).collect()),
+        Some((Kind::Dir(d), _)) => d.blob_children(r.key(), &read_blob(store, r.key())?),
         Some((_, "history" | "history-part")) => Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default()),
         _ => Ok(Vec::new()),
     }
@@ -77,9 +76,7 @@ fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -
 /// `None` for formats that hold no views (files, unknown formats).
 pub(crate) fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
-        Some((Kind::Dir(d), _)) => {
-            Ok(Some(d.decode(r.key(), bytes)?.into_iter().map(|Item { child, .. }| child).collect()))
-        }
+        Some((Kind::Dir(d), _)) => Ok(Some(d.blob_children(r.key(), bytes)?)),
         Some((_, "history")) => {
             let root = crate::htree::Root::decode(bytes).map_err(|e| crate::malformed(r.key(), e))?;
             Ok(Some(root.nodes.into_iter().collect()))
