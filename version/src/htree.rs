@@ -134,6 +134,69 @@ pub fn generations(h: &History) -> HashMap<NodeId, u64> {
     g
 }
 
+/// The merge-base walk of [`Stored::merge_bases`] over nodes given by
+/// `look` (a node's generation and predecessors).
+pub(crate) fn paint_down(
+    a: &NodeId,
+    b: &NodeId,
+    mut look: impl FnMut(&NodeId) -> Result<(u64, Vec<NodeId>)>,
+) -> Result<BTreeSet<NodeId>> {
+    const A: u8 = 1;
+    const B: u8 = 2;
+    const STALE: u8 = 4;
+    let mut flags: HashMap<NodeId, u8> = HashMap::new();
+    let mut after: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+    let mut queue = std::collections::BinaryHeap::new();
+    let mut live = 0usize;
+    let mut out = BTreeSet::new();
+    let mut visit = |id: &NodeId, after: &mut HashMap<NodeId, Vec<NodeId>>| -> Result<u64> {
+        let (g, ps) = look(id)?;
+        after.insert(id.clone(), ps);
+        Ok(g)
+    };
+    for (id, f) in [(a, A), (b, B)] {
+        let old = flags.get(id).copied().unwrap_or(0);
+        flags.insert(id.clone(), old | f);
+        if old == 0 {
+            queue.push((visit(id, &mut after)?, id.clone()));
+            live += 1;
+        }
+    }
+    while live > 0 {
+        let Some((_, id)) = queue.pop() else { break };
+        let mut f = flags[&id];
+        if f & STALE == 0 {
+            live -= 1;
+        }
+        if f & (A | B) == A | B && f & STALE == 0 {
+            out.insert(id.clone());
+            f |= STALE;
+            flags.insert(id.clone(), f);
+        }
+        for p in after.remove(&id).unwrap_or_default() {
+            let old = flags.get(&p).copied();
+            let new = old.unwrap_or(0) | f;
+            if old == Some(new) {
+                continue;
+            }
+            flags.insert(p.clone(), new);
+            match old {
+                None => {
+                    queue.push((visit(&p, &mut after)?, p.clone()));
+                    if new & STALE == 0 {
+                        live += 1;
+                    }
+                }
+                // Queued and not yet taken (an ancestor is taken after
+                // every node above it): it may just have become stale.
+                Some(o) if o & STALE == 0 && new & STALE != 0 => live -= 1,
+                Some(_) => {}
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// One `history-part` blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part {
@@ -529,57 +592,10 @@ impl<'s> Stored<'s> {
     /// everything below it is stale. The walk ends when only stale nodes
     /// are left.
     pub fn merge_bases(&self, a: &NodeId, b: &NodeId) -> Result<BTreeSet<NodeId>> {
-        const A: u8 = 1;
-        const B: u8 = 2;
-        const STALE: u8 = 4;
-        let mut flags: HashMap<NodeId, u8> = HashMap::new();
-        let mut queue = std::collections::BinaryHeap::new();
-        let mut live = 0usize;
-        let mut out = BTreeSet::new();
-        for (id, f) in [(a, A), (b, B)] {
+        paint_down(a, b, |id| {
             let e = self.entry(id)?.ok_or_else(|| Error::Missing(format!("node {id}")))?;
-            let old = flags.get(id).copied().unwrap_or(0);
-            flags.insert(id.clone(), old | f);
-            if old == 0 {
-                queue.push((e.generation, id.clone()));
-                live += 1;
-            }
-        }
-        while live > 0 {
-            let Some((_, id)) = queue.pop() else { break };
-            let mut f = flags[&id];
-            if f & STALE == 0 {
-                live -= 1;
-            }
-            if f & (A | B) == A | B && f & STALE == 0 {
-                out.insert(id.clone());
-                f |= STALE;
-                flags.insert(id.clone(), f);
-            }
-            let e = self.entry(&id)?.ok_or_else(|| Error::Missing(format!("node {id}")))?;
-            for p in e.node.after.keys() {
-                let old = flags.get(p).copied();
-                let new = old.unwrap_or(0) | f;
-                if old == Some(new) {
-                    continue;
-                }
-                flags.insert(p.clone(), new);
-                match old {
-                    None => {
-                        let g = self.entry(p)?.ok_or_else(|| Error::Missing(format!("node {p}")))?.generation;
-                        queue.push((g, p.clone()));
-                        if new & STALE == 0 {
-                            live += 1;
-                        }
-                    }
-                    // Queued and not yet taken (an ancestor is taken after
-                    // every node above it): it may just have become stale.
-                    Some(o) if o & STALE == 0 && new & STALE != 0 => live -= 1,
-                    Some(_) => {}
-                }
-            }
-        }
-        Ok(out)
+            Ok((e.generation, e.node.after.into_keys().collect()))
+        })
     }
 
     pub fn contains(&self, id: &NodeId) -> Result<bool> {

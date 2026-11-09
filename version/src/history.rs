@@ -35,6 +35,12 @@ impl NodeId {
         Ok(NodeId(s.to_string()))
     }
 
+    /// An id known to be valid (built from checked parts).
+    pub(crate) fn trusted(s: String) -> NodeId {
+        debug_assert!(NodeId::parse(&s).is_ok(), "{s}");
+        NodeId(s)
+    }
+
     pub fn of(version: &View) -> NodeId {
         NodeId(version.to_string())
     }

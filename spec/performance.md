@@ -353,3 +353,13 @@ all corpora.
   (never imported, like `.cas-index`); `commit`, `status` and `reset` of
   that directory replace only those paths in the base version and leave
   the rest as the base has it. Paths outside them on disk are ignored.
+- 2026-11-09, single-thread round against git.git. `path-log` without a
+  cached graph walks every step instead of building the graph, and a
+  lookup across versions remembers each `tree` blob's answer and scans a
+  blob without decoding it: 16.5 → 2.3 s (git 0.7 s). The function
+  `ancestry` (spec/functions/ancestry.md), cas's commit-graph proper: every
+  node in fixed-size columns with its generation and predecessors, written
+  by `import-git` and by `gc` for every history without one. `merge-base`
+  reads only the history's root and that blob when it is the history's
+  own, and otherwise uses an older history's blob for the nodes that did
+  not change since: 0.20 s → 12 ms (git 11 ms).

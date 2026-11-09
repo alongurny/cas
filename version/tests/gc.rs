@@ -57,8 +57,9 @@ fn reachable_blobs_survive_and_garbage_goes_after_two_runs() {
     let v = history::load(&*s, "main").unwrap().1.tip().unwrap().version();
     assert_eq!(files(&*s, &v).len(), 2);
     // The garbage went; both pending sets are still there (the first is
-    // unreachable now and goes two runs later).
-    assert_eq!(blobs(&*s), before - 1 + 2);
+    // unreachable now and goes two runs later), and the history's ancestry
+    // blob the first run recorded.
+    assert_eq!(blobs(&*s), before - 1 + 2 + 1);
 }
 
 #[test]

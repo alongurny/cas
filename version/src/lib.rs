@@ -8,6 +8,7 @@
 //! a view of its root directory. See `spec/version.md`.
 
 pub mod access;
+pub mod ancestry;
 pub mod derived;
 pub mod dir;
 pub mod formats;

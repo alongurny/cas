@@ -208,11 +208,52 @@ fn find_node(st: &history::Stored, what: &str, name: &str) -> Res<NodeId> {
     node(&st.read_all().map_err(e)?, what, name)
 }
 
-fn by_prefix(st: &history::Stored, prefix: &str) -> Res<Option<NodeId>> {
+/// Merge bases from an ancestry blob and the history's root alone; `None`
+/// when a node is not found that way.
+fn quick_merge_bases(
+    s: &dyn Store,
+    v: &View,
+    ix: &cas_version::ancestry::Ancestry,
+    a: &str,
+    b: &str,
+) -> Option<Vec<NodeId>> {
+    let root = history::Root::decode(&cas_version::read_blob(s, v.key()).ok()?).ok()?;
+    let find = |what: &str| -> Option<NodeId> {
+        if let Some(id) = root.tags.get(what) {
+            return Some(id.clone());
+        }
+        if what == "latest" && root.tips.len() == 1 {
+            return root.tips.first().cloned();
+        }
+        if let Ok(id) = NodeId::parse(what)
+            && ix.find(&id).is_some()
+        {
+            return Some(id);
+        }
+        let prefix = prefix_key(what)?;
+        let mut hits = Vec::new();
+        for f in formats::all().iter().filter(|f| matches!(f.kind, formats::Kind::Dir(_))) {
+            hits.extend(ix.with_key_prefix(f.id(), &prefix, 2)?);
+        }
+        if hits.len() == 1 { hits.pop() } else { None }
+    };
+    let (x, y) = (find(a)?, find(b)?);
+    let mut out = cas_version::ancestry::merge_bases_in(ix, &x, &y)?;
+    out.sort();
+    Some(out)
+}
+
+/// A node key prefix as the full form `alg:hex` (blake3 when no algorithm
+/// is named), if `prefix` can be one.
+fn prefix_key(prefix: &str) -> Option<String> {
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
-        return Ok(None);
+        return None;
     }
-    let prefix = if prefix.contains(':') { prefix.to_string() } else { format!("blake3:{prefix}") };
+    Some(if prefix.contains(':') { prefix.to_string() } else { format!("blake3:{prefix}") })
+}
+
+fn by_prefix(st: &history::Stored, prefix: &str) -> Res<Option<NodeId>> {
+    let Some(prefix) = prefix_key(prefix) else { return Ok(None) };
     let mut hits = Vec::new();
     for f in formats::all().iter().filter(|f| matches!(f.kind, formats::Kind::Dir(_))) {
         hits.extend(st.with_key_prefix(f.id(), &prefix, 2).map_err(e)?);
@@ -376,6 +417,15 @@ fn run(a: Args) -> Res<()> {
         Some("diff") => {
             let id = at()?;
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
+            // With the ancestry of this very history, only its root is read.
+            if let Some(ix) = cas_version::ancestry::exact(s, &v)
+                && let Some(bases) = quick_merge_bases(s, &v, &ix, &arg(1, "A")?, &arg(2, "B")?)
+            {
+                for b in bases {
+                    out!("{b}");
+                }
+                return Ok(());
+            }
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
             let preds: Vec<NodeId> = st.get(&id).map_err(e)?.map(|n| n.after.into_keys().collect()).unwrap_or_default();
             let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
@@ -425,9 +475,20 @@ fn run(a: Args) -> Res<()> {
             // Reads only the nodes the walk reaches (by generation), unless
             // a node is named by a key prefix.
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
+            // With the ancestry of this very history, only its root is read.
+            if let Some(ix) = cas_version::ancestry::exact(s, &v)
+                && let Some(bases) = quick_merge_bases(s, &v, &ix, &arg(1, "A")?, &arg(2, "B")?)
+            {
+                for b in bases {
+                    out!("{b}");
+                }
+                return Ok(());
+            }
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
             let (x, y) = (find_node(&st, &arg(1, "A")?, name)?, find_node(&st, &arg(2, "B")?, name)?);
-            for b in st.merge_bases(&x, &y).map_err(e)? {
+            // From the ancestry blob gc and import keep, when there is one.
+            let index = cas_version::ancestry::cached(s, &st, &v, 64);
+            for b in cas_version::ancestry::merge_bases(&st, index.as_ref(), &x, &y).map_err(e)? {
                 out!("{b}");
             }
         }
@@ -545,7 +606,8 @@ fn run(a: Args) -> Res<()> {
             let start = std::time::Instant::now();
             let (h, n) = cas_version::git::import(s, b3(), repo.as_ref(), &rev).map_err(e)?;
             formats::publish(s).map_err(e)?;
-            history::save(s, b3(), name, None, &h).map_err(|x| format!("{name}: {x}"))?;
+            let v = history::save(s, b3(), name, None, &h).map_err(|x| format!("{name}: {x}"))?;
+            cas_version::ancestry::record(s, b3(), &v, &h);
             out!(
                 "{} commits, {} trees, {} files, {} submodules skipped, {} nodes, {} tags in {:.1}s",
                 n.commits,

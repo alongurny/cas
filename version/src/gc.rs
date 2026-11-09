@@ -51,6 +51,26 @@ fn spec_of(store: &dyn Store, key: &str) -> Result<Option<String>> {
         .map(String::from))
 }
 
+/// Record the ancestry (spec/functions/ancestry.md) of every history a
+/// variable holds that has none yet, as git gc writes its commit-graph.
+/// Best effort for each history.
+pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()> {
+    for k in list_all(store, &Span::all())? {
+        if !matches!(classify(&k), Some(Parsed::Var)) || k.starts_with("derived") {
+            continue;
+        }
+        if let Some(v) = store.read(&k)?
+            && let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok())
+            && r.known_format().is_some_and(|f| f.alias == "history")
+            && matches!(crate::derived::readable_cache(store, &crate::ancestry::ANCESTRY, &r), Ok(None))
+            && let Ok(h) = history::read(store, &r)
+        {
+            crate::ancestry::record(store, alg, &r, &h);
+        }
+    }
+    Ok(())
+}
+
 /// Every blob reachable from the variables in `store`.
 pub fn mark(store: &dyn Store) -> Result<HashSet<String>> {
     let keys = list_all(store, &Span::all())?;
@@ -129,6 +149,7 @@ fn pending(store: &dyn Store) -> Result<(Option<Vec<u8>>, BTreeSet<String>)> {
 /// One collection run: mark, remove what was unreachable this run and the
 /// previous one, and record the rest as pending for the next.
 pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
+    index_histories(store, alg)?;
     let (old_var, old) = pending(store)?;
     let marked = mark(store)?;
     let blobs: Vec<String> = list_all(store, &Span::all())?
