@@ -77,6 +77,11 @@ impl Store for CachingStore {
         self.upstream.list(span)
     }
 
+    fn list_all(&self, span: &Span) -> Result<Vec<String>> {
+        self.gate(Op::List { span })?;
+        self.upstream.list_all(span)
+    }
+
     /// Cached blobs answer locally; everything else goes upstream as one batch.
     fn read_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>>> {
         let mut out: Vec<Option<Result<Option<Vec<u8>>>>> = Vec::with_capacity(keys.len());

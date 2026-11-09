@@ -4,11 +4,12 @@
 //! read), that its bytes are valid in its format when the format is known,
 //! and that every view inside it names a blob that is there.
 
-use crate::sync::children;
+use crate::formats::Kind;
+use crate::sync::children_of;
 use crate::{Error, Result, View, by_id, is_blob_key};
 use cas_core::key::{Parsed, classify};
 use cas_core::{Span, Store, list_all};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 
 /// What a check found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -45,7 +46,7 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
             todo.push((k.clone(), view));
         }
     }
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     while let Some((holder, v)) = todo.pop() {
         if !seen.insert(v.key().to_string()) {
             continue;
@@ -62,12 +63,22 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
             }
         };
         r.checked += 1;
-        if let Some(f) = by_id(v.format())
-            && let Err(e) = f.check(v.key(), &bytes)
-        {
-            r.bad.push((v.key().to_string(), e.to_string()));
-            continue;
-        }
+        // A directory is decoded once, for its check and its children.
+        let kids = match by_id(v.format()).map(|f| &f.kind) {
+            Some(Kind::Dir(d)) => d.decode(v.key(), &bytes).map(|items| items.into_iter().map(|i| i.child).collect()),
+            Some(_) => by_id(v.format())
+                .unwrap()
+                .check(v.key(), &bytes)
+                .and_then(|()| children_of(&v, &bytes).map(Option::unwrap_or_default)),
+            None => Ok(Vec::new()),
+        };
+        let kids = match kids {
+            Ok(k) => k,
+            Err(e) => {
+                r.bad.push((v.key().to_string(), e.to_string()));
+                continue;
+            }
+        };
         // A history is checked whole too: its tree's shape and its tips.
         if v.known_format().is_some_and(|f| f.alias == "history")
             && let Err(e) = crate::history::read(store, &v)
@@ -79,11 +90,7 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
         if is_blob_key(v.format()) && by_id(v.format()).is_none() && !blobs.contains(v.format()) {
             r.missing.push((v.key().to_string(), v.format().to_string()));
         }
-        match children(store, &v) {
-            Ok(c) => todo.extend(c.into_iter().map(|c| (v.key().to_string(), c))),
-            Err(Error::Missing(_)) => {}
-            Err(e) => r.bad.push((v.key().to_string(), e.to_string())),
-        }
+        todo.extend(kids.into_iter().map(|c| (v.key().to_string(), c)));
     }
     r.unreachable = blobs.iter().filter(|k| !seen.contains(**k)).count();
     Ok(r)

@@ -29,6 +29,7 @@ impl Dir {
     pub fn find(&self, key: &str, bytes: &[u8], name: &str) -> Result<Option<View>> {
         let text = std::str::from_utf8(bytes).map_err(|_| malformed(key, "not UTF-8"))?;
         let mut prev: Option<&str> = None;
+        let mut prev_format: Option<&str> = None;
         let mut found = None;
         for line in text.split_inclusive('\n') {
             let line = line.strip_suffix('\n').ok_or_else(|| malformed(key, "last line has no newline"))?;
@@ -36,7 +37,9 @@ impl Dir {
             let (Some(f), Some(k), Some(n)) = (parts.next(), parts.next(), parts.next()) else {
                 return Err(malformed(key, format!("bad line {line:?}")));
             };
-            if !is_blob_key(f) || !is_blob_key(k) {
+            // Directories hold few formats: a format seen on the line before
+            // is already checked.
+            if !(prev_format == Some(f) || is_blob_key(f)) || !is_blob_key(k) {
                 return Err(malformed(key, format!("bad view {f:?} {k:?}")));
             }
             if !valid_name(n) {
@@ -46,6 +49,7 @@ impl Dir {
                 return Err(malformed(key, format!("{n:?} out of order")));
             }
             prev = Some(n);
+            prev_format = Some(f);
             if n == name {
                 found = Some(View { format: f.to_string(), key: k.to_string() });
             }
@@ -63,7 +67,10 @@ impl Dir {
             let (Some(f), Some(k), Some(name)) = (parts.next(), parts.next(), parts.next()) else {
                 return Err(malformed(key, format!("bad line {line:?}")));
             };
-            if !is_blob_key(f) || !is_blob_key(k) {
+            // Directories hold few formats: a format seen on the line before
+            // is already checked.
+            let same_format = items.last().is_some_and(|p| p.child.format == f);
+            if !(same_format || is_blob_key(f)) || !is_blob_key(k) {
                 return Err(malformed(key, format!("bad view {f:?} {k:?}")));
             }
             if !valid_name(name) {

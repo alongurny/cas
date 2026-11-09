@@ -40,6 +40,21 @@ pub trait Store: Send + Sync {
         }
         Ok(())
     }
+
+    /// Every key in `span`: `list` pages, following continuations. A local
+    /// store answers in one pass instead (the same gate, no page limit).
+    fn list_all(&self, span: &Span) -> Result<Vec<String>> {
+        let mut keys = Vec::new();
+        let mut span = span.clone();
+        loop {
+            let page = self.list(&span)?;
+            keys.extend(page.keys);
+            match page.rest {
+                Some(rest) => span = rest,
+                None => return Ok(keys),
+            }
+        }
+    }
 }
 
 /// One write of a batch.
@@ -65,18 +80,9 @@ pub fn has_by_list<S: Store + ?Sized>(store: &S, key: &str) -> Result<bool> {
     Ok(page.keys.iter().any(|k| k == key))
 }
 
-/// Every key in `span`, following continuations.
+/// Every key in `span` ([`Store::list_all`]).
 pub fn list_all(store: &dyn Store, span: &Span) -> Result<Vec<String>> {
-    let mut keys = Vec::new();
-    let mut span = span.clone();
-    loop {
-        let page = store.list(&span)?;
-        keys.extend(page.keys);
-        match page.rest {
-            Some(rest) => span = rest,
-            None => return Ok(keys),
-        }
-    }
+    store.list_all(span)
 }
 
 enum Kind {
@@ -265,6 +271,12 @@ impl CoreStore {
         };
         Ok(ListPage { keys, rest })
     }
+
+    /// All of `span` in one backend pass, gated as one `list` of it.
+    fn list_all(&self, who: &Who, span: &Span) -> Result<Vec<String>> {
+        self.gate(who, Op::List { span })?;
+        Ok(self.backend.list(span, usize::MAX)?)
+    }
 }
 
 /// A [`CoreStore`] bound to one caller.
@@ -341,6 +353,10 @@ impl Store for Session {
 
     fn list(&self, span: &Span) -> Result<ListPage> {
         self.store.list(&self.who, span)
+    }
+
+    fn list_all(&self, span: &Span) -> Result<Vec<String>> {
+        self.store.list_all(&self.who, span)
     }
 
     fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {

@@ -75,7 +75,7 @@ fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -
 
 /// The views inside `bytes`, the value of `r`, if its format holds any.
 /// `None` for formats that hold no views (files, unknown formats).
-fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
+pub(crate) fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(d), _)) => {
             Ok(Some(d.decode(r.key(), bytes)?.into_iter().map(|Item { child, .. }| child).collect()))

@@ -198,6 +198,49 @@ impl State {
 pub struct Packs {
     dir: PathBuf,
     state: RwLock<State>,
+    /// Values recently used as delta bases (git's delta base cache): a
+    /// chain is resolved once, not once per object built on it.
+    bases: std::sync::Mutex<BaseCache>,
+}
+
+/// Bytes of base values kept.
+const BASE_CACHE_BYTES: usize = 96 << 20;
+
+#[derive(Default)]
+struct BaseCache {
+    map: std::collections::HashMap<String, (std::sync::Arc<Vec<u8>>, u64)>,
+    bytes: usize,
+    tick: u64,
+}
+
+impl BaseCache {
+    fn get(&mut self, name: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        self.tick += 1;
+        let t = self.tick;
+        self.map.get_mut(name).map(|(v, used)| {
+            *used = t;
+            v.clone()
+        })
+    }
+
+    fn put(&mut self, name: &str, v: std::sync::Arc<Vec<u8>>) {
+        if v.len() > BASE_CACHE_BYTES / 4 {
+            return;
+        }
+        self.tick += 1;
+        self.bytes += v.len();
+        if let Some((old, _)) = self.map.insert(name.to_string(), (v, self.tick)) {
+            self.bytes -= old.len();
+        }
+        if self.bytes > BASE_CACHE_BYTES {
+            // Drop the older half: amortized, like a clock sweep.
+            let mut ticks: Vec<u64> = self.map.values().map(|(_, t)| *t).collect();
+            ticks.sort_unstable();
+            let cut = ticks[ticks.len() / 2];
+            self.map.retain(|_, (_, t)| *t > cut);
+            self.bytes = self.map.values().map(|(v, _)| v.len()).sum();
+        }
+    }
 }
 
 fn bad(what: impl std::fmt::Display) -> io::Error {
@@ -312,7 +355,7 @@ impl PackWriter<'_> {
 impl Packs {
     pub fn open(dir: PathBuf) -> io::Result<Packs> {
         fs::create_dir_all(&dir)?;
-        let p = Packs { dir, state: RwLock::new(State::default()) };
+        let p = Packs { dir, state: RwLock::new(State::default()), bases: Default::default() };
         p.refresh()?;
         Ok(p)
     }
@@ -431,14 +474,23 @@ impl Packs {
                 let n = take_u16(&mut b)?;
                 let base = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?.to_string();
                 let size = take_u32(&mut b)?;
-                let base_file =
-                    self.file_at_depth(&base, depth + 1)?.ok_or_else(|| bad(format!("base {base} gone")))?;
-                let base_value = plain_value(&base_file)?;
+                let base_value = self.base_value(&base, depth + 1)?;
                 let value = zstd::bulk::Decompressor::with_dictionary(&base_value)?.decompress(b, size)?;
                 Ok(Some([&[0u8][..], &value].concat()))
             }
             k => Err(bad(format!("frame kind {k}"))),
         }
+    }
+
+    /// The plain value of `name`, a delta base, from the cache if there.
+    fn base_value(&self, name: &str, depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        if let Some(v) = self.bases.lock().unwrap().get(name) {
+            return Ok(v);
+        }
+        let file = self.file_at_depth(name, depth)?.ok_or_else(|| bad(format!("base {name} gone")))?;
+        let v = std::sync::Arc::new(plain_value(&file)?);
+        self.bases.lock().unwrap().put(name, v.clone());
+        Ok(v)
     }
 
     /// Names held in packs, in `[from, to)` (`to` open when `None`).
@@ -614,7 +666,7 @@ impl Packs {
 pub fn plain_value(file: &[u8]) -> io::Result<Vec<u8>> {
     match file.split_first() {
         Some((0, rest)) => Ok(rest.to_vec()),
-        Some((1, rest)) => zstd::stream::decode_all(rest),
+        Some((1, rest)) => crate::disk::unzstd(rest),
         _ => Err(bad("delta base is not a plain file")),
     }
 }

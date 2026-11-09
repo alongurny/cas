@@ -21,15 +21,29 @@ use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-/// `println!` that ends the process quietly when stdout is closed, as when
-/// piped into `head`.
+// `println!` that ends the process quietly when stdout is closed, as when
+// piped into `head`. Output is buffered (a line-buffered stdout costs a write call per line:
+// 330,000 of them for `objects` on git.git) and flushed when `run` ends.
+thread_local! {
+    static OUT: std::cell::RefCell<std::io::BufWriter<std::io::Stdout>> =
+        std::cell::RefCell::new(std::io::BufWriter::with_capacity(1 << 16, std::io::stdout()));
+}
+
 macro_rules! out {
     ($($t:tt)*) => {{
         use std::io::Write;
-        if writeln!(std::io::stdout(), $($t)*).is_err() {
+        let line = format!($($t)*);
+        if OUT.with(|o| writeln!(o.borrow_mut(), "{line}")).is_err() {
             std::process::exit(0);
         }
     }};
+}
+
+fn flush_out() {
+    use std::io::Write;
+    if OUT.with(|o| o.borrow_mut().flush()).is_err() {
+        std::process::exit(0);
+    }
 }
 
 const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--ca FILE] [--meta DIR] COMMAND
@@ -617,7 +631,9 @@ fn short(key: &str) -> String {
 }
 
 fn main() -> ExitCode {
-    match parse(std::env::args().skip(1).collect()).and_then(run) {
+    let r = parse(std::env::args().skip(1).collect()).and_then(run);
+    flush_out();
+    match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("{msg}");

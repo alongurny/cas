@@ -50,7 +50,7 @@ fn pack(bytes: &[u8]) -> io::Result<Vec<u8>> {
 
 /// One zstd frame: in one call when the frame states its size (ours do),
 /// streamed otherwise.
-fn unzstd(z: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn unzstd(z: &[u8]) -> io::Result<Vec<u8>> {
     match zstd::zstd_safe::get_frame_content_size(z) {
         Ok(Some(n)) if n <= 1 << 32 => zstd::bulk::decompress(z, n as usize),
         _ => zstd::stream::decode_all(z),

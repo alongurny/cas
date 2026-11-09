@@ -11,6 +11,17 @@ pub enum Parsed<'a> {
 /// Classify `key`, or `None` when it breaks the key byte rules or the blob
 /// grammar. Digest length is checked later, once the algorithm is known.
 pub fn classify(key: &str) -> Option<Parsed<'_>> {
+    // Fast path, one pass: `alg:hex` with a valid algorithm name, which is
+    // every blob key. Such a key has no control byte and no `/` before its
+    // first colon, so the full rules below would agree.
+    let b = key.as_bytes();
+    let alg_len = b.iter().take(33).take_while(|c| matches!(c, b'a'..=b'z' | b'0'..=b'9' | b'-')).count();
+    if (1..=32).contains(&alg_len) && b.get(alg_len) == Some(&b':') {
+        let d = &b[alg_len + 1..];
+        if !d.is_empty() && d.iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f')) {
+            return Some(Parsed::Blob { alg: &key[..alg_len], digest_hex: &key[alg_len + 1..] });
+        }
+    }
     // Control characters: bytes below 0x20 and 0x7f in ASCII, and U+0080
     // to U+009F otherwise. The byte scan is the common, all-ASCII case.
     let controls =
