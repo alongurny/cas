@@ -36,7 +36,10 @@ impl NodeId {
     }
 
     pub fn version(&self) -> View {
-        View::parse(self.0.rsplit_once('#').map_or(&self.0[..], |(v, _)| v)).unwrap()
+        // The id was checked when it was made: its view part is valid.
+        let v = self.0.rsplit_once('#').map_or(&self.0[..], |(v, _)| v);
+        let (format, key) = v.split_once(' ').unwrap();
+        View { format: format.to_string(), key: key.to_string() }
     }
 
     pub fn as_str(&self) -> &str {
@@ -84,10 +87,26 @@ impl HistNode {
 
     /// A node read straight from serialized bytes.
     pub(crate) fn read(c: &mut Cursor) -> std::result::Result<HistNode, String> {
+        HistNode::read_with(c, None)
+    }
+
+    /// [`HistNode::read`], also taking a `'generation'` key into `generation`
+    /// when that is given (a node as a history-part leaf stores it).
+    pub(crate) fn read_with(
+        c: &mut Cursor,
+        mut generation: Option<&mut Option<u64>>,
+    ) -> std::result::Result<HistNode, String> {
         let mut node = HistNode::default();
         let mut f = c.map().map_err(|_| "a node is not a map")?;
         while let Some(k) = c.key(&mut f, "a node")? {
             match k {
+                "generation" if generation.is_some() => {
+                    let s = c.str().map_err(|_| "generation is not a string")?;
+                    if s.starts_with('0') || !s.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err("generation is a decimal number from 1".into());
+                    }
+                    **generation.as_mut().unwrap() = Some(s.parse().map_err(|_| "generation is too large")?);
+                }
                 "doc" => node.doc = Some(c.str().map_err(|_| "node doc is not a string")?.to_string()),
                 "after" => {
                     let mut after = c.map().map_err(|_| "after is not a map")?;
@@ -235,18 +254,15 @@ impl History {
     }
 
     pub(crate) fn check(&self) -> std::result::Result<(), String> {
-        for (id, n) in &self.nodes {
-            if let Some(p) = n.after.keys().find(|p| !self.nodes.contains_key(*p)) {
-                return Err(format!("{id} follows {p}, which is not a node"));
-            }
-        }
+        self.checked_log().map(|_| ())
+    }
+
+    /// Check the history and return its [`History::log`].
+    pub(crate) fn checked_log(&self) -> std::result::Result<Vec<NodeId>, String> {
         if let Some((t, n)) = self.tags.iter().find(|(_, n)| !self.nodes.contains_key(*n)) {
             return Err(format!("tag {t} names {n}, which is not a node"));
         }
-        if self.log().len() != self.nodes.len() {
-            return Err("the order has a cycle".into());
-        }
-        Ok(())
+        self.order(true)
     }
 
     /// Nodes no other node follows.
@@ -264,27 +280,50 @@ impl History {
     /// Every node, newest first: each before its predecessors, ties going
     /// to the smallest id. Nodes on a cycle are left out.
     pub fn log(&self) -> Vec<NodeId> {
-        let mut followers: BTreeMap<&NodeId, usize> = self.nodes.keys().map(|id| (id, 0)).collect();
-        for n in self.nodes.values() {
+        self.order(false).unwrap_or_default()
+    }
+
+    /// [`History::log`], by index: nodes are in id order, so the smallest
+    /// index is the smallest id and the ready set is a min-heap of indices.
+    /// `strict`: a predecessor that is not a node, or a cycle, is an error
+    /// (else the predecessor is ignored and the cycle left out).
+    fn order(&self, strict: bool) -> std::result::Result<Vec<NodeId>, String> {
+        let ids: Vec<&NodeId> = self.nodes.keys().collect();
+        let index: std::collections::HashMap<&NodeId, usize> = ids.iter().enumerate().map(|(i, id)| (*id, i)).collect();
+        let mut preds: Vec<Vec<usize>> = Vec::with_capacity(ids.len());
+        for (id, n) in &self.nodes {
+            let mut ps = Vec::with_capacity(n.after.len());
             for p in n.after.keys() {
-                if let Some(c) = followers.get_mut(p) {
-                    *c += 1;
+                match index.get(p) {
+                    Some(&i) => ps.push(i),
+                    None if strict => return Err(format!("{id} follows {p}, which is not a node")),
+                    None => {}
                 }
             }
+            preds.push(ps);
         }
-        let mut ready: BTreeSet<&NodeId> = followers.iter().filter(|(_, c)| **c == 0).map(|(id, _)| *id).collect();
-        let mut out = Vec::new();
-        while let Some(id) = ready.pop_first() {
-            for p in self.nodes[id].after.keys() {
-                let c = followers.get_mut(p).unwrap();
-                *c -= 1;
-                if *c == 0 {
-                    ready.insert(p);
+        let mut followers = vec![0usize; ids.len()];
+        for ps in &preds {
+            for &p in ps {
+                followers[p] += 1;
+            }
+        }
+        let mut ready: std::collections::BinaryHeap<std::cmp::Reverse<usize>> =
+            (0..ids.len()).filter(|&i| followers[i] == 0).map(std::cmp::Reverse).collect();
+        let mut out = Vec::with_capacity(ids.len());
+        while let Some(std::cmp::Reverse(i)) = ready.pop() {
+            for &p in &preds[i] {
+                followers[p] -= 1;
+                if followers[p] == 0 {
+                    ready.push(std::cmp::Reverse(p));
                 }
             }
-            out.push(id.clone());
+            out.push(ids[i].clone());
         }
-        out
+        if strict && out.len() != ids.len() {
+            return Err("the order has a cycle".into());
+        }
+        Ok(out)
     }
 
     /// `id` and every node it follows, transitively.
@@ -400,7 +439,7 @@ impl History {
     }
 }
 
-pub use crate::htree::{Changed, Part, Root, Stored, height};
+pub use crate::htree::{Changed, Entry, Part, Root, Stored, generations, height};
 
 /// Write `h` whole: its root and every part the store lacks.
 pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<View> {

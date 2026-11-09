@@ -114,11 +114,31 @@ impl Root {
     }
 }
 
+/// A node as a leaf stores it: with its generation, one more than the
+/// greatest generation of its predecessors (1 for a root), as git's
+/// commit-graph keeps. An ancestor always has a smaller generation, so a
+/// walk newest first can stop early.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub node: HistNode,
+    pub generation: u64,
+}
+
+/// The generation of each node of `h`.
+pub fn generations(h: &History) -> HashMap<NodeId, u64> {
+    let mut g: HashMap<NodeId, u64> = HashMap::with_capacity(h.nodes.len());
+    for id in h.log().into_iter().rev() {
+        let n = 1 + h.nodes[&id].after.keys().filter_map(|p| g.get(p)).max().copied().unwrap_or(0);
+        g.insert(id, n);
+    }
+    g
+}
+
 /// One `history-part` blob.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Part {
     /// Nodes by id.
-    Leaf(BTreeMap<NodeId, HistNode>),
+    Leaf(BTreeMap<NodeId, Entry>),
     /// Parts one level down, each by the last node id under it.
     Inner { level: u32, parts: BTreeMap<NodeId, View> },
 }
@@ -128,7 +148,13 @@ impl Part {
         let mut top = BTreeMap::new();
         match self {
             Part::Leaf(nodes) => {
-                let m = nodes.iter().map(|(id, n)| (Value::str(id.as_str()), n.to_value()));
+                let m = nodes.iter().map(|(id, e)| {
+                    let mut v = e.node.to_value();
+                    if let Value::Map(m) = &mut v {
+                        m.insert(Value::str("generation"), Value::str(e.generation.to_string()));
+                    }
+                    (Value::str(id.as_str()), v)
+                });
                 top.insert(Value::str("nodes"), Value::Map(m.collect()));
             }
             Part::Inner { level, parts } => {
@@ -158,7 +184,10 @@ impl Part {
                     let mut out = BTreeMap::new();
                     while let Some(id) = c.key(&mut m, "nodes")? {
                         let id = NodeId::parse(id)?;
-                        out.insert(id, HistNode::read(&mut c)?);
+                        let mut generation = None;
+                        let node = HistNode::read_with(&mut c, Some(&mut generation))?;
+                        let generation = generation.ok_or("a leaf's node has no generation")?;
+                        out.insert(id, Entry { node, generation });
                     }
                     nodes = Some(out);
                 }
@@ -271,7 +300,7 @@ impl Out {
         View { format: part_format().to_string(), key }
     }
 
-    fn leaves(&mut self, entries: impl IntoIterator<Item = (NodeId, HistNode)>) -> Vec<(NodeId, View)> {
+    fn leaves(&mut self, entries: impl IntoIterator<Item = (NodeId, Entry)>) -> Vec<(NodeId, View)> {
         chunk(entries, 0)
             .into_iter()
             .map(|c| {
@@ -319,7 +348,12 @@ impl Out {
 /// Write the whole of `h`.
 pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<View> {
     let mut out = Out { alg, puts: Vec::new() };
-    let leaves = out.leaves(h.nodes.iter().map(|(id, n)| (id.clone(), n.clone())));
+    let g = generations(h);
+    let leaves = out.leaves(
+        h.nodes
+            .iter()
+            .map(|(id, n)| (id.clone(), Entry { node: n.clone(), generation: g.get(id).copied().unwrap_or(1) })),
+    );
     let nodes = out.upper(leaves);
     let root = Root { doc: h.doc.clone(), tags: h.tags.clone(), tips: h.tips(), nodes };
     out.finish(store, &root)
@@ -337,7 +371,7 @@ fn read_parts(store: &dyn Store, views: &[&View]) -> Result<Vec<Part>> {
     Ok(out)
 }
 
-type Leaf = Arc<BTreeMap<NodeId, HistNode>>;
+type Leaf = Arc<BTreeMap<NodeId, Entry>>;
 
 /// What [`Stored::changed`] finds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -449,8 +483,76 @@ impl<'s> Stored<'s> {
     pub fn get(&self, id: &NodeId) -> Result<Option<HistNode>> {
         match self.leaf_of(id) {
             None => Ok(None),
+            Some(i) => Ok(self.leaf(i)?.get(id).map(|e| e.node.clone())),
+        }
+    }
+
+    /// A node with its generation.
+    pub fn entry(&self, id: &NodeId) -> Result<Option<Entry>> {
+        match self.leaf_of(id) {
+            None => Ok(None),
             Some(i) => Ok(self.leaf(i)?.get(id).cloned()),
         }
+    }
+
+    /// The best common ancestors of `a` and `b` ([`History::merge_bases`]),
+    /// reading only the nodes the walk reaches: git's paint-down by
+    /// generation. Nodes are taken newest (greatest generation) first; each
+    /// carries which of `a` and `b` reach it; one both reach is a base, and
+    /// everything below it is stale. The walk ends when only stale nodes
+    /// are left.
+    pub fn merge_bases(&self, a: &NodeId, b: &NodeId) -> Result<BTreeSet<NodeId>> {
+        const A: u8 = 1;
+        const B: u8 = 2;
+        const STALE: u8 = 4;
+        let mut flags: HashMap<NodeId, u8> = HashMap::new();
+        let mut queue = std::collections::BinaryHeap::new();
+        let mut live = 0usize;
+        let mut out = BTreeSet::new();
+        for (id, f) in [(a, A), (b, B)] {
+            let e = self.entry(id)?.ok_or_else(|| Error::Missing(format!("node {id}")))?;
+            let old = flags.get(id).copied().unwrap_or(0);
+            flags.insert(id.clone(), old | f);
+            if old == 0 {
+                queue.push((e.generation, id.clone()));
+                live += 1;
+            }
+        }
+        while live > 0 {
+            let Some((_, id)) = queue.pop() else { break };
+            let mut f = flags[&id];
+            if f & STALE == 0 {
+                live -= 1;
+            }
+            if f & (A | B) == A | B && f & STALE == 0 {
+                out.insert(id.clone());
+                f |= STALE;
+                flags.insert(id.clone(), f);
+            }
+            let e = self.entry(&id)?.ok_or_else(|| Error::Missing(format!("node {id}")))?;
+            for p in e.node.after.keys() {
+                let old = flags.get(p).copied();
+                let new = old.unwrap_or(0) | f;
+                if old == Some(new) {
+                    continue;
+                }
+                flags.insert(p.clone(), new);
+                match old {
+                    None => {
+                        let g = self.entry(p)?.ok_or_else(|| Error::Missing(format!("node {p}")))?.generation;
+                        queue.push((g, p.clone()));
+                        if new & STALE == 0 {
+                            live += 1;
+                        }
+                    }
+                    // Queued and not yet taken (an ancestor is taken after
+                    // every node above it): it may just have become stale.
+                    Some(o) if o & STALE == 0 && new & STALE != 0 => live -= 1,
+                    Some(_) => {}
+                }
+            }
+        }
+        Ok(out)
     }
 
     pub fn contains(&self, id: &NodeId) -> Result<bool> {
@@ -492,16 +594,43 @@ impl<'s> Stored<'s> {
     /// The whole history, checked: every part in place, and the root's tips
     /// the history's tips.
     pub fn read_all(&self) -> Result<History> {
+        self.read_all_with_log().map(|(h, _)| h)
+    }
+
+    /// [`Stored::read_all`] and the history's log, computed by the check.
+    pub fn read_all_with_log(&self) -> Result<(History, Vec<NodeId>)> {
         let mut h = History { doc: self.root.doc.clone(), tags: self.root.tags.clone(), ..History::default() };
         for l in self.all_leaves()? {
-            h.nodes.extend(l.iter().map(|(k, v)| (k.clone(), v.clone())));
+            h.nodes.extend(l.iter().map(|(k, e)| (k.clone(), e.node.clone())));
         }
         let key = self.root.nodes.as_ref().map_or("", |v| v.key());
-        h.check().map_err(|e| malformed(key, e))?;
-        if h.tips() != self.root.tips {
+        let log = h.checked_log().map_err(|e| malformed(key, e))?;
+        // Every stored generation is right.
+        let mut generation: HashMap<&NodeId, u64> = HashMap::with_capacity(h.nodes.len());
+        for l in self.all_leaves()? {
+            for (k, e) in l.iter() {
+                generation.insert(h.nodes.get_key_value(k).unwrap().0, e.generation);
+            }
+        }
+        for (id, n) in &h.nodes {
+            let want = 1 + n.after.keys().map(|p| generation[p]).max().unwrap_or(0);
+            if generation[id] != want {
+                return Err(malformed(key, format!("{id} has generation {}, not {want}", generation[id])));
+            }
+        }
+        // The tips are the nodes no other follows; the log puts them first.
+        let tips_ok = {
+            let mut followed = std::collections::HashSet::new();
+            for n in h.nodes.values() {
+                followed.extend(n.after.keys());
+            }
+            let tips: BTreeSet<&NodeId> = h.nodes.keys().filter(|id| !followed.contains(id)).collect();
+            tips.len() == self.root.tips.len() && tips.into_iter().eq(self.root.tips.iter())
+        };
+        if !tips_ok {
             return Err(malformed(key, "the root's tips are not the history's tips"));
         }
-        Ok(h)
+        Ok((h, log))
     }
 
     /// Write a new history: this one with `changes` (a node, or `None` to
@@ -515,12 +644,54 @@ impl<'s> Stored<'s> {
     ) -> Result<View> {
         let mut out = Out { alg, puts: Vec::new() };
         let n = self.leaves.len();
-        let mut by_leaf: BTreeMap<usize, Vec<(&NodeId, &Option<HistNode>)>> = BTreeMap::new();
+        // Generations of the changed nodes, from their predecessors: other
+        // changed nodes first (in an order where each follows those it is
+        // after), then stored ones. A changed node must not change the
+        // generation of nodes that follow it; a whole read checks that.
+        let mut gens: HashMap<&NodeId, u64> = HashMap::new();
+        let mut todo: Vec<(&NodeId, &HistNode)> =
+            changes.iter().filter_map(|(id, c)| c.as_ref().map(|n| (id, n))).collect();
+        while !todo.is_empty() {
+            let before = todo.len();
+            let mut later = Vec::new();
+            for (id, node) in todo {
+                let mut g = 0;
+                let mut ready = true;
+                for p in node.after.keys() {
+                    if let Some(&x) = gens.get(p) {
+                        g = g.max(x);
+                    } else if changes.get(p).is_some_and(Option::is_some) && p != id {
+                        ready = false;
+                    } else if let Some(e) = self.entry(p)? {
+                        g = g.max(e.generation);
+                    }
+                }
+                if ready {
+                    gens.insert(id, g + 1);
+                } else {
+                    later.push((id, node));
+                }
+            }
+            if later.len() == before {
+                // A cycle among the changes: an invalid history either way.
+                for (id, _) in &later {
+                    gens.insert(id, 1);
+                }
+                break;
+            }
+            todo = later;
+        }
+        let changes: BTreeMap<&NodeId, Option<Entry>> = changes
+            .iter()
+            .map(|(id, c)| (id, c.as_ref().map(|node| Entry { node: node.clone(), generation: gens[id] })))
+            .collect();
+        let mut by_leaf: BTreeMap<usize, Vec<(&NodeId, &Option<Entry>)>> = BTreeMap::new();
         let mut fresh = BTreeMap::new();
-        for (id, c) in changes {
+        for (id, c) in &changes {
+            let id: &NodeId = id;
             if n == 0 {
-                if let Some(node) = c {
-                    fresh.insert(id.clone(), node.clone());
+                if let Some(e) = c {
+                    fresh.insert(id.clone(), e.clone());
                 }
             } else {
                 by_leaf.entry(self.leaf_of(id).unwrap_or(n - 1)).or_default().push((id, c));
@@ -536,7 +707,7 @@ impl<'s> Stored<'s> {
             }
             // A run of leaves to rechunk: from this one up to one that still
             // ends at a chunk end (or the last).
-            let mut entries: BTreeMap<NodeId, HistNode> = BTreeMap::new();
+            let mut entries: BTreeMap<NodeId, Entry> = BTreeMap::new();
             let mut end = i;
             loop {
                 entries.extend(self.leaf(end)?.iter().map(|(k, v)| (k.clone(), v.clone())));
@@ -570,7 +741,7 @@ impl<'s> Stored<'s> {
             let mut out = BTreeMap::new();
             for (i, (_, v)) in s.leaves.iter().enumerate() {
                 if !other.contains(v.key()) {
-                    out.extend(s.leaf(i)?.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    out.extend(s.leaf(i)?.iter().map(|(k, e)| (k.clone(), e.node.clone())));
                 }
             }
             Ok(out)

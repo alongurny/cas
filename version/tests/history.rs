@@ -146,7 +146,7 @@ fn histories_round_trip_and_are_content_addressed() {
     assert_eq!(
         Value::deserialize(&leaf).unwrap().to_text(),
         format!(
-            "{{'nodes': {{'{n1}': {{'doc': 'first'}}, '{n2}': {{'after': {{'{n1}': {{'changelog': 'rename', 'compatible': {{}}}}}}}}}}}}"
+            "{{'nodes': {{'{n1}': {{'doc': 'first', 'generation': '1'}}, '{n2}': {{'after': {{'{n1}': {{'changelog': 'rename', 'compatible': {{}}}}}}, 'generation': '2'}}}}}}"
         )
     );
     // A node is its version: nothing about the history is in it.

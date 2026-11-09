@@ -395,9 +395,21 @@ fn run(a: Args) -> Res<()> {
             .map_err(e)?;
         }
         Some("merge-base") => {
-            let h = load(s, name)?.1;
-            let (x, y) = (node(&h, &arg(1, "A")?, name)?, node(&h, &arg(2, "B")?, name)?);
-            for b in h.merge_bases(&x, &y) {
+            // Reads only the nodes the walk reaches (by generation), unless
+            // a node is named by a key prefix.
+            let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
+            let st = history::Stored::open(s, Some(&v)).map_err(e)?;
+            let find = |what: &str| -> Res<NodeId> {
+                if let Some(id) = st.root.tags.get(what) {
+                    return Ok(id.clone());
+                }
+                match NodeId::parse(what) {
+                    Ok(id) if st.contains(&id).map_err(e)? => Ok(id),
+                    _ => node(&st.read_all().map_err(e)?, what, name),
+                }
+            };
+            let (x, y) = (find(&arg(1, "A")?)?, find(&arg(2, "B")?)?);
+            for b in st.merge_bases(&x, &y).map_err(e)? {
                 out!("{b}");
             }
         }

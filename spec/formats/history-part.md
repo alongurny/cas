@@ -5,7 +5,14 @@ a leaf holding nodes, or an inner part holding the parts one level down.
 The blob is a `uni-bin` value, a map with exactly one of these shapes:
 
 - A leaf: `{'nodes': N}`, where N is a non-empty map from node id to node,
-  as history.md describes nodes.
+  as history.md describes nodes, each with one more key:
+  `'generation'`, a decimal string without leading zeros: 1 for a node
+  with no predecessors, else one more than the greatest generation of its
+  predecessors (git's commit-graph generation number). A node always has
+  a greater generation than every node it follows, so an ancestry walk
+  that takes nodes by generation, greatest first, can stop as soon as
+  what is left cannot matter. The history's content does not include it:
+  it is fixed by the nodes.
 - An inner part: `{'level': L, 'parts': P}`, where L is a decimal string
   from `1` without leading zeros, and P is a non-empty map from node id to
   a view (a string `<format> <key>`) of a `history-part` at level L - 1.
@@ -30,8 +37,8 @@ single part, which is the top: the root's `'nodes'` view names it. So a
 leaf holds 64 nodes on average, an inner part 64 parts, and a top inner
 part always has at least two.
 
-Equivalently, a tree is valid when: every leaf and inner part is at the
-level its parent says; the ids under each part are greater than those
+Equivalently, a tree is valid when: every generation is as above; every
+leaf and inner part is at the level its parent says; the ids under each part are greater than those
 under the part before it on the same level; within each part every id
 but the greatest has height at most its level; the greatest has height
 greater than its level unless the part is the last of its level; each id

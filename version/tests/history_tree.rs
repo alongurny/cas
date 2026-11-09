@@ -3,7 +3,7 @@
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Expect, Policy, Session, Store, Who};
-use cas_version::history::{self, History, NodeId, Part, Root, Step, Stored};
+use cas_version::history::{self, Entry, History, NodeId, Part, Root, Step, Stored};
 use cas_version::{View, put};
 use proptest::prelude::*;
 use std::collections::BTreeMap;
@@ -164,7 +164,9 @@ fn a_damaged_tree_is_refused_on_a_whole_read() {
     let bad = write_root(&Root { tips: [h.log().last().unwrap().clone()].into(), ..root.clone() });
     assert!(history::read(&s, &bad).is_err());
     // All the nodes in one leaf: not chunked by id.
-    let one = Part::Leaf(h.nodes.clone());
+    let g = history::generations(&h);
+    let one =
+        Part::Leaf(h.nodes.iter().map(|(k, n)| (k.clone(), Entry { node: n.clone(), generation: g[k] })).collect());
     let bytes = one.encode();
     let key = b3().key(&bytes);
     s.write(&key, &bytes, &Expect::Absent).unwrap();
@@ -173,4 +175,60 @@ fn a_damaged_tree_is_refused_on_a_whole_read() {
     assert!(history::read(&s, &bad).is_err());
     // The good one still reads.
     assert_eq!(history::read(&s, &write_root(&root)).unwrap(), h);
+}
+
+/// A random DAG: node i follows up to two earlier nodes.
+fn dag(s: &Session, edges: &[(usize, usize)]) -> (History, Vec<NodeId>) {
+    let mut h = History::default();
+    let mut ids: Vec<NodeId> = Vec::new();
+    for (i, &(a, b)) in edges.iter().enumerate() {
+        let v = put(s, b3(), "raw", format!("d{i}").as_bytes()).unwrap();
+        let mut after = BTreeMap::new();
+        if i > 0 {
+            after.insert(ids[a % i].clone(), Step::default());
+            after.insert(ids[b % i].clone(), Step::default());
+        }
+        ids.push(h.add(&v, after, None).unwrap());
+    }
+    (h, ids)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// The walk by generation over the stored tree finds the merge bases
+    /// the whole history does.
+    #[test]
+    fn stored_merge_bases_agree(
+        edges in proptest::collection::vec((0usize..1000, 0usize..1000), 1..120),
+        x in 0usize..1000,
+        y in 0usize..1000,
+    ) {
+        let s = store();
+        let (h, ids) = dag(&s, &edges);
+        let r = history::write(&s, b3(), &h).unwrap();
+        let st = Stored::open(&s, Some(&r)).unwrap();
+        let (a, b) = (&ids[x % ids.len()], &ids[y % ids.len()]);
+        prop_assert_eq!(st.merge_bases(a, b).unwrap(), h.merge_bases(a, b));
+        prop_assert_eq!(history::read(&s, &r).unwrap(), h);
+    }
+}
+
+#[test]
+fn a_wrong_generation_is_refused() {
+    let s = store();
+    let h = linear(&s, 10);
+    let r = history::write(&s, b3(), &h).unwrap();
+    let root = Root::decode(&s.read(r.key()).unwrap().unwrap()).unwrap();
+    let top = root.nodes.clone().unwrap();
+    let Part::Leaf(mut nodes) = Part::decode(&s.read(top.key()).unwrap().unwrap()).unwrap() else { panic!() };
+    nodes.values_mut().next().unwrap().generation += 1;
+    let bytes = Part::Leaf(nodes).encode();
+    let key = b3().key(&bytes);
+    s.write(&key, &bytes, &Expect::Absent).unwrap();
+    let bytes = Root { nodes: Some(View::new(top.format(), &key).unwrap()), ..root }.encode();
+    let rk = b3().key(&bytes);
+    s.write(&rk, &bytes, &Expect::Absent).unwrap();
+    let err = history::read(&s, &View::new(r.format(), &rk).unwrap()).unwrap_err().to_string();
+    assert!(err.contains("generation"), "{err}");
 }

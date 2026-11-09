@@ -150,7 +150,11 @@ impl Graph {
     /// The graph of `h` without diffing: every step's filter is [`Filter::Full`].
     /// For order and notes only; never recorded.
     pub fn unfiltered(h: &History) -> Graph {
-        let log = h.log();
+        Graph::unfiltered_in(h, h.log())
+    }
+
+    /// [`Graph::unfiltered`] of `h`, whose log is `log`.
+    pub fn unfiltered_in(h: &History, log: Vec<NodeId>) -> Graph {
         let pos: HashMap<&NodeId, usize> = log.iter().enumerate().map(|(i, id)| (id, i)).collect();
         let nodes = log
             .iter()
@@ -346,7 +350,10 @@ fn reusable(store: &dyn Store, input: &View, limit: usize) -> Option<Graph> {
 pub fn graph_or_order(store: &dyn Store, input: &View) -> Result<Graph> {
     match derived::readable_cache(store, &GRAPH, input)? {
         Some(r) => read(store, &r),
-        None => Ok(Graph::unfiltered(&crate::history::read(store, input)?)),
+        None => {
+            let (h, log) = crate::history::Stored::open(store, Some(input))?.read_all_with_log()?;
+            Ok(Graph::unfiltered_in(&h, log))
+        }
     }
 }
 
