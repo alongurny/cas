@@ -15,7 +15,11 @@
 //!   file bytes; kind 5 is a delta, whose data is `base, value len varint,
 //!   zstd bytes`. The base is a binary name: `1` and the 32 digest bytes of
 //!   a `blake3:` key, `2` and those of a chunk, or `0`, `len u16` and the
-//!   name. Older kinds still read: 2 and 3 are 4 and 5 with the frame's own
+//!   name. Kind 6 is a delta on a frame earlier in the same pack, the base
+//!   given as how far back that frame starts (a varint) instead of by
+//!   name: a chain is followed without index lookups, as git's offset
+//!   deltas are. Merges copy frames in pack order, so a base comes before
+//!   its deltas and they stay kind 6. Older kinds still read: 2 and 3 are 4 and 5 with the frame's own
 //!   binary name after the kind and `u32` lengths; 0 and 1 are 2 and 3 with
 //!   every name as `len u16, name` (73 bytes for a blake3 key, not 33).
 //! - `<id>.idx`: `CASIDX03`, counts `keys u32, chunks u32`, then that many
@@ -61,6 +65,10 @@ const DELTA_B: u8 = 3;
 /// and with varint lengths: what writers write now.
 const FILE_N: u8 = 4;
 const DELTA_N: u8 = 5;
+/// As DELTA_N with the base named by where its frame starts, as a varint
+/// distance back from this frame's start (git's offset deltas): for a
+/// base earlier in the same pack. No index lookup to follow a chain.
+const DELTA_O: u8 = 6;
 /// Longest chain of deltas a pack holds (git's default depth). At 10, a
 /// file's every eleventh version was whole: git.git's store took 506 MB,
 /// 350 MB at 50; reading the newest version of a file costs the most.
@@ -80,7 +88,12 @@ struct Loc {
 struct Map {
     ptr: *const u8,
     len: usize,
+    /// Distinct for every mapping made by this process: the base cache's
+    /// key, with a frame's offset.
+    uid: u64,
 }
+
+static MAP_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // The mapping is read-only and owned here.
 unsafe impl Send for Map {}
@@ -100,7 +113,7 @@ impl Map {
         if ptr == libc::MAP_FAILED {
             return Err(io::Error::last_os_error());
         }
-        Ok(Map { ptr: ptr as *const u8, len })
+        Ok(Map { ptr: ptr as *const u8, len, uid: MAP_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) })
     }
 
     fn bytes(&self) -> &[u8] {
@@ -137,6 +150,9 @@ struct Idx {
     /// each search step is a cache miss).
     searches: std::sync::atomic::AtomicU32,
     table: std::sync::OnceLock<Vec<u32>>,
+    /// Every record's (offset, number) by offset, built when an offset
+    /// delta's base is first named (a repack, a copy).
+    by_offset: std::sync::OnceLock<Vec<(u64, u32)>>,
 }
 
 /// Binary searches in one index before it gets a hash table.
@@ -233,12 +249,71 @@ impl Idx {
         if b.len() < base + 12 + strs * REC {
             return Err(truncated());
         }
-        Ok(Idx { bytes, keys, chunks, base, strs, searches: Default::default(), table: Default::default() })
+        Ok(Idx {
+            bytes,
+            keys,
+            chunks,
+            base,
+            strs,
+            searches: Default::default(),
+            table: Default::default(),
+            by_offset: Default::default(),
+        })
     }
 
     /// Every name in the index.
     fn len(&self) -> usize {
         self.keys + self.chunks + self.strs
+    }
+
+    /// Record number `i` (the key section, then chunks, then the version 2
+    /// part): its name and offset.
+    fn record(&self, i: usize) -> io::Result<(String, u64)> {
+        let fixed = |s: usize, j: usize| {
+            let rec = &self.fixed(s)[j * FIXED..(j + 1) * FIXED];
+            (format!("{}{}", SECTIONS[s], hex::encode(&rec[..32])), u64::from_be_bytes(rec[32..].try_into().unwrap()))
+        };
+        if i < self.keys {
+            Ok(fixed(0, i))
+        } else if i < self.keys + self.chunks {
+            Ok(fixed(1, i - self.keys))
+        } else {
+            let j = i - self.keys - self.chunks;
+            Ok((self.name(j)?.to_string(), self.offset(j)))
+        }
+    }
+
+    /// Every record's (offset, number), by offset.
+    fn by_offset(&self) -> &[(u64, u32)] {
+        self.by_offset.get_or_init(|| {
+            let mut v: Vec<(u64, u32)> = (0..self.len()).map(|i| (self.offset_of(i), i as u32)).collect();
+            v.sort_unstable();
+            v
+        })
+    }
+
+    /// Record `i`'s offset.
+    fn offset_of(&self, i: usize) -> u64 {
+        let fixed = |s: usize, j: usize| {
+            let rec = &self.fixed(s)[j * FIXED..(j + 1) * FIXED];
+            u64::from_be_bytes(rec[32..].try_into().unwrap())
+        };
+        if i < self.keys {
+            fixed(0, i)
+        } else if i < self.keys + self.chunks {
+            fixed(1, i - self.keys)
+        } else {
+            self.offset(i - self.keys - self.chunks)
+        }
+    }
+
+    /// The name of the frame starting at `offset`.
+    fn name_at(&self, offset: u64) -> io::Result<String> {
+        let by = self.by_offset();
+        match by.binary_search_by_key(&offset, |&(o, _)| o) {
+            Ok(i) => Ok(self.record(by[i].1 as usize)?.0),
+            Err(_) => Err(bad(format!("no frame starts at {offset}"))),
+        }
     }
 
     /// Fixed section `s`'s records.
@@ -484,11 +559,66 @@ fn encode_v2(entries: &[(String, u64)]) -> Vec<u8> {
     out
 }
 
+/// A frame found: where it starts, in which mapping, under which index.
+#[derive(Clone)]
+struct Mapped {
+    offset: u64,
+    map: std::sync::Arc<Map>,
+    idx: std::sync::Arc<Idx>,
+}
+
+impl Mapped {
+    /// The frame of the same pack starting at `offset`.
+    fn at(&self, offset: u64) -> Mapped {
+        Mapped { offset, ..self.clone() }
+    }
+
+    fn key(&self) -> (u64, u64) {
+        (self.map.uid, self.offset)
+    }
+
+    /// Whether this frame is a delta, its kind, its data, and its length.
+    fn parse(&self) -> io::Result<(bool, u8, &[u8], usize)> {
+        let b = self.map.bytes().get(self.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
+        parse_frame(b)
+    }
+
+    /// The base of the delta frame `data` of kind `kind` (this frame's).
+    fn base(&self, packs: &Packs, kind: u8, data: &[u8]) -> io::Result<Option<Mapped>> {
+        match delta_parts(data, kind)?.0 {
+            Base::Back(d) => {
+                let o = self.offset.checked_sub(d).filter(|_| d > 0).ok_or_else(|| bad("delta base offset"))?;
+                Ok(Some(self.at(o)))
+            }
+            // A base may have been removed: its dependents still need it.
+            Base::Name(n) => packs.locate_mapped(&n, true),
+        }
+    }
+
+    fn frame(&self) -> io::Result<Frame> {
+        let (delta, kind, data, len) = self.parse()?;
+        let b = &self.map.bytes()[self.offset as usize..];
+        let bytes = b[..len].to_vec();
+        let data_at = len - data.len();
+        if delta {
+            let base = match delta_parts(data, kind)?.0 {
+                Base::Name(n) => n,
+                Base::Back(d) => {
+                    self.idx.name_at(self.offset.checked_sub(d).ok_or_else(|| bad("delta base offset"))?)?
+                }
+            };
+            Ok(Frame { bytes, data_at, base: Some(base), plain: true })
+        } else {
+            Ok(Frame { bytes, data_at, base: None, plain: matches!(data.first(), Some(0 | 1)) })
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     /// Pack ids, in load order; `Loc::pack` indexes this, `idx` and `maps`.
     packs: Vec<String>,
-    idx: Vec<Idx>,
+    idx: Vec<std::sync::Arc<Idx>>,
     maps: Vec<std::sync::OnceLock<std::sync::Arc<Map>>>,
     removed: BTreeSet<String>,
     /// The index in `packs` of the sealed pack.
@@ -523,30 +653,34 @@ const FRESH: std::time::Duration = std::time::Duration::from_millis(50);
 /// Bytes of base values kept.
 const BASE_CACHE_BYTES: usize = 256 << 20;
 
+/// A cached value and when it was last used.
+type Cached = (std::sync::Arc<Vec<u8>>, u64);
+
 #[derive(Default)]
 struct BaseCache {
-    map: std::collections::HashMap<String, (std::sync::Arc<Vec<u8>>, u64)>,
+    /// By (mapping, frame offset).
+    map: std::collections::HashMap<(u64, u64), Cached>,
     bytes: usize,
     tick: u64,
 }
 
 impl BaseCache {
-    fn get(&mut self, name: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    fn get(&mut self, at: (u64, u64)) -> Option<std::sync::Arc<Vec<u8>>> {
         self.tick += 1;
         let t = self.tick;
-        self.map.get_mut(name).map(|(v, used)| {
+        self.map.get_mut(&at).map(|(v, used)| {
             *used = t;
             v.clone()
         })
     }
 
-    fn put(&mut self, name: &str, v: std::sync::Arc<Vec<u8>>) {
+    fn put(&mut self, at: (u64, u64), v: std::sync::Arc<Vec<u8>>) {
         if v.len() > BASE_CACHE_BYTES / 4 {
             return;
         }
         self.tick += 1;
         self.bytes += v.len();
-        if let Some((old, _)) = self.map.insert(name.to_string(), (v, self.tick)) {
+        if let Some((old, _)) = self.map.insert(at, (v, self.tick)) {
             self.bytes -= old.len();
         }
         if self.bytes > BASE_CACHE_BYTES {
@@ -654,11 +788,11 @@ fn parse_frame(mut b: &[u8]) -> io::Result<(bool, u8, &[u8], usize)> {
     let kind = take(&mut b, 1)?[0];
     let delta = match kind {
         FILE | FILE_B | FILE_N => false,
-        DELTA | DELTA_B | DELTA_N => true,
+        DELTA | DELTA_B | DELTA_N | DELTA_O => true,
         k => return Err(bad(format!("frame kind {k}"))),
     };
     let n = match kind {
-        FILE_N | DELTA_N => take_varint(&mut b)?,
+        FILE_N | DELTA_N | DELTA_O => take_varint(&mut b)?,
         _ => {
             skip_name(&mut b, kind >= FILE_B)?;
             take_u32(&mut b)?
@@ -668,11 +802,20 @@ fn parse_frame(mut b: &[u8]) -> io::Result<(bool, u8, &[u8], usize)> {
     Ok((delta, kind, data, start - b.len()))
 }
 
+/// A delta's base: by name, or by how far back in the pack its frame starts.
+enum Base {
+    Name(String),
+    Back(u64),
+}
+
 /// A delta frame's data, by the frame's kind: its base, value length and
 /// zstd bytes.
-fn delta_parts(mut d: &[u8], kind: u8) -> io::Result<(String, usize, &[u8])> {
-    let base = take_any_name(&mut d, kind != DELTA)?;
-    let len = if kind == DELTA_N { take_varint(&mut d)? } else { take_u32(&mut d)? };
+fn delta_parts(mut d: &[u8], kind: u8) -> io::Result<(Base, usize, &[u8])> {
+    let base = match kind {
+        DELTA_O => Base::Back(take_varint(&mut d)? as u64),
+        _ => Base::Name(take_any_name(&mut d, kind != DELTA)?),
+    };
+    let len = if matches!(kind, DELTA_N | DELTA_O) { take_varint(&mut d)? } else { take_u32(&mut d)? };
     Ok((base, len, d))
 }
 
@@ -749,10 +892,9 @@ fn with_dict_compress(dict: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
 impl Frame {
     /// A delta frame's base, value length and zstd bytes.
     pub fn delta(&self) -> io::Result<Option<(String, usize, &[u8])>> {
-        if self.base.is_none() {
-            return Ok(None);
-        }
-        delta_parts(&self.bytes[self.data_at..], self.bytes[0]).map(Some)
+        let Some(base) = &self.base else { return Ok(None) };
+        let (_, len, z) = delta_parts(&self.bytes[self.data_at..], self.bytes[0])?;
+        Ok(Some((base.clone(), len, z)))
     }
 }
 
@@ -774,43 +916,67 @@ pub struct PackWriter<'a> {
     out: io::BufWriter<File>,
     offset: u64,
     idx: Vec<(String, u64)>,
+    /// Where each name's frame starts, for offset deltas on it.
+    at: crate::keyhash::KeyMap<u64>,
 }
 
 impl PackWriter<'_> {
-    /// Copy a whole frame (as stored in another pack) under `name`.
-    pub fn add_frame(&mut self, name: &str, frame: &[u8]) -> io::Result<()> {
+    /// Copy a frame as stored in another pack under `name`: a whole frame
+    /// byte for byte, a delta written again (its base by distance when it
+    /// is in this pack already, else by name).
+    pub fn add_frame(&mut self, name: &str, f: &Frame) -> io::Result<()> {
+        match f.delta()? {
+            Some((base, len, z)) => self.add_delta(name, &base, len, z),
+            None => {
+                self.start(name);
+                self.out.write_all(&f.bytes)?;
+                self.offset += f.bytes.len() as u64;
+                Ok(())
+            }
+        }
+    }
+
+    fn start(&mut self, name: &str) {
         self.idx.push((name.to_string(), self.offset));
-        self.out.write_all(frame)?;
-        self.offset += frame.len() as u64;
+        self.at.insert(name.to_string(), self.offset);
+    }
+
+    fn add_delta(&mut self, name: &str, base: &str, len: usize, z: &[u8]) -> io::Result<()> {
+        let mut d = Vec::new();
+        let kind = match self.at.get(base) {
+            Some(&b) => {
+                put_varint(&mut d, (self.offset - b) as usize);
+                DELTA_O
+            }
+            None => {
+                put_bin_name(&mut d, base);
+                DELTA_N
+            }
+        };
+        put_varint(&mut d, len);
+        let mut frame = vec![kind];
+        put_varint(&mut frame, d.len() + z.len());
+        self.start(name);
+        self.out.write_all(&frame)?;
+        self.out.write_all(&d)?;
+        self.out.write_all(z)?;
+        self.offset += (frame.len() + d.len() + z.len()) as u64;
         Ok(())
     }
 
     pub fn add(&mut self, name: &str, e: &Entry) -> io::Result<()> {
-        self.idx.push((name.to_string(), self.offset));
-        let mut frame = Vec::new();
-        let data_len;
         match e {
             Entry::File(bytes) => {
-                frame.push(FILE_N);
+                let mut frame = vec![FILE_N];
                 put_varint(&mut frame, bytes.len());
-                data_len = bytes.len();
+                self.start(name);
                 self.out.write_all(&frame)?;
                 self.out.write_all(bytes)?;
+                self.offset += (frame.len() + bytes.len()) as u64;
+                Ok(())
             }
-            Entry::Delta { base, len, z } => {
-                let mut d = Vec::new();
-                put_bin_name(&mut d, base);
-                put_varint(&mut d, *len);
-                frame.push(DELTA_N);
-                put_varint(&mut frame, d.len() + z.len());
-                data_len = d.len() + z.len();
-                self.out.write_all(&frame)?;
-                self.out.write_all(&d)?;
-                self.out.write_all(z)?;
-            }
+            Entry::Delta { base, len, z } => self.add_delta(name, base, *len, z),
         }
-        self.offset += (frame.len() + data_len) as u64;
-        Ok(())
     }
 
     /// Sync the pack and its index and make them visible.
@@ -875,7 +1041,7 @@ impl Packs {
         let known: BTreeSet<String> = st.packs.iter().cloned().collect();
         for id in ids.into_iter().filter(|i| !known.contains(i)) {
             let idx = Idx::open(&id, &self.dir.join(format!("{id}.idx")))?;
-            st.idx.push(idx);
+            st.idx.push(std::sync::Arc::new(idx));
             st.maps.push(std::sync::OnceLock::new());
             st.packs.push(id);
         }
@@ -925,7 +1091,7 @@ impl Packs {
     /// look at the state, which a refresh may replace).
     /// A delta base (`with_removed`) is looked up in the state the lookup of
     /// its dependent refreshed.
-    fn locate_mapped(&self, name: &str, with_removed: bool) -> io::Result<Option<(Loc, std::sync::Arc<Map>)>> {
+    fn locate_mapped(&self, name: &str, with_removed: bool) -> io::Result<Option<Mapped>> {
         if with_removed {
             return self.mapped(self.state.read().unwrap(), |st| st.get(name));
         }
@@ -948,14 +1114,17 @@ impl Packs {
         &self,
         st: std::sync::RwLockReadGuard<'_, State>,
         find: impl Fn(&State) -> Option<Loc>,
-    ) -> io::Result<Option<(Loc, std::sync::Arc<Map>)>> {
+    ) -> io::Result<Option<Mapped>> {
         let Some(loc) = find(&st) else { return Ok(None) };
         let cell = &st.maps[loc.pack];
+        let idx = st.idx[loc.pack].clone();
         if let Some(m) = cell.get() {
-            return Ok(Some((loc, m.clone())));
+            return Ok(Some(Mapped { offset: loc.offset, map: m.clone(), idx }));
         }
         match Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack]))) {
-            Ok(m) => Ok(Some((loc, cell.get_or_init(|| std::sync::Arc::new(m)).clone()))),
+            Ok(m) => {
+                Ok(Some(Mapped { offset: loc.offset, map: cell.get_or_init(|| std::sync::Arc::new(m)).clone(), idx }))
+            }
             // Merged away by a compaction since the last look: look again.
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 drop(st);
@@ -964,7 +1133,8 @@ impl Packs {
                 let st = self.state.read().unwrap();
                 let Some(loc) = find(&st) else { return Ok(None) };
                 let m = Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack])))?;
-                Ok(Some((loc, st.maps[loc.pack].get_or_init(|| std::sync::Arc::new(m)).clone())))
+                let map = st.maps[loc.pack].get_or_init(|| std::sync::Arc::new(m)).clone();
+                Ok(Some(Mapped { offset: loc.offset, map, idx: st.idx[loc.pack].clone() }))
             }
             Err(e) => Err(e),
         }
@@ -986,10 +1156,7 @@ impl Packs {
 
     /// The file bytes stored for `name` (deltas resolved to a `0`-header file).
     pub fn file(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
-        self.file_at_depth(name, 0)
-    }
-
-    fn file_at_depth(&self, name: &str, depth: usize) -> io::Result<Option<Vec<u8>>> {
+        let Some(m) = self.locate_mapped(name, false)? else { return Ok(None) };
         let as_file = |v: &[u8]| {
             let mut f = Vec::with_capacity(v.len() + 1);
             f.push(0);
@@ -998,56 +1165,64 @@ impl Packs {
         };
         // A value decoded lately as a base (a walk often reads a chain from
         // its newest end) is not decoded again.
-        if depth == 0
-            && let Some(v) = self.bases.lock().unwrap().get(name)
-        {
-            // Still held: it was when decoded, and a removal since is in the
-            // removed set (a removed name stays readable only as a base).
-            // Packs dropped here clear the cache; another process's gc may
-            // drop what nothing reaches, and a read racing with that may
-            // see it either way.
-            self.look(false)?;
-            if !self.state.read().unwrap().removed.contains(name) {
-                return Ok(Some(as_file(&v)));
-            }
+        if let Some(v) = self.bases.lock().unwrap().get(m.key()) {
+            return Ok(Some(as_file(&v)));
         }
-        // A base may have been removed: its dependents still need it.
-        let Some((loc, map)) = self.locate_mapped(name, depth > 0)? else { return Ok(None) };
-        match frame_data(&map, loc)? {
-            (false, _, data) => Ok(Some(data.to_vec())),
-            (true, kind, data) => {
-                let v = self.delta_value(name, data, kind, depth)?;
+        match m.parse()? {
+            (false, _, data, _) => Ok(Some(data.to_vec())),
+            (true, kind, data, _) => {
+                let v = self.delta_value(&m, kind, data, 0)?;
                 Ok(Some(as_file(&v)))
             }
         }
     }
 
-    /// The value of the delta frame `data` of `name`, kept in the base
-    /// cache: a walk reads the next version at the same path soon, a delta
-    /// on this one.
-    fn delta_value(&self, name: &str, data: &[u8], kind: u8, depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
-        let (base, size, b) = delta_parts(data, kind)?;
+    /// The value of the delta frame at `m` (of `kind`, with `data`), kept
+    /// in the base cache: a walk reads the next version at the same path
+    /// soon, a delta on this one.
+    fn delta_value(&self, m: &Mapped, kind: u8, data: &[u8], depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        let (_, size, z) = delta_parts(data, kind)?;
+        let base = m.base(self, kind, data)?.ok_or_else(|| bad("delta base gone"))?;
         let base_value = self.base_value(&base, depth + 1)?;
-        let v = std::sync::Arc::new(with_dict_decompress(&base_value, b, size)?);
-        self.bases.lock().unwrap().put(name, v.clone());
+        let v = std::sync::Arc::new(with_dict_decompress(&base_value, z, size)?);
+        self.bases.lock().unwrap().put(m.key(), v.clone());
         Ok(v)
     }
 
-    /// The frame stored for `name`, as it is in its pack, to copy into
-    /// another pack unchanged (a repack reusing deltas, as git does).
-    /// `f` of a packed `name`'s file data (`None` for a delta), read in
-    /// place: for scans that look at one byte of every blob.
-    pub fn peek<R>(&self, name: &str, f: impl FnOnce(Option<&[u8]>) -> io::Result<R>) -> io::Result<Option<R>> {
-        let Some((loc, map)) = self.locate_mapped(name, false)? else { return Ok(None) };
-        match frame_data(&map, loc)? {
-            (false, _, data) => f(Some(data)).map(Some),
-            (true, _, _) => f(None).map(Some),
+    /// The plain value of the frame at `m`, a delta base, from the cache if
+    /// there.
+    fn base_value(&self, m: &Mapped, depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
+        if let Some(v) = self.bases.lock().unwrap().get(m.key()) {
+            return Ok(v);
+        }
+        if depth > MAX_DEPTH + 1 {
+            return Err(bad("delta chain too long"));
+        }
+        match m.parse()? {
+            (false, _, data, _) => {
+                let v = std::sync::Arc::new(plain_value(data)?);
+                self.bases.lock().unwrap().put(m.key(), v.clone());
+                Ok(v)
+            }
+            (true, kind, data, _) => self.delta_value(m, kind, data, depth),
         }
     }
 
+    /// `f` of a packed `name`'s file data (`None` for a delta), read in
+    /// place: for scans that look at one byte of every blob.
+    pub fn peek<R>(&self, name: &str, f: impl FnOnce(Option<&[u8]>) -> io::Result<R>) -> io::Result<Option<R>> {
+        let Some(m) = self.locate_mapped(name, false)? else { return Ok(None) };
+        match m.parse()? {
+            (false, _, data, _) => f(Some(data)).map(Some),
+            (true, ..) => f(None).map(Some),
+        }
+    }
+
+    /// The frame stored for `name`, as it is in its pack, to copy into
+    /// another pack (a repack reusing deltas, as git does).
     pub fn frame(&self, name: &str) -> io::Result<Option<Frame>> {
-        let Some((loc, map)) = self.locate_mapped(name, false)? else { return Ok(None) };
-        frame_at(&map, loc)
+        let Some(m) = self.locate_mapped(name, false)? else { return Ok(None) };
+        m.frame().map(Some)
     }
 
     /// The frame of `name` in the sealed pack, if it is there and not removed.
@@ -1058,20 +1233,27 @@ impl Packs {
             return Ok(None);
         }
         let find = |st: &State| st.sealed.and_then(|p| st.idx[p].get(name).map(|offset| Loc { pack: p, offset }));
-        let Some((loc, map)) = self.mapped(st, find)? else { return Ok(None) };
-        frame_at(&map, loc)
+        let Some(m) = self.mapped(st, find)? else { return Ok(None) };
+        m.frame().map(Some)
     }
 
     /// The delta chain depth of `name` as a base: 0 for a plain whole
-    /// frame, `None` when it is not packed or cannot be a base.
+    /// frame, `None` when it is not packed or cannot be a base. Bases by
+    /// name must not be removed.
     pub fn depth(&self, name: &str) -> io::Result<Option<usize>> {
-        let mut name = name.to_string();
+        let Some(mut m) = self.locate_mapped(name, false)? else { return Ok(None) };
         for d in 0..=MAX_DEPTH {
-            match self.frame(&name)? {
-                Some(f) if f.base.is_none() => return Ok(f.plain.then_some(d)),
-                Some(f) => name = f.base.unwrap(),
-                None => return Ok(None),
+            let (delta, kind, data, _) = m.parse()?;
+            if !delta {
+                return Ok(matches!(data.first(), Some(0 | 1)).then_some(d));
             }
+            m = match delta_parts(data, kind)?.0 {
+                Base::Back(_) => m.base(self, kind, data)?.unwrap(),
+                Base::Name(n) => match self.locate_mapped(&n, false)? {
+                    Some(b) => b,
+                    None => return Ok(None),
+                },
+            };
         }
         Ok(None)
     }
@@ -1089,47 +1271,7 @@ impl Packs {
     }
 }
 
-/// Whether the frame at `loc` is a delta, its kind, and its data.
-fn frame_data(map: &Map, loc: Loc) -> io::Result<(bool, u8, &[u8])> {
-    let b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
-    let (delta, kind, data, _) = parse_frame(b)?;
-    Ok((delta, kind, data))
-}
-
-fn frame_at(map: &Map, loc: Loc) -> io::Result<Option<Frame>> {
-    let at = loc.offset as usize;
-    let b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
-    let (delta, kind, data, len) = parse_frame(b)?;
-    let bytes = b[..len].to_vec();
-    let data_at = len - data.len();
-    if delta {
-        let (base, _, _) = delta_parts(data, kind)?;
-        Ok(Some(Frame { bytes, data_at, base: Some(base), plain: true }))
-    } else {
-        Ok(Some(Frame { bytes, data_at, base: None, plain: matches!(data.first(), Some(0 | 1)) }))
-    }
-}
-
 impl Packs {
-    /// The plain value of `name`, a delta base, from the cache if there.
-    fn base_value(&self, name: &str, depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
-        if let Some(v) = self.bases.lock().unwrap().get(name) {
-            return Ok(v);
-        }
-        if depth > MAX_DEPTH + 1 {
-            return Err(bad(format!("delta chain too long at {name}")));
-        }
-        let (loc, map) = self.locate_mapped(name, true)?.ok_or_else(|| bad(format!("base {name} gone")))?;
-        match frame_data(&map, loc)? {
-            (false, _, data) => {
-                let v = std::sync::Arc::new(plain_value(data)?);
-                self.bases.lock().unwrap().put(name, v.clone());
-                Ok(v)
-            }
-            (true, kind, data) => self.delta_value(name, data, kind, depth),
-        }
-    }
-
     /// Names held in packs, in `[from, to)` (`to` open when `None`).
     pub fn names_in(&self, from: &str, to: Option<&str>) -> io::Result<Vec<String>> {
         self.names_in_limited(from, to, usize::MAX)
@@ -1226,17 +1368,17 @@ impl Packs {
         let mut w = self.writer(tmp)?;
         let mut seen = std::collections::HashSet::new();
         for id in merge {
-            let idx = Idx::open(id, &self.dir.join(format!("{id}.idx")))?;
-            let map = Map::open(&self.dir.join(format!("{id}.pack")))?;
-            for e in idx.entries_from("") {
-                let (name, at) = e?;
+            let idx = std::sync::Arc::new(Idx::open(id, &self.dir.join(format!("{id}.idx")))?);
+            let map = std::sync::Arc::new(Map::open(&self.dir.join(format!("{id}.pack")))?);
+            // In the pack's order: an offset delta's base comes first, so
+            // it stays an offset delta.
+            let m = Mapped { offset: 0, map, idx: idx.clone() };
+            for &(at, i) in idx.by_offset() {
+                let (name, _) = idx.record(i as usize)?;
                 if !seen.insert(name.clone()) {
                     continue;
                 }
-                let at = at as usize;
-                let b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
-                let (_, _, _, len) = parse_frame(b)?;
-                w.add_frame(&name, &map.bytes()[at..at + len])?;
+                w.add_frame(&name, &m.at(at).frame()?)?;
             }
         }
         let new = w.finish()?;
@@ -1266,6 +1408,7 @@ impl Packs {
             out,
             offset: PACK_MAGIC.len() as u64,
             idx: Vec::new(),
+            at: Default::default(),
         })
     }
 
@@ -1418,6 +1561,48 @@ mod tests {
         for (n, v) in [(&a, &base), (&b, &want), (&c, &want), (&d3, &want)] {
             assert_eq!(merged.file(n).unwrap().as_ref(), Some(v));
         }
+    }
+
+    /// A delta on a base written before it in the same pack names the base
+    /// by distance; one on a base in another pack by name, until a merge
+    /// puts both in one pack. Chains read, depths count, frames name their
+    /// bases either way.
+    #[test]
+    fn deltas_on_bases_in_the_same_pack_name_them_by_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let p = Packs::open(dir.path().join("packs")).unwrap();
+        let key = |i: u32| format!("blake3:{:064x}", i);
+        let vals: Vec<Vec<u8>> = (0..4).map(|i| format!("line one\nline two\nversion {i}\n").into_bytes()).collect();
+        let delta = |i: usize| {
+            let z = with_dict_compress(&vals[i - 1], &vals[i]).unwrap();
+            Entry::Delta { base: key(i as u32 - 1), len: vals[i].len(), z }
+        };
+        let whole = [&[0u8][..], &vals[0]].concat();
+        p.write(&[(key(0), Entry::File(whole)), (key(1), delta(1)), (key(2), delta(2))], &tmp).unwrap();
+        p.write(&[(key(3), delta(3))], &tmp).unwrap();
+        let kinds = |p: &Packs| -> Vec<u8> {
+            (0..4).map(|i| p.locate_mapped(&key(i), false).unwrap().unwrap().parse().unwrap().1).collect()
+        };
+        assert_eq!(kinds(&p), [FILE_N, DELTA_O, DELTA_O, DELTA_N]);
+        let check = |p: &Packs| {
+            for (i, v) in vals.iter().enumerate() {
+                let want = [&[0u8][..], v].concat();
+                assert_eq!(p.file(&key(i as u32)).unwrap(), Some(want), "{i}");
+                assert_eq!(p.depth(&key(i as u32)).unwrap(), Some(i));
+                let base = p.frame(&key(i as u32)).unwrap().unwrap().base;
+                assert_eq!(base, (i > 0).then(|| key(i as u32 - 1)));
+            }
+        };
+        check(&p);
+        // A fresh process (no base cache) reads the same.
+        check(&Packs::open(dir.path().join("packs")).unwrap());
+        p.seal_all(&tmp).unwrap();
+        let merged = Packs::open(dir.path().join("packs")).unwrap();
+        assert_eq!(merged.ids().unwrap().len(), 1);
+        assert_eq!(kinds(&merged), [FILE_N, DELTA_O, DELTA_O, DELTA_O]);
+        check(&merged);
     }
 
     #[test]

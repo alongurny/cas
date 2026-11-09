@@ -345,7 +345,7 @@ impl DiskBackend {
                             if f.plain {
                                 depth.insert(n.clone(), d);
                             }
-                            w.add_frame(n, &f.bytes)?;
+                            w.add_frame(n, &f)?;
                             if f.base.is_some() {
                                 out.deltas += 1
                             } else {
@@ -366,7 +366,7 @@ impl DiskBackend {
                                 if f.plain {
                                     depth.insert(n.clone(), d);
                                 }
-                                w.add_frame(n, &f.bytes)?;
+                                w.add_frame(n, &f)?;
                                 if f.base.is_some() {
                                     out.deltas += 1
                                 } else {

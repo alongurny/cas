@@ -157,9 +157,11 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
   no map of node ids; a value decoded as a base answers a read without
   a second index lookup; path-log's memo maps take `&str` keys. log 0.72
   -> 0.45 s (git 0.62), path-log 1.67 -> 1.21 s (git 0.71).
+- **Offset deltas:** a delta on a base earlier in the same pack names it
+  by distance, as git's do: no index lookup per chain link. Pack 157 ->
+  143 MB (git's 155 MB).
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
-  (git's 423k objects); a delta names its base by 33 bytes (git's
-  offset deltas take 2 to 4); path-log reads the whole history (1 s)
+  (git's 423k objects); path-log reads the whole history (1 s)
   before the root blobs; fsck and import are slower than git.
 
 Earlier notes, before that round:
