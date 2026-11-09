@@ -172,8 +172,13 @@ clone uses four threads; with `pack.threads=1` it takes 28.5 s.
   have seen as 32 digest bytes, and a directory blob's entries are looked
   up by their digest, not spelled out in hex first (the walk reads 20M
   entries, nearly all already seen). gc 16 -> 11 s (git 11.3).
+- **Import compresses less:** a write with a likely base compressed the
+  value whole and as a delta and kept the smaller. A delta under 1/16 of
+  the value is now kept without the whole try. git.git import CPU 125 ->
+  97 s, wall 111 -> 101 s; the pack is the same size to the byte.
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
-  (git's 423k objects); import is slower than git.
+  (git's 423k objects); import (101 s) is slower than fast-import (82-93 s)
+  but not than fast-export plus fast-import (~100-110 s).
 
 Earlier notes, before that round:
 

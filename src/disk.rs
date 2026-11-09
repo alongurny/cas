@@ -33,6 +33,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// A whole frame whose data is shorter than its hinted base's key and
 /// this is not tried as a delta again by a repack.
 const SMALL_GAIN: usize = 64;
+/// A delta under 1/DELTA_SURE of its value is taken without compressing the
+/// value whole to compare: whole compression rarely gets below that.
+const DELTA_SURE: usize = 16;
 
 pub struct DiskBackend {
     root: PathBuf,
@@ -931,9 +934,19 @@ impl Backend for DiskBackend {
                         Some(b) => Some(b.to_vec()),
                         None => self.get(base)?,
                     };
+                    let bv = bv.filter(|b| b.len() <= WHOLE_UP_TO);
+                    let z = bv.map(|b| crate::pack::with_dict_compress(&b, v)).transpose()?;
+                    // A delta this small beats compressing the value whole:
+                    // that is not tried (most versions of a file differ
+                    // little from the one before).
+                    if let Some(z) = &z
+                        && (z.len() + base.len() + 8) * DELTA_SURE < v.len()
+                    {
+                        return Ok(Enc::Delta(base.to_string(), z.clone()));
+                    }
                     let (file, chunks) = self.encode_pure(v)?;
-                    if let Some(bv) = bv.filter(|b| b.len() <= WHOLE_UP_TO)
-                        && let Some(Entry::Delta { z, .. }) = Entry::delta(base, &bv, v, &file)?
+                    if let Some(z) = z
+                        && z.len() + base.len() + 8 < file.len()
                     {
                         return Ok(Enc::Delta(base.to_string(), z));
                     }

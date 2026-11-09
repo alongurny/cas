@@ -955,7 +955,7 @@ pub(crate) fn zstd3(value: &[u8]) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-fn with_dict_compress(dict: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
+pub(crate) fn with_dict_compress(dict: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(value.len()));
     CCTX.with(|c| c.borrow_mut().compress_using_dict(&mut out, value, dict, 3)).map_err(zerr)?;
     Ok(out)
