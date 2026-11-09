@@ -212,3 +212,51 @@ fn last_modified_merge_base_objects_and_fsck() {
     assert!(!out.status.success());
     assert!(String::from_utf8(out.stdout).unwrap().contains(&format!("missing blake3:{key}")));
 }
+
+#[test]
+fn status_reset_clean_and_stash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("README"), "hi\n").unwrap();
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let w = work.to_str().unwrap();
+    cas(&store, &["commit", w, "-m", "first"]);
+    assert_eq!(cas(&store, &["status", w]), "");
+
+    std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
+    std::fs::write(work.join("junk"), "junk\n").unwrap();
+    std::fs::remove_file(work.join("README")).unwrap();
+    assert_eq!(cas(&store, &["status", w]), "deleted  README\nadded    junk\nchanged  src/lib.rs\n");
+
+    cas(&store, &["clean", w]);
+    assert_eq!(cas(&store, &["status", w]), "deleted  README\nchanged  src/lib.rs\n");
+
+    cas(&store, &["stash", w]);
+    assert_eq!(cas(&store, &["status", w]), "");
+    assert_eq!(std::fs::read_to_string(work.join("README")).unwrap(), "hi\n");
+    cas(&store, &["stash", "pop", w]);
+    assert_eq!(cas(&store, &["status", w]), "deleted  README\nchanged  src/lib.rs\n");
+
+    cas(&store, &["reset", w]);
+    assert_eq!(cas(&store, &["status", w]), "");
+    assert_eq!(std::fs::read_to_string(work.join("src/lib.rs")).unwrap(), "fn a() {}\n");
+}
+
+#[test]
+fn a_sparse_checkout_commits_only_its_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store, part) = (tmp.path().join("work"), tmp.path().join("store"), tmp.path().join("part"));
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("README"), "hi\n").unwrap();
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    cas(&store, &["commit", work.to_str().unwrap(), "-m", "first"]);
+    let p = part.to_str().unwrap();
+    cas(&store, &["sparse", p, "src"]);
+    assert!(!part.join("README").exists());
+    std::fs::write(part.join("src/lib.rs"), "fn b() {}\n").unwrap();
+    assert_eq!(cas(&store, &["status", p]), "changed  src/lib.rs\n");
+    cas(&store, &["commit", p, "-m", "second"]);
+    assert!(cas(&store, &["ls"]).contains("README"));
+    assert_eq!(cas(&store, &["status", p]), "");
+}

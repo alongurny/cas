@@ -237,7 +237,7 @@ lacks. The rule is:
   log of a path, ls-tree, checkout (read-tree), commit, diff, clone and fetch,
   push, fsck, gc and repack, and fast-import (cas's `import-git`).
 - **Skip**, with the reason recorded, scripts about features cas does not
-  have: the index format details, sparse checkout, pack bitmaps as such,
+  have: the index format details, pack bitmaps as such,
   pickaxe and grep engines, describe, filter-branch, fsmonitor until
   section 4 has one, and submodules.
 - **Add** scripts for what git lacks or makes awkward: single-object fetch
@@ -341,3 +341,14 @@ Each step comes with its row in the benchmark, measured before and after.
 
 The `t/perf` port runs alongside step 1, so every later step is measured on
 all corpora.
+- 2026-11-09, working-directory commands on the stat cache (`src/fs.rs`).
+  `status DIR` imports DIR into an overlay session, so nothing reaches the
+  store, and diffs it against the node. `reset DIR` rewrites what differs
+  and removes extra paths (git's `reset --hard`); `clean DIR` only removes
+  paths the node lacks. `stash DIR` commits DIR into history `stash/NAME`
+  and resets it; `stash pop DIR` refuses a changed DIR, resets it to the
+  newest stash and drops that node. `sparse DEST PATH...` checks out only
+  the named files and directories and records them in `.cas-sparse`
+  (never imported, like `.cas-index`); `commit`, `status` and `reset` of
+  that directory replace only those paths in the base version and leave
+  the rest as the base has it. Paths outside them on disk are ignored.

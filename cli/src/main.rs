@@ -39,10 +39,17 @@ History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
 prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   commit DIR                    add DIR as a new node after the tip (DIR/.cas-index
                                 caches stat data, so unchanged files are not rehashed)
+  status DIR                    how DIR differs from the node (nothing is stored)
+  reset DIR                     make DIR the node's version again (discards changes)
+  clean DIR                     remove from DIR the paths the node does not have
+  stash DIR | stash pop DIR     keep DIR in history stash/HISTORY and reset it, or
+                                put the newest stash back into DIR and drop it
   log                           nodes, newest first, with tags and changelogs
   ls [PREFIX]                   paths of a node's version
   diff                          changes from a node's predecessor
   checkout DEST [PREFIX]        write a node's version (or a prefix) to DEST
+  sparse DEST PATH...           check out only PATHs (files or directories) of a
+                                node into DEST; a commit of DEST keeps the rest
   summary                       directory and file counts (derived, cached)
   path-log PATH                 nodes whose step changed PATH
   tag NAME                      tag a node (-n) in the history
@@ -227,12 +234,64 @@ fn run(a: Args) -> Res<()> {
     match a.rest.first().map(String::as_str) {
         Some("commit") => {
             let dir = arg(1, "DIR")?;
-            // The stat cache in DIR spares rehashing unchanged files.
-            let root = fs::import_indexed(s, b3(), formats::by_alias("dir").unwrap(), dir.as_ref(), Some(&a.store))
-                .map_err(e)?;
+            // The stat cache in DIR spares rehashing unchanged files; a sparse
+            // checkout keeps the rest of the history's head.
+            let head = load(s, name)?.1.tip().map(|t| t.version());
+            let root = fs::import_worktree(
+                s,
+                b3(),
+                formats::by_alias("dir").unwrap(),
+                dir.as_ref(),
+                Some(&a.store),
+                head.as_ref(),
+            )
+            .map_err(e)?;
             formats::publish(s).map_err(e)?;
             let id = history::commit(s, b3(), name, &root, step, a.doc.clone()).map_err(e)?;
             out!("{}", id);
+        }
+        Some(cmd @ ("status" | "reset" | "clean")) => {
+            let dir = arg(1, "DIR")?;
+            let v = at()?.version();
+            let dirf = formats::by_alias("dir").unwrap();
+            if cmd == "status" {
+                for c in fs::status(s, b3(), dirf, dir.as_ref(), Some(&a.store), &v).map_err(e)? {
+                    let mark = match (&c.old, &c.new) {
+                        (None, _) => "added",
+                        (_, None) => "deleted",
+                        _ => "changed",
+                    };
+                    out!("{mark:8} {}", c.path);
+                }
+            } else {
+                let n = fs::reset(s, b3(), dirf, dir.as_ref(), Some(&a.store), &v, cmd == "clean").map_err(e)?;
+                out!("{} paths {}", n.len(), if cmd == "clean" { "removed" } else { "restored" });
+            }
+        }
+        Some("stash") => {
+            let pop = a.rest.get(1).is_some_and(|x| x == "pop");
+            let dir = arg(if pop { 2 } else { 1 }, "DIR")?;
+            let dirf = formats::by_alias("dir").unwrap();
+            let stash = format!("stash/{name}");
+            if pop {
+                let (old, mut h) = load(s, &stash)?;
+                let tip = h.tip().ok_or(format!("nothing stashed in {stash}"))?;
+                if !fs::status(s, b3(), dirf, dir.as_ref(), Some(&a.store), &at()?.version()).map_err(e)?.is_empty() {
+                    return Err(format!("{dir} has changes; commit, stash or reset them first"));
+                }
+                fs::reset(s, b3(), dirf, dir.as_ref(), Some(&a.store), &tip.version(), false).map_err(e)?;
+                h.nodes.remove(&tip);
+                h.tags.retain(|_, n| *n != tip);
+                history::save(s, b3(), &stash, old.as_ref(), &h).map_err(e)?;
+                out!("{tip}");
+            } else {
+                let base = at()?.version();
+                let root = fs::import_worktree(s, b3(), dirf, dir.as_ref(), Some(&a.store), Some(&base)).map_err(e)?;
+                formats::publish(s).map_err(e)?;
+                let id = history::commit(s, b3(), &stash, &root, step.clone(), None).map_err(e)?;
+                fs::reset(s, b3(), dirf, dir.as_ref(), Some(&a.store), &base, false).map_err(e)?;
+                out!("{id}");
+            }
         }
         Some("log") => {
             // From the graph when one is cached (path-log builds it), which
@@ -276,6 +335,15 @@ fn run(a: Args) -> Res<()> {
             let dest = arg(1, "DEST")?;
             let n = fs::checkout_indexed(s, &at()?.version(), prefix(2)?.as_ref(), dest.as_ref(), Some(&a.store))
                 .map_err(e)?;
+            out!("{n} paths written to {dest}");
+        }
+        Some("sparse") => {
+            let dest = arg(1, "DEST")?;
+            let paths = a.rest[2..].iter().map(Path::new).collect::<Result<Vec<_>, _>>().map_err(e)?;
+            if paths.is_empty() {
+                return Err("sparse needs at least one PATH".into());
+            }
+            let n = fs::checkout_sparse(s, &at()?.version(), &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
             out!("{n} paths written to {dest}");
         }
         Some("summary") => {
