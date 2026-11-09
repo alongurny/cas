@@ -187,6 +187,27 @@ fn e(x: impl std::fmt::Display) -> String {
 /// The one node whose version key starts with `prefix`, in a directory
 /// format, found from one range of the history's tree. `None` when no
 /// such node or several: the whole history then decides.
+/// The node `what` names (a tag, `latest`, an id, a key prefix) from the
+/// root and the parts that hold it; only an ambiguous name reads the whole
+/// history.
+fn find_node(st: &history::Stored, what: &str, name: &str) -> Res<NodeId> {
+    if let Some(id) = st.root.tags.get(what) {
+        return Ok(id.clone());
+    }
+    if what == "latest" && st.root.tips.len() == 1 {
+        return Ok(st.root.tips.first().unwrap().clone());
+    }
+    if let Ok(id) = NodeId::parse(what)
+        && st.contains(&id).map_err(e)?
+    {
+        return Ok(id);
+    }
+    if let Some(id) = by_prefix(st, what)? {
+        return Ok(id);
+    }
+    node(&st.read_all().map_err(e)?, what, name)
+}
+
 fn by_prefix(st: &history::Stored, prefix: &str) -> Res<Option<NodeId>> {
     if prefix.is_empty() || !prefix.bytes().all(|b| b.is_ascii_hexdigit() || b == b':') {
         return Ok(None);
@@ -256,21 +277,7 @@ fn run(a: Args) -> Res<()> {
     let at = || -> Res<NodeId> {
         let Some(v) = history::head(s, name).map_err(e)? else { return Err(format!("no history {name}")) };
         let st = history::Stored::open(s, Some(&v)).map_err(e)?;
-        if let Some(id) = st.root.tags.get(&a.node) {
-            return Ok(id.clone());
-        }
-        if a.node == "latest" && st.root.tips.len() == 1 {
-            return Ok(st.root.tips.first().unwrap().clone());
-        }
-        if let Ok(id) = NodeId::parse(&a.node)
-            && st.contains(&id).map_err(e)?
-        {
-            return Ok(id);
-        }
-        if let Some(id) = by_prefix(&st, &a.node)? {
-            return Ok(id);
-        }
-        node(&st.read_all().map_err(e)?, &a.node, name)
+        find_node(&st, &a.node, name)
     };
     match a.rest.first().map(String::as_str) {
         Some("commit") => {
@@ -417,19 +424,7 @@ fn run(a: Args) -> Res<()> {
             // a node is named by a key prefix.
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
-            let find = |what: &str| -> Res<NodeId> {
-                if let Some(id) = st.root.tags.get(what) {
-                    return Ok(id.clone());
-                }
-                match NodeId::parse(what) {
-                    Ok(id) if st.contains(&id).map_err(e)? => Ok(id),
-                    _ => match by_prefix(&st, what)? {
-                        Some(id) => Ok(id),
-                        None => node(&st.read_all().map_err(e)?, what, name),
-                    },
-                }
-            };
-            let (x, y) = (find(&arg(1, "A")?)?, find(&arg(2, "B")?)?);
+            let (x, y) = (find_node(&st, &arg(1, "A")?, name)?, find_node(&st, &arg(2, "B")?, name)?);
             for b in st.merge_bases(&x, &y).map_err(e)? {
                 out!("{b}");
             }
@@ -571,7 +566,7 @@ fn run(a: Args) -> Res<()> {
                 // Like git gc: rewrite into one pack, with deltas against each
                 // path's previous version.
                 if disk.chunked() {
-                    let (order, hints) = gc::delta_hints(s).map_err(e)?;
+                    let (order, hints) = gc::delta_hints(s, &|k| disk.sealed(k).unwrap_or(false)).map_err(e)?;
                     let r = disk.repack(&order, &hints).map_err(e)?;
                     out!("repacked: {} deltas, {} whole", r.deltas, r.whole);
                 }

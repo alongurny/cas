@@ -160,3 +160,37 @@ fn bad_blobs_are_refused() {
     let bad = View::new(tree().id(), &key).unwrap();
     assert!(walk(&s, &bad, None).any(|r| r.is_err()));
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// A blob with any byte changed, dropped or added is refused, or is the
+    /// canonical encoding of what it decodes to: no two byte strings decode
+    /// to the same directory.
+    #[test]
+    fn a_damaged_blob_is_refused_or_canonical(
+        names in proptest::collection::btree_set("[a-c]{1,4}", 1..12),
+        at in 0usize..400,
+        byte in 0u8..=255,
+        op in 0u8..3,
+    ) {
+        let s = store();
+        let f = put(&s, b3(), "raw", b"x").unwrap();
+        let g = put(&s, b3(), "exec", b"y").unwrap();
+        let items: Vec<Item> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Item { name: n.clone(), child: if i % 2 == 0 { f.clone() } else { g.clone() } })
+            .collect();
+        let mut b = tree_encode(&Blob::Items(items));
+        let at = at % b.len();
+        match op {
+            0 => b[at] = byte,
+            1 => { b.remove(at); }
+            _ => b.insert(at, byte),
+        }
+        if let Ok(d) = tree_decode(&b) {
+            prop_assert_eq!(tree_encode(&d), b);
+        }
+    }
+}

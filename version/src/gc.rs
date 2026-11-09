@@ -51,9 +51,9 @@ fn spec_of(store: &dyn Store, key: &str) -> Result<Option<String>> {
 }
 
 /// Every blob reachable from the variables in `store`.
-pub fn mark(store: &dyn Store) -> Result<BTreeSet<String>> {
+pub fn mark(store: &dyn Store) -> Result<HashSet<String>> {
     let keys = list_all(store, &Span::all())?;
-    let mut marked = BTreeSet::new();
+    let mut marked = HashSet::new();
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
     let mut todo: Vec<View> = Vec::new();
     for k in &keys {
@@ -79,7 +79,16 @@ pub fn mark(store: &dyn Store) -> Result<BTreeSet<String>> {
             continue;
         }
         match children(store, &r) {
-            Ok(c) => todo.extend(c),
+            Ok(c) => {
+                todo.extend(c.into_iter().filter(|c| !marked.contains(c.key())));
+                // Versions oldest first, each walked before the next, as
+                // fsck does: blobs are deltas on the version before's.
+                if r.known_format().is_some_and(|f| f.alias == "history")
+                    && let Ok(h) = history::read(store, &r)
+                {
+                    todo.extend(h.log().into_iter().map(|id| id.version()));
+                }
+            }
             // A missing blob ends the walk there.
             Err(crate::Error::Missing(_)) => {}
             Err(e) => return Err(e),
@@ -144,8 +153,9 @@ pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
 /// history a variable holds, each node's version is walked beside its
 /// predecessor's, and each directory or file that changed at a path is
 /// hinted to its old self there. Also an order, oldest node first, so that a
-/// base is placed before what is a delta of it.
-pub fn delta_hints(store: &dyn Store) -> Result<(Vec<String>, HashMap<String, String>)> {
+/// base is placed before what is a delta of it. A version `placed` says the
+/// last repack placed is skipped with all it holds: its frames are reused.
+pub fn delta_hints(store: &dyn Store, placed: &dyn Fn(&str) -> bool) -> Result<(Vec<String>, HashMap<String, String>)> {
     let mut order = Vec::new();
     let mut hints = HashMap::new();
     let mut walked = HashSet::new();
@@ -162,7 +172,7 @@ pub fn delta_hints(store: &dyn Store) -> Result<(Vec<String>, HashMap<String, St
         for id in h.log().into_iter().rev() {
             let new = id.version();
             let old = h.nodes[&id].after.keys().next().map(NodeId::version);
-            pair(store, old.as_ref(), &new, &mut order, &mut hints, &mut walked)?;
+            pair(store, old.as_ref(), &new, &mut order, &mut hints, &mut walked, placed)?;
         }
     }
     Ok((order, hints))
@@ -176,8 +186,9 @@ fn pair(
     order: &mut Vec<String>,
     hints: &mut HashMap<String, String>,
     walked: &mut HashSet<String>,
+    placed: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
-    if old.is_some_and(|o| o.key() == new.key()) || !walked.insert(new.key().to_string()) {
+    if old.is_some_and(|o| o.key() == new.key()) || !walked.insert(new.key().to_string()) || placed(new.key()) {
         return Ok(());
     }
     order.push(new.key().to_string());
@@ -192,7 +203,7 @@ fn pair(
         None => HashMap::new(),
     };
     for item in tree::load(store, new)? {
-        pair(store, olds.get(&item.name), &item.child, order, hints, walked)?;
+        pair(store, olds.get(&item.name), &item.child, order, hints, walked, placed)?;
     }
     Ok(())
 }

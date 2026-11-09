@@ -80,17 +80,24 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
             }
         };
         // A history is checked whole too: its tree's shape and its tips.
-        if v.known_format().is_some_and(|f| f.alias == "history")
-            && let Err(e) = crate::history::read(store, &v)
-            && !matches!(e, Error::Missing(_))
-        {
-            r.bad.push((v.key().to_string(), e.to_string()));
+        // Its versions are walked oldest first, each before the next: a
+        // version's blobs are mostly deltas on the one before's, so a walk
+        // in that order decodes each blob once.
+        let mut versions = Vec::new();
+        if v.known_format().is_some_and(|f| f.alias == "history") {
+            match crate::history::read(store, &v) {
+                Ok(h) => versions = h.log().into_iter().map(|id| (v.key().to_string(), id.version())).collect(),
+                Err(Error::Missing(_)) => {}
+                Err(e) => r.bad.push((v.key().to_string(), e.to_string())),
+            }
         }
         // The format object itself is a blob too.
         if is_blob_key(v.format()) && by_id(v.format()).is_none() && !blobs.contains(v.format()) {
             r.missing.push((v.key().to_string(), v.format().to_string()));
         }
         todo.extend(kids.into_iter().map(|c| (v.key().to_string(), c)));
+        // Popped first, oldest first (the log is newest first).
+        todo.extend(versions);
     }
     r.unreachable = blobs.iter().filter(|k| !seen.contains(**k)).count();
     Ok(r)

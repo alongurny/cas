@@ -21,9 +21,14 @@
 //!   counts only once its index exists; both are synced before the index is
 //!   renamed into place.
 //! - `removed`: names removed from packs, one per line, replaced atomically.
+//!   A removed name stays readable as a delta base until its pack is gone.
+//! - `sealed`: the id of the pack the last repack wrote. Its frames were
+//!   placed with their deltas, so the next repack copies them as they are
+//!   and only places what came after.
 //!
 //! Every process sharing the root sees new packs and removals: a lookup
-//! re-reads the indexes when the directory's modification time changed.
+//! re-reads the indexes when the directory's modification time changed,
+//! looking at it on every miss and at most every 50 ms on hits.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -185,6 +190,8 @@ struct State {
     idx: Vec<Idx>,
     maps: Vec<std::sync::OnceLock<std::sync::Arc<Map>>>,
     removed: BTreeSet<String>,
+    /// The index in `packs` of the sealed pack.
+    sealed: Option<usize>,
     seen_mtime: Option<SystemTime>,
 }
 
@@ -201,7 +208,13 @@ pub struct Packs {
     /// Values recently used as delta bases (git's delta base cache): a
     /// chain is resolved once, not once per object built on it.
     bases: std::sync::Mutex<BaseCache>,
+    /// When a lookup last looked at the directory.
+    looked: std::sync::Mutex<Option<std::time::Instant>>,
 }
+
+/// How long a lookup that finds its name trusts the last look at the
+/// directory. A miss always looks again.
+const FRESH: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// Bytes of base values kept.
 const BASE_CACHE_BYTES: usize = 96 << 20;
@@ -276,13 +289,50 @@ pub enum Entry {
 impl Entry {
     /// A delta of `value` against `base_value`, if that is smaller than `file`.
     pub fn delta(base: &str, base_value: &[u8], value: &[u8], file: &[u8]) -> io::Result<Option<Entry>> {
-        let z = zstd::bulk::Compressor::with_dictionary(3, base_value)?.compress(value)?;
+        let z = with_dict_compress(base_value, value)?;
         Ok((z.len() + base.len() + 8 < file.len()).then(|| Entry::Delta {
             base: base.to_string(),
             len: value.len(),
             z,
         }))
     }
+}
+
+thread_local! {
+    static DCTX: std::cell::RefCell<zstd::zstd_safe::DCtx<'static>> = std::cell::RefCell::new(zstd::zstd_safe::DCtx::create());
+    static CCTX: std::cell::RefCell<zstd::zstd_safe::CCtx<'static>> = std::cell::RefCell::new(zstd::zstd_safe::CCtx::create());
+}
+
+fn zerr(code: usize) -> io::Error {
+    io::Error::other(format!("zstd: {}", zstd::zstd_safe::get_error_name(code)))
+}
+
+/// `z` decompressed with `dict` as a raw-content dictionary, into exactly
+/// `size` bytes. One context per thread: making a context and a digested
+/// dictionary per delta cost more than the decompression.
+fn with_dict_decompress(dict: &[u8], z: &[u8], size: usize) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(size);
+    DCTX.with(|c| c.borrow_mut().decompress_using_dict(&mut out, z, dict)).map_err(zerr)?;
+    if out.len() != size {
+        return Err(bad("delta decodes to the wrong size"));
+    }
+    Ok(out)
+}
+
+fn with_dict_compress(dict: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(value.len()));
+    CCTX.with(|c| c.borrow_mut().compress_using_dict(&mut out, value, dict, 3)).map_err(zerr)?;
+    Ok(out)
+}
+
+/// A frame as stored: its bytes, the base it is a delta against, and
+/// whether its value can serve as a delta base (an unchunked file).
+pub struct Frame {
+    pub bytes: Vec<u8>,
+    /// Where the frame's data starts in `bytes`.
+    pub data_at: usize,
+    pub base: Option<String>,
+    pub plain: bool,
 }
 
 /// Writes one pack frame by frame; nothing is visible until [`PackWriter::finish`].
@@ -297,7 +347,7 @@ pub struct PackWriter<'a> {
 
 impl PackWriter<'_> {
     /// Copy a whole frame (as stored in another pack) under `name`.
-    fn add_frame(&mut self, name: &str, frame: &[u8]) -> io::Result<()> {
+    pub fn add_frame(&mut self, name: &str, frame: &[u8]) -> io::Result<()> {
         self.idx.push((name.to_string(), self.offset));
         self.out.write_all(frame)?;
         self.offset += frame.len() as u64;
@@ -355,7 +405,8 @@ impl PackWriter<'_> {
 impl Packs {
     pub fn open(dir: PathBuf) -> io::Result<Packs> {
         fs::create_dir_all(&dir)?;
-        let p = Packs { dir, state: RwLock::new(State::default()), bases: Default::default() };
+        let p =
+            Packs { dir, state: RwLock::new(State::default()), bases: Default::default(), looked: Default::default() };
         p.refresh()?;
         Ok(p)
     }
@@ -403,30 +454,73 @@ impl Packs {
             Ok(text) => text.lines().map(String::from).collect(),
             Err(_) => BTreeSet::new(),
         };
+        st.sealed = fs::read_to_string(self.dir.join("sealed"))
+            .ok()
+            .and_then(|id| st.packs.iter().position(|p| *p == id.trim()));
         st.seen_mtime = now;
         Ok(())
     }
 
-    fn locate(&self, name: &str) -> io::Result<Option<(String, Loc)>> {
-        // One stat per lookup keeps every process current: new packs and
-        // removals both change the directory.
-        self.refresh()?;
-        let st = self.state.read().unwrap();
-        if st.removed.contains(name) {
-            return Ok(None);
+    /// Look at the directory unless a lookup did within [`FRESH`] (`force`
+    /// looks anyway). New packs and removals both change the directory, so
+    /// every process sharing the root sees them; a name found in the state
+    /// last looked at is right (content-addressed), at worst removed since.
+    fn look(&self, force: bool) -> io::Result<()> {
+        let now = std::time::Instant::now();
+        {
+            let l = self.looked.lock().unwrap();
+            if !force && l.is_some_and(|t| now.duration_since(t) < FRESH) {
+                return Ok(());
+            }
         }
-        Ok(st.get(name).map(|l| (st.packs[l.pack].clone(), l)))
+        self.refresh()?;
+        *self.looked.lock().unwrap() = Some(now);
+        Ok(())
+    }
+
+    fn locate(&self, name: &str) -> io::Result<Option<(String, Loc)>> {
+        for force in [false, true] {
+            self.look(force)?;
+            let st = self.state.read().unwrap();
+            if st.removed.contains(name) {
+                return Ok(None);
+            }
+            if let Some(l) = st.get(name) {
+                return Ok(Some((st.packs[l.pack].clone(), l)));
+            }
+        }
+        Ok(None)
     }
 
     /// Where `name` is, with the mapping of its pack (taken under the same
     /// look at the state, which a refresh may replace).
-    fn locate_mapped(&self, name: &str) -> io::Result<Option<(Loc, std::sync::Arc<Map>)>> {
-        self.refresh()?;
-        let st = self.state.read().unwrap();
-        if st.removed.contains(name) {
-            return Ok(None);
+    /// A delta base (`with_removed`) is looked up in the state the lookup of
+    /// its dependent refreshed.
+    fn locate_mapped(&self, name: &str, with_removed: bool) -> io::Result<Option<(Loc, std::sync::Arc<Map>)>> {
+        if with_removed {
+            return self.mapped(self.state.read().unwrap(), |st| st.get(name));
         }
-        let Some(loc) = st.get(name) else { return Ok(None) };
+        for force in [false, true] {
+            self.look(force)?;
+            let st = self.state.read().unwrap();
+            if st.removed.contains(name) {
+                return Ok(None);
+            }
+            if st.get(name).is_some() {
+                return self.mapped(st, |st| st.get(name));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The mapping of the pack `find` picks for `name`, looking again if a
+    /// compaction merged it away.
+    fn mapped(
+        &self,
+        st: std::sync::RwLockReadGuard<'_, State>,
+        find: impl Fn(&State) -> Option<Loc>,
+    ) -> io::Result<Option<(Loc, std::sync::Arc<Map>)>> {
+        let Some(loc) = find(&st) else { return Ok(None) };
         let cell = &st.maps[loc.pack];
         if let Some(m) = cell.get() {
             return Ok(Some((loc, m.clone())));
@@ -439,7 +533,7 @@ impl Packs {
                 self.state.write().unwrap().seen_mtime = None;
                 self.refresh()?;
                 let st = self.state.read().unwrap();
-                let Some(loc) = st.get(name) else { return Ok(None) };
+                let Some(loc) = find(&st) else { return Ok(None) };
                 let m = Map::open(&self.dir.join(format!("{}.pack", st.packs[loc.pack])))?;
                 Ok(Some((loc, st.maps[loc.pack].get_or_init(|| std::sync::Arc::new(m)).clone())))
             }
@@ -447,7 +541,10 @@ impl Packs {
         }
     }
 
+    /// Whether `name` is held, as of a fresh look at the directory: a
+    /// caller deciding whether to write it must see removals at once.
     pub fn contains(&self, name: &str) -> io::Result<bool> {
+        self.look(true)?;
         Ok(self.locate(name)?.is_some())
     }
 
@@ -460,7 +557,18 @@ impl Packs {
         if depth > MAX_DEPTH + 1 {
             return Err(bad(format!("delta chain too long at {name}")));
         }
-        let Some((loc, map)) = self.locate_mapped(name)? else { return Ok(None) };
+        // A base may have been removed: its dependents still need it.
+        let Some((loc, map)) = self.locate_mapped(name, depth > 0)? else { return Ok(None) };
+        // A value decoded lately as a base (a walk often reads a chain from
+        // its newest end) is not decoded again.
+        if depth == 0
+            && let Some(v) = self.bases.lock().unwrap().get(name)
+        {
+            let mut f = Vec::with_capacity(v.len() + 1);
+            f.push(0);
+            f.extend_from_slice(&v);
+            return Ok(Some(f));
+        }
         let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
         let kind = take(&mut b, 1)?[0];
         let n = take_u16(&mut b)?;
@@ -475,13 +583,77 @@ impl Packs {
                 let base = std::str::from_utf8(take(&mut b, n)?).map_err(bad)?.to_string();
                 let size = take_u32(&mut b)?;
                 let base_value = self.base_value(&base, depth + 1)?;
-                let value = zstd::bulk::Decompressor::with_dictionary(&base_value)?.decompress(b, size)?;
-                Ok(Some([&[0u8][..], &value].concat()))
+                let value = with_dict_decompress(&base_value, b, size)?;
+                let file = [&[0u8][..], &value].concat();
+                // A walk reads the next version at the same path soon, a
+                // delta on this one.
+                if depth == 0 {
+                    self.bases.lock().unwrap().put(name, std::sync::Arc::new(value));
+                }
+                Ok(Some(file))
             }
             k => Err(bad(format!("frame kind {k}"))),
         }
     }
 
+    /// The frame stored for `name`, as it is in its pack, to copy into
+    /// another pack unchanged (a repack reusing deltas, as git does).
+    pub fn frame(&self, name: &str) -> io::Result<Option<Frame>> {
+        let Some((loc, map)) = self.locate_mapped(name, false)? else { return Ok(None) };
+        frame_at(&map, loc)
+    }
+
+    /// The frame of `name` in the sealed pack, if it is there and not removed.
+    pub fn sealed_frame(&self, name: &str) -> io::Result<Option<Frame>> {
+        self.look(false)?;
+        let st = self.state.read().unwrap();
+        if st.removed.contains(name) {
+            return Ok(None);
+        }
+        let find = |st: &State| st.sealed.and_then(|p| st.idx[p].get(name).map(|offset| Loc { pack: p, offset }));
+        let Some((loc, map)) = self.mapped(st, find)? else { return Ok(None) };
+        frame_at(&map, loc)
+    }
+
+    /// Record `id` as the sealed pack.
+    pub fn seal(&self, id: &str, tmp: &Path) -> io::Result<()> {
+        let t = tmp.join(format!("sealed-{}", std::process::id()));
+        let mut f = File::create(&t)?;
+        f.write_all(id.as_bytes())?;
+        f.sync_all()?;
+        fs::rename(&t, self.dir.join("sealed"))?;
+        File::open(&self.dir)?.sync_all()?;
+        self.state.write().unwrap().seen_mtime = None;
+        self.refresh()
+    }
+}
+
+fn frame_at(map: &Map, loc: Loc) -> io::Result<Option<Frame>> {
+    {
+        let at = loc.offset as usize;
+        let mut b = map.bytes().get(at..).ok_or_else(|| bad("offset past the pack"))?;
+        let start = b.len();
+        let kind = take(&mut b, 1)?[0];
+        let n = take_u16(&mut b)?;
+        take(&mut b, n)?;
+        let n = take_u32(&mut b)?;
+        let data = take(&mut b, n)?;
+        let bytes = map.bytes()[at..at + start - b.len()].to_vec();
+        let data_at = bytes.len() - data.len();
+        match kind {
+            FILE => Ok(Some(Frame { bytes, data_at, base: None, plain: matches!(data.first(), Some(0 | 1)) })),
+            DELTA => {
+                let mut d = data;
+                let n = take_u16(&mut d)?;
+                let base = std::str::from_utf8(take(&mut d, n)?).map_err(bad)?.to_string();
+                Ok(Some(Frame { bytes, data_at, base: Some(base), plain: true }))
+            }
+            k => Err(bad(format!("frame kind {k}"))),
+        }
+    }
+}
+
+impl Packs {
     /// The plain value of `name`, a delta base, from the cache if there.
     fn base_value(&self, name: &str, depth: usize) -> io::Result<std::sync::Arc<Vec<u8>>> {
         if let Some(v) = self.bases.lock().unwrap().get(name) {

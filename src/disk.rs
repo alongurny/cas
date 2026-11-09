@@ -52,7 +52,16 @@ fn pack(bytes: &[u8]) -> io::Result<Vec<u8>> {
 /// streamed otherwise.
 pub(crate) fn unzstd(z: &[u8]) -> io::Result<Vec<u8>> {
     match zstd::zstd_safe::get_frame_content_size(z) {
-        Ok(Some(n)) if n <= 1 << 32 => zstd::bulk::decompress(z, n as usize),
+        Ok(Some(n)) if n <= 1 << 32 => {
+            thread_local! {
+                static D: std::cell::RefCell<zstd::zstd_safe::DCtx<'static>> =
+                    std::cell::RefCell::new(zstd::zstd_safe::DCtx::create());
+            }
+            let mut out = Vec::with_capacity(n as usize);
+            D.with(|d| d.borrow_mut().decompress(&mut out, z))
+                .map_err(|c| io::Error::other(format!("zstd: {}", zstd::zstd_safe::get_error_name(c))))?;
+            Ok(out)
+        }
         _ => zstd::stream::decode_all(z),
     }
 }
@@ -162,9 +171,7 @@ impl DiskBackend {
             if !matches!(classify(&k), Some(Parsed::Blob { .. })) {
                 continue;
             }
-            if let Some(file) = self.blob_file(&k)?
-                && let (CHUNKED, ids) = unpack(&file)?
-            {
+            if let Some(ids) = self.chunk_ids_of(&k)? {
                 live.extend(ids.chunks(32).map(hex::encode));
             }
         }
@@ -193,8 +200,17 @@ impl DiskBackend {
     /// depends on them); everything else follows. Old packs and loose
     /// blob and chunk files are deleted once the new pack is durable. Not
     /// safe while another process writes to the store, like `sweep_chunks`.
+    /// Whether the last repack placed `key` (it is in the sealed pack), so a
+    /// repack needs no delta hint for it or for what it holds.
+    pub fn sealed(&self, key: &str) -> io::Result<bool> {
+        Ok(match &self.packs {
+            Some(p) => p.sealed_frame(key)?.is_some(),
+            None => false,
+        })
+    }
+
     pub fn repack(&self, order: &[String], hints: &std::collections::HashMap<String, String>) -> io::Result<Repacked> {
-        use crate::pack::{Entry, MAX_DEPTH, plain_value};
+        use crate::pack::{Entry, plain_value};
         let Some(packs) = &self.packs else { return Err(io::Error::other("only encoded stores have packs")) };
         let old_packs = packs.ids()?;
         let mut loose_blobs = Vec::new();
@@ -220,12 +236,7 @@ impl DiskBackend {
         // chunks they replaced.
         let mut hints = hints.clone();
         let chunk_ids = |key: &str| -> io::Result<Option<Vec<String>>> {
-            match self.blob_file(key)? {
-                Some(f) if f.first() == Some(&CHUNKED) => {
-                    Ok(Some(unpack(&f)?.1.chunks(32).map(|c| format!("#{}", hex::encode(c))).collect()))
-                }
-                _ => Ok(None),
-            }
+            Ok(self.chunk_ids_of(key)?.map(|ids| ids.chunks(32).map(|c| format!("#{}", hex::encode(c))).collect()))
         };
         for n in order.iter().chain(everything.iter()) {
             if !present.contains(n) || placed.contains(n) {
@@ -259,34 +270,96 @@ impl DiskBackend {
             };
             f.ok_or_else(|| io::Error::other(format!("{n} vanished during repack")))
         };
+        let new_entry = |n: &String| -> io::Result<Tried> {
+            let file = file_of(n)?;
+            let delta = match hints.get(n).filter(|b| present.contains(*b)) {
+                Some(base) => match (plain_value(&file), file_of(base).and_then(|b| plain_value(&b))) {
+                    (Ok(v), Ok(bv)) => Entry::delta(base, &bv, &v, &file)?,
+                    _ => None,
+                },
+                None => None,
+            };
+            Ok(Tried::New(file, delta))
+        };
         let mut w = packs.writer(&self.root.join("tmp"))?;
         let mut depth: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut out = Repacked::default();
+        let loose: std::collections::HashSet<&String> = loose_blobs.iter().chain(loose_chunks.iter()).collect();
+        let mut sealed = std::collections::HashMap::new();
         for group in names.chunks(512) {
-            // Read and try the hinted delta on every core; accept in order.
+            // A frame of the sealed pack (the last repack's) is copied as it
+            // is, and so is a packed delta whose base is already placed or a
+            // packed whole frame with no base to try (git's delta reuse): a
+            // gc recompresses only what came since. Anything else is read and
+            // its hinted delta tried, on every core; frames are accepted in
+            // order.
             let tried = parallel_map(group, |n| {
-                let file = file_of(n)?;
-                let delta = match hints.get(n) {
-                    Some(base) if present.contains(base) => {
-                        match (plain_value(&file), file_of(base).and_then(|b| plain_value(&b))) {
-                            (Ok(v), Ok(bv)) => Entry::delta(base, &bv, &v, &file)?,
-                            _ => None,
+                if let Some(f) = packs.sealed_frame(n)? {
+                    return Ok(Tried::Sealed(f));
+                }
+                if loose.contains(n) {
+                    return new_entry(n);
+                }
+                match packs.frame(n)? {
+                    Some(f) if f.base.is_some() || !hints.get(n).is_some_and(|b| present.contains(b)) => {
+                        Ok(Tried::Reuse(f))
+                    }
+                    _ => new_entry(n),
+                }
+            })?;
+            for (n, t) in group.iter().zip(tried) {
+                let (file, delta) = match t {
+                    Tried::Sealed(f) => match sealed_depth(packs, &present, &mut sealed, n)? {
+                        Some(d) => {
+                            if f.plain {
+                                depth.insert(n.clone(), d);
+                            }
+                            w.add_frame(n, &f.bytes)?;
+                            if f.base.is_some() {
+                                out.deltas += 1
+                            } else {
+                                out.whole += 1
+                            }
+                            continue;
+                        }
+                        // Its base is gone or its chain too deep: store it whole.
+                        None => (file_of(n)?, None),
+                    },
+                    Tried::Reuse(f) => {
+                        let d = match &f.base {
+                            None => Some(0),
+                            Some(b) => base_depth(packs, &present, &mut sealed, &depth, b)?.map(|d| d + 1),
+                        };
+                        match d {
+                            Some(d) => {
+                                if f.plain {
+                                    depth.insert(n.clone(), d);
+                                }
+                                w.add_frame(n, &f.bytes)?;
+                                if f.base.is_some() {
+                                    out.deltas += 1
+                                } else {
+                                    out.whole += 1
+                                }
+                                continue;
+                            }
+                            None => (file_of(n)?, None),
                         }
                     }
-                    _ => None,
+                    Tried::New(file, delta) => (file, delta),
                 };
-                Ok((file, delta))
-            })?;
-            for (n, (file, delta)) in group.iter().zip(tried) {
-                let base_depth = delta.as_ref().and_then(|_| depth.get(&hints[n]).copied()).filter(|d| *d < MAX_DEPTH);
-                match (delta, base_depth) {
+                let bd = match &delta {
+                    Some(_) => base_depth(packs, &present, &mut sealed, &depth, &hints[n])?,
+                    None => None,
+                };
+                match (delta, bd) {
                     (Some(d), Some(bd)) => {
                         w.add(n, &d)?;
                         depth.insert(n.clone(), bd + 1);
                         out.deltas += 1;
                     }
                     _ => {
-                        if plain_value(&file).is_ok() {
+                        if matches!(file.first(), Some(0 | 1)) {
                             depth.insert(n.clone(), 0);
                         }
                         w.add(n, &Entry::File(file))?;
@@ -295,8 +368,9 @@ impl DiskBackend {
                 }
             }
         }
-        w.finish()?;
+        let id = w.finish()?;
         packs.drop_packs(&old_packs)?;
+        packs.seal(&id, &self.root.join("tmp"))?;
         for k in &loose_blobs {
             let _ = fs::remove_file(self.path(k));
         }
@@ -307,25 +381,43 @@ impl DiskBackend {
         Ok(out)
     }
 
-    /// A blob's file bytes, loose or packed.
-    fn blob_file(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
-        match read_opt(&self.path(key))? {
-            Some(f) => Ok(Some(f)),
-            None => match &self.packs {
-                Some(p) => p.file(key),
-                None => Ok(None),
+    /// The chunk ids of a chunked blob, `None` for any other. A packed delta
+    /// is never chunked, so it is not resolved.
+    fn chunk_ids_of(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
+        let file = match read_opt(&self.path(key))? {
+            Some(f) => f,
+            None => match self.packs.as_ref().map(|p| p.frame(key)).transpose()?.flatten() {
+                Some(f) if f.base.is_none() => f.bytes[f.data_at..].to_vec(),
+                _ => return Ok(None),
             },
+        };
+        match file.first() {
+            Some(&CHUNKED) => Ok(Some(unpack(&file)?.1)),
+            _ => Ok(None),
         }
     }
 
-    fn chunk_file(&self, hex: &str) -> io::Result<Option<Vec<u8>>> {
-        match read_opt(&self.chunk_path(hex))? {
-            Some(f) => Ok(Some(f)),
-            None => match &self.packs {
-                Some(p) => p.file(&format!("#{hex}")),
-                None => Ok(None),
-            },
+    /// A blob's file bytes, loose or packed.
+    fn blob_file(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
+        // Packs first: a lookup there costs no system call, and a store that
+        // has been through gc holds nearly everything in them. A name in both
+        // has the same bytes.
+        if let Some(p) = &self.packs
+            && let Some(f) = p.file(key)?
+        {
+            return Ok(Some(f));
         }
+        read_opt(&self.path(key))
+    }
+
+    fn chunk_file(&self, hex: &str) -> io::Result<Option<Vec<u8>>> {
+        // Packs first, as for blobs.
+        if let Some(p) = &self.packs
+            && let Some(f) = p.file(&format!("#{hex}"))?
+        {
+            return Ok(Some(f));
+        }
+        read_opt(&self.chunk_path(hex))
     }
 
     fn has_blob(&self, key: &str) -> io::Result<bool> {
@@ -504,6 +596,60 @@ fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> +
         }
         Ok(out)
     })
+}
+
+/// The chain depth of `n`'s frame in the sealed pack, if every base in the
+/// chain is still present and it is within [`crate::pack::MAX_DEPTH`].
+fn sealed_depth(
+    packs: &crate::pack::Packs,
+    present: &std::collections::HashSet<&String>,
+    memo: &mut std::collections::HashMap<String, Option<usize>>,
+    n: &str,
+) -> io::Result<Option<usize>> {
+    if let Some(d) = memo.get(n) {
+        return Ok(*d);
+    }
+    let d = match packs.sealed_frame(n)? {
+        None => None,
+        Some(f) => match f.base {
+            None => Some(0),
+            Some(b) if present.contains(&b) => {
+                sealed_depth(packs, present, memo, &b)?.map(|d| d + 1).filter(|d| *d <= crate::pack::MAX_DEPTH)
+            }
+            Some(_) => None,
+        },
+    };
+    memo.insert(n.to_string(), d);
+    Ok(d)
+}
+
+/// The depth of `base` as a delta base in the new pack: placed already, or
+/// a sealed frame that will be copied; `None` when a delta on it would make
+/// a chain too long or it cannot be a base.
+fn base_depth(
+    packs: &crate::pack::Packs,
+    present: &std::collections::HashSet<&String>,
+    memo: &mut std::collections::HashMap<String, Option<usize>>,
+    placed: &std::collections::HashMap<String, usize>,
+    base: &str,
+) -> io::Result<Option<usize>> {
+    let d = match placed.get(base) {
+        Some(d) => Some(*d),
+        None if present.contains(&base.to_string()) => match packs.sealed_frame(base)? {
+            Some(f) if f.plain => sealed_depth(packs, present, memo, base)?,
+            _ => None,
+        },
+        None => None,
+    };
+    Ok(d.filter(|d| *d < crate::pack::MAX_DEPTH))
+}
+
+/// A repack's look at one entry: a stored frame to copy, or file bytes and
+/// the delta tried for them.
+enum Tried {
+    Sealed(crate::pack::Frame),
+    Reuse(crate::pack::Frame),
+    New(Vec<u8>, Option<crate::pack::Entry>),
 }
 
 /// What a repack wrote.
@@ -824,6 +970,20 @@ mod tests {
         assert_eq!(b.get(&k3).unwrap(), None);
         assert!(!other.has_blob(&k3).unwrap());
         assert!(b.sweep_chunks().unwrap() > 0);
-        assert_eq!(b.get(&k2).unwrap(), Some(edited));
+        assert_eq!(b.get(&k2).unwrap(), Some(edited.clone()));
+        // A second repack copies the sealed pack's delta as it is.
+        let r = b.repack(&[], &Default::default()).unwrap();
+        assert_eq!(r.deltas, 1);
+        assert!(b.sealed(&k2).unwrap());
+        // Removing the base keeps the delta readable; the next repack writes
+        // it whole, since its base is not kept.
+        b.remove_blob(&k1).unwrap();
+        assert_eq!(b.get(&k1).unwrap(), None);
+        assert_eq!(b.get(&k2).unwrap().as_ref(), Some(&edited));
+        let r = b.repack(&[], &Default::default()).unwrap();
+        assert_eq!(r.deltas, 0);
+        assert_eq!(b.get(&k2).unwrap().as_ref(), Some(&edited));
+        assert_eq!(DiskBackend::open(dir.path()).unwrap().get(&k2).unwrap().as_ref(), Some(&edited));
+        assert_eq!(b.get(&k1).unwrap(), None);
     }
 }

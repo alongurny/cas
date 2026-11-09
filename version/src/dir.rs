@@ -134,6 +134,10 @@ impl<'a> Reader<'a> {
             let b = self.byte()?;
             n |= u64::from(b & 0x7f) << shift;
             if b & 0x80 == 0 {
+                // The shortest form only: a last byte of 0 adds nothing.
+                if b == 0 && shift > 0 {
+                    return Err("not the canonical encoding (varint)".into());
+                }
                 return Ok(n);
             }
         }
@@ -171,8 +175,10 @@ fn put_key(out: &mut Vec<u8>, algs: &[&str], key: &str) {
     out.extend(h.chunks(2).map(|p| (val(p[0]) << 4) | val(p[1])));
 }
 
-fn get_key(r: &mut Reader, algs: &[&'static Algorithm]) -> std::result::Result<String, String> {
-    let a = *algs.get(r.varint()? as usize).ok_or("algorithm index out of range")?;
+fn get_key(r: &mut Reader, algs: &[&'static Algorithm], used: &mut [bool]) -> std::result::Result<String, String> {
+    let i = r.varint()? as usize;
+    let a = *algs.get(i).ok_or("algorithm index out of range")?;
+    used[i] = true;
     let d = r.take(a.digest_len)?;
     let mut s = String::with_capacity(a.name.len() + 1 + 2 * d.len());
     s.push_str(a.name);
@@ -195,8 +201,18 @@ fn get_name(r: &mut Reader, prev: &str) -> std::result::Result<String, String> {
     let shared = r.varint()? as usize;
     let n = r.count()?;
     let rest = r.take(n)?;
-    let head = prev.as_bytes().get(..shared).ok_or("shared prefix too long")?;
-    String::from_utf8([head, rest].concat()).map_err(|_| "name is not UTF-8".into())
+    let p = prev.as_bytes();
+    let head = p.get(..shared).ok_or("shared prefix too long")?;
+    // The shared prefix is the longest one.
+    if let (Some(a), Some(b)) = (p.get(shared), rest.first())
+        && a == b
+    {
+        return Err("not the canonical encoding (shared prefix)".into());
+    }
+    let mut v = Vec::with_capacity(shared + n);
+    v.extend_from_slice(head);
+    v.extend_from_slice(rest);
+    String::from_utf8(v).map_err(|_| "name is not UTF-8".into())
 }
 
 fn put_algs(out: &mut Vec<u8>, algs: &[&str]) {
@@ -269,19 +285,33 @@ pub fn tree_decode(b: &[u8]) -> std::result::Result<Blob, String> {
     let mut r = Reader { b, at: 0 };
     let level = r.varint()?;
     let algs = get_algs(&mut r)?;
+    if algs.windows(2).any(|w| w[0].name >= w[1].name) {
+        return Err("not the canonical encoding (algorithm table)".into());
+    }
+    let mut used = vec![false; algs.len()];
     let blob = if level == 0 {
         let nf = r.count()?;
-        let formats: Vec<String> = (0..nf).map(|_| get_key(&mut r, &algs)).collect::<std::result::Result<_, _>>()?;
+        let formats: Vec<String> =
+            (0..nf).map(|_| get_key(&mut r, &algs, &mut used)).collect::<std::result::Result<_, _>>()?;
+        if formats.windows(2).any(|w| w[0] >= w[1]) {
+            return Err("not the canonical encoding (format table)".into());
+        }
+        let mut fused = vec![false; formats.len()];
         let n = r.count()?;
         let mut items: Vec<Item> = Vec::with_capacity(n);
         for _ in 0..n {
             let name = get_name(&mut r, items.last().map_or("", |i| &i.name))?;
-            let f = formats.get(r.varint()? as usize).ok_or("format index out of range")?.clone();
-            let key = get_key(&mut r, &algs)?;
+            let fi = r.varint()? as usize;
+            let f = formats.get(fi).ok_or("format index out of range")?.clone();
+            fused[fi] = true;
+            let key = get_key(&mut r, &algs, &mut used)?;
             items.push(Item { name, child: View { format: f, key } });
         }
         if items.is_empty() {
             return Err("an empty leaf is the empty blob".into());
+        }
+        if fused.contains(&false) {
+            return Err("not the canonical encoding (unused format)".into());
         }
         Blob::Items(items)
     } else {
@@ -289,7 +319,7 @@ pub fn tree_decode(b: &[u8]) -> std::result::Result<Blob, String> {
         let mut parts: Vec<(String, String)> = Vec::with_capacity(n);
         for _ in 0..n {
             let name = get_name(&mut r, parts.last().map_or("", |p| &p.0))?;
-            let key = get_key(&mut r, &algs)?;
+            let key = get_key(&mut r, &algs, &mut used)?;
             parts.push((name, key));
         }
         if parts.is_empty() {
@@ -313,9 +343,13 @@ pub fn tree_decode(b: &[u8]) -> std::result::Result<Blob, String> {
     if names[..names.len() - 1].iter().any(|n| u64::from(height(n)) > level) {
         return Err(format!("a blob at level {level} is not cut by name"));
     }
-    if tree_encode(&blob) != b {
-        return Err("not the canonical encoding".into());
+    if used.contains(&false) {
+        return Err("not the canonical encoding (unused algorithm)".into());
     }
+    // With the shortest varints, the longest shared prefixes, sorted and
+    // used tables and sorted names, these bytes are what `tree_encode`
+    // writes: checked in the tests rather than by encoding again here.
+    debug_assert!(tree_encode(&blob) == b);
     Ok(blob)
 }
 
