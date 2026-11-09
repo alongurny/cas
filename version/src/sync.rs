@@ -12,7 +12,7 @@ use crate::formats::{self, Kind};
 use crate::history;
 use crate::{Error, Result, View, is_blob_key, read_blob};
 use cas_core::store::Put;
-use cas_core::{Error as CoreError, Expect, Span, Store};
+use cas_core::{Error as CoreError, Expect, Form, Span, Store, Stored};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Whether `store` holds the blob `key`, without reading it.
@@ -154,6 +154,8 @@ struct Copier<'a> {
     /// Writes not yet sent, children before parents.
     pending: Vec<Put>,
     pending_bytes: usize,
+    /// Where each pending write is in `pending`.
+    pending_at: HashMap<String, usize>,
 }
 
 /// Bytes of writes gathered into one `write_many`: a disk store makes each
@@ -163,6 +165,7 @@ const WRITE_BYTES: usize = 128 << 20;
 /// A container read from the source, waiting for its children.
 struct Waiting {
     bytes: Vec<u8>,
+    form: Option<Form>,
     /// Children not yet known to be in the destination.
     left: usize,
 }
@@ -177,6 +180,7 @@ impl<'a> Copier<'a> {
             done,
             pending: Vec::new(),
             pending_bytes: 0,
+            pending_at: HashMap::new(),
         }
     }
 
@@ -186,12 +190,78 @@ impl<'a> Copier<'a> {
         Ok(self.n)
     }
 
+    /// The values of the blobs `keys` from the source, each with the form
+    /// the source keeps it in. A delta's base comes from this batch, the
+    /// writes not yet sent or still waiting, or the destination; one whose base is in none
+    /// of them is read again as a value. Every value is checked against
+    /// its key.
+    fn read_values(&self, keys: &[String], waiting: &HashMap<String, Waiting>) -> Result<Vec<(Vec<u8>, Option<Form>)>> {
+        let mut stored: Vec<Stored> = Vec::with_capacity(keys.len());
+        for (k, s) in keys.iter().zip(self.src.read_stored_many(keys)) {
+            stored.push(s?.ok_or_else(|| Error::Missing(k.clone()))?);
+        }
+        let mut values: Vec<Option<Vec<u8>>> = vec![None; keys.len()];
+        let at: HashMap<&str, usize> = keys.iter().enumerate().map(|(i, k)| (k.as_str(), i)).collect();
+        let bad = |k: &str, e: std::io::Error| Error::Store(CoreError::Unavailable(format!("{k}: {e}")));
+        let mut todo: Vec<usize> = Vec::new();
+        for (i, s) in stored.iter().enumerate() {
+            match s.base() {
+                None => values[i] = Some(s.value(None).map_err(|e| bad(&keys[i], e))?),
+                Some(_) => todo.push(i),
+            }
+        }
+        // Deltas, until no more can be decoded (a base later in the batch,
+        // or one that is itself a delta here).
+        loop {
+            let before = todo.len();
+            let mut left = Vec::new();
+            for i in todo {
+                let base = stored[i].base().unwrap();
+                let bv = match at.get(base) {
+                    Some(&j) => values[j].clone(),
+                    None => match (self.pending_at.get(base), waiting.get(base)) {
+                        (Some(&j), _) => Some(self.pending[j].value.clone()),
+                        (None, Some(w)) => Some(w.bytes.clone()),
+                        (None, None) => self.dst.read(base).ok().flatten(),
+                    },
+                };
+                match bv {
+                    Some(b) => values[i] = Some(stored[i].value(Some(&b)).map_err(|e| bad(&keys[i], e))?),
+                    None => left.push(i),
+                }
+            }
+            todo = left;
+            if todo.is_empty() || todo.len() == before {
+                break;
+            }
+        }
+        if !todo.is_empty() {
+            let again: Vec<String> = todo.iter().map(|&i| keys[i].clone()).collect();
+            for (&i, v) in todo.iter().zip(self.src.read_many(&again)) {
+                values[i] = Some(v?.ok_or_else(|| Error::Missing(keys[i].clone()))?);
+                stored[i] = Stored::Value(Vec::new());
+            }
+        }
+        let mut out = Vec::with_capacity(keys.len());
+        for ((k, v), s) in keys.iter().zip(values).zip(stored) {
+            let v = v.expect("every value decoded or read");
+            if let Some(cas_core::key::Parsed::Blob { alg, .. }) = cas_core::key::classify(k)
+                && cas_core::algo::lookup(alg).is_some_and(|a| a.key(&v) != *k)
+            {
+                return Err(Error::Store(CoreError::Unavailable(format!("the source sent wrong bytes for {k}"))));
+            }
+            out.push((v, s.into_form()));
+        }
+        Ok(out)
+    }
+
     /// Send the gathered writes, in order: the closure invariant holds at
     /// every point, since a parent follows its children in the list.
     fn flush(&mut self) -> Result<()> {
         if !self.pending.is_empty() {
             self.dst.write_many(&self.pending).map_err(|(_, e)| Error::from(e))?;
             self.pending.clear();
+            self.pending_at.clear();
             self.pending_bytes = 0;
         }
         Ok(())
@@ -228,10 +298,13 @@ impl<'a> Copier<'a> {
             }
             let keys: Vec<String> = want.iter().map(|r| r.key().to_string()).collect();
             let mut ready: Vec<Put> = Vec::new();
-            for (r, value) in want.into_iter().zip(src.read_many(&keys)) {
-                let bytes = value?.ok_or_else(|| Error::Missing(r.key().to_string()))?;
+            let mut forms: HashMap<String, Form> = HashMap::new();
+            for (r, (bytes, form)) in want.into_iter().zip(self.read_values(&keys, &waiting)?) {
+                if let Some(f) = form {
+                    forms.insert(r.key().to_string(), f);
+                }
                 let Some(kids) = children_of(&r, &bytes)? else {
-                    ready.push(Put::blob(r.key(), bytes));
+                    ready.push(Put { form: forms.remove(r.key()), ..Put::blob(r.key(), bytes) });
                     continue;
                 };
                 let kids: BTreeSet<View> = kids.into_iter().collect();
@@ -246,10 +319,11 @@ impl<'a> Copier<'a> {
                         frontier.push(k);
                     }
                 }
+                let form = forms.remove(r.key());
                 if left == 0 {
-                    ready.push(Put::blob(r.key(), bytes));
+                    ready.push(Put { form, ..Put::blob(r.key(), bytes) });
                 } else {
-                    waiting.insert(r.key().to_string(), Waiting { bytes, left });
+                    waiting.insert(r.key().to_string(), Waiting { bytes, form, left });
                 }
             }
             // Write what is ready; each write may free the containers above it.
@@ -257,7 +331,10 @@ impl<'a> Copier<'a> {
                 self.n.blobs += ready.len();
                 resolved.extend(ready.iter().map(|p| p.key.clone()));
                 self.pending_bytes += ready.iter().map(|p| p.value.len()).sum::<usize>();
-                self.pending.append(&mut ready);
+                for p in ready.drain(..) {
+                    self.pending_at.insert(p.key.clone(), self.pending.len());
+                    self.pending.push(p);
+                }
                 if self.pending_bytes >= WRITE_BYTES {
                     self.flush()?;
                 }
@@ -267,7 +344,7 @@ impl<'a> Copier<'a> {
                         w.left -= 1;
                         if w.left == 0 {
                             let w = waiting.remove(&parent).expect("waiting");
-                            ready.push(Put::blob(parent, w.bytes));
+                            ready.push(Put { form: w.form, ..Put::blob(parent, w.bytes) });
                         }
                     }
                     self.done.insert(k);

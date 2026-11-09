@@ -11,6 +11,8 @@ pub struct HttpStore {
     agent: Agent,
     base: String,
     token: Option<String>,
+    /// The server answered 404 to `batch/stored`: ask for values instead.
+    no_stored: std::sync::atomic::AtomicBool,
 }
 
 /// The schemes this build speaks: `https://`, plus `http://` in builds with
@@ -38,7 +40,7 @@ impl HttpStore {
                 format!("{base}: a store URL must start with https://"),
             ));
         }
-        Ok(HttpStore { agent: agent(RootCerts::WebPki), base, token: None })
+        Ok(HttpStore { agent: agent(RootCerts::WebPki), base, token: None, no_stored: Default::default() })
     }
 
     /// Trust only the CA certificates in `pem` (e.g. a private CA or a
@@ -270,6 +272,36 @@ impl Store for HttpStore {
             }
             Ok(b.into_iter().map(|x| x != 0).collect())
         })
+    }
+
+    fn read_stored_many(&self, keys: &[String]) -> Vec<Result<Option<crate::store::Stored>>> {
+        if self.no_stored.load(std::sync::atomic::Ordering::Relaxed) {
+            return self.read_many(keys).into_iter().map(|r| r.map(|v| v.map(crate::store::Stored::Value))).collect();
+        }
+        let all = self.in_groups(keys, |g| {
+            let mut resp = self.post("/batch/stored", &wire::encode_keys(g))?;
+            match resp.status().as_u16() {
+                200 => {}
+                // A server without stored forms: values instead.
+                404 => {
+                    self.no_stored.store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(self
+                        .read_many(g)
+                        .into_iter()
+                        .map(|r| r.map(|v| v.map(crate::store::Stored::Value)))
+                        .collect::<Vec<_>>());
+                }
+                _ => return Err(outcome(resp)),
+            }
+            // Not checked here: a form's value is checked by whoever decodes it.
+            wire::decode_stored(&body(&mut resp)?)
+                .filter(|a| a.len() == g.len())
+                .ok_or_else(|| Error::Unavailable("bad batch/stored answer".into()))
+        });
+        match all {
+            Ok(v) => v,
+            Err(e) => keys.iter().map(|_| Err(e.clone())).collect(),
+        }
     }
 
     fn read_many(&self, keys: &[String]) -> Vec<Result<Option<Vec<u8>>>> {

@@ -32,6 +32,14 @@ pub trait Store: Send + Sync {
         keys.iter().map(|k| self.read(k)).collect()
     }
 
+    /// `read` of each key, each blob in the form the store keeps it in
+    /// (spec/wire.md, "Stored forms"), so a copy need not compress it again.
+    /// Decided as `read`; the bytes are not checked here: [`Stored::value`]
+    /// gives the value, which the caller checks against the key.
+    fn read_stored_many(&self, keys: &[String]) -> Vec<Result<Option<Stored>>> {
+        self.read_many(keys).into_iter().map(|r| r.map(|v| v.map(Stored::Value))).collect()
+    }
+
     /// `write` of each, in order, stopping at the first that fails: the
     /// writes before it are done, it and the rest are not.
     fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
@@ -57,18 +65,78 @@ pub trait Store: Send + Sync {
     }
 }
 
-/// One write of a batch.
+/// One write of a batch. `form` is how another store kept a blob value
+/// (from [`Store::read_stored_many`]): a store that keeps that form may
+/// keep it as it is. It changes nothing about the write's outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Put {
     pub key: String,
     pub value: Vec<u8>,
     pub expect: Expect,
+    pub form: Option<Form>,
 }
 
 impl Put {
     /// A blob write (expect absent).
     pub fn blob(key: impl Into<String>, value: Vec<u8>) -> Put {
-        Put { key: key.into(), value, expect: Expect::Absent }
+        Put { key: key.into(), value, expect: Expect::Absent, form: None }
+    }
+}
+
+/// A compressed form of a blob value (spec/wire.md, "Stored forms").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Form {
+    /// One zstd frame of the value.
+    Zstd(Vec<u8>),
+    /// The value compressed by zstd with the value of blob `base` as a
+    /// raw-content dictionary.
+    Delta { base: String, z: Vec<u8> },
+}
+
+/// The longest value sent in a form: longer ones go as values (a disk store
+/// keeps those in chunks), so a peer cannot make the reader reserve more.
+pub const MAX_FORM_LEN: usize = 1 << 20;
+
+/// A blob as a store keeps it: the value, or a form of a value of `len` bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Stored {
+    Value(Vec<u8>),
+    Form { len: usize, form: Form },
+}
+
+impl Stored {
+    /// The value; a delta needs its base's value. Not checked against any
+    /// key: the caller does that.
+    pub fn value(&self, base: Option<&[u8]>) -> std::io::Result<Vec<u8>> {
+        if let Stored::Form { len, .. } = self
+            && *len > MAX_FORM_LEN
+        {
+            return Err(std::io::Error::other("a stored form longer than the limit"));
+        }
+        match self {
+            Stored::Value(v) => Ok(v.clone()),
+            Stored::Form { len, form: Form::Zstd(z) } => crate::pack::zstd_exact(None, z, *len),
+            Stored::Form { len, form: Form::Delta { z, .. } } => match base {
+                Some(b) => crate::pack::zstd_exact(Some(b), z, *len),
+                None => Err(std::io::Error::other("a delta needs its base")),
+            },
+        }
+    }
+
+    /// The base a delta needs.
+    pub fn base(&self) -> Option<&str> {
+        match self {
+            Stored::Form { form: Form::Delta { base, .. }, .. } => Some(base),
+            _ => None,
+        }
+    }
+
+    /// The form, if any, for a [`Put`].
+    pub fn into_form(self) -> Option<Form> {
+        match self {
+            Stored::Value(_) => None,
+            Stored::Form { form, .. } => Some(form),
+        }
     }
 }
 
@@ -212,20 +280,26 @@ impl CoreStore {
     fn write_many(&self, who: &Who, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
         // The pending run of blobs and the index of its first; a failed
         // flush is reported there, as nothing in the run is known written.
-        let mut run: Vec<(&str, &[u8])> = Vec::new();
+        let mut run: Vec<(&str, &[u8], Option<&Form>)> = Vec::new();
         let mut start = 0;
-        let flush = |run: &mut Vec<(&str, &[u8])>, start: usize| -> std::result::Result<(), (usize, Error)> {
-            let r = self.backend.put_blobs(run).map_err(|e| (start, Error::from(e)));
-            run.clear();
-            r
-        };
+        let flush =
+            |run: &mut Vec<(&str, &[u8], Option<&Form>)>, start: usize| -> std::result::Result<(), (usize, Error)> {
+                let r = if run.iter().any(|b| b.2.is_some()) {
+                    self.backend.put_stored(run)
+                } else {
+                    let plain: Vec<(&str, &[u8])> = run.iter().map(|b| (b.0, b.1)).collect();
+                    self.backend.put_blobs(&plain)
+                };
+                run.clear();
+                r.map_err(|e| (start, Error::from(e)))
+            };
         for (i, p) in puts.iter().enumerate() {
             match self.check_blob_write(who, &p.key, &p.value, &p.expect) {
                 Ok(true) => {
                     if run.is_empty() {
                         start = i;
                     }
-                    run.push((&p.key, &p.value));
+                    run.push((&p.key, &p.value, p.form.as_ref()));
                 }
                 Ok(false) => {
                     flush(&mut run, start)?;
@@ -270,6 +344,18 @@ impl CoreStore {
             _ => None,
         };
         Ok(ListPage { keys, rest })
+    }
+
+    fn read_stored_many(&self, who: &Who, keys: &[String]) -> Vec<Result<Option<Stored>>> {
+        keys.iter()
+            .map(|key| {
+                self.gate(who, Op::Read { key })?;
+                match self.check_key(key)? {
+                    Kind::Blob(_) => Ok(self.backend.get_stored(key)?),
+                    Kind::Var => Ok(self.backend.get(key)?.map(Stored::Value)),
+                }
+            })
+            .collect()
     }
 
     /// Each key gated as the `list` of the span holding only it, as
@@ -378,6 +464,10 @@ impl Store for Session {
 
     fn has_many(&self, keys: &[String]) -> Result<Vec<bool>> {
         self.store.has_many(&self.who, keys)
+    }
+
+    fn read_stored_many(&self, keys: &[String]) -> Vec<Result<Option<Stored>>> {
+        self.store.read_stored_many(&self.who, keys)
     }
 
     fn write_many(&self, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {

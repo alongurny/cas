@@ -543,6 +543,10 @@ fn handle(store: &Session, req: &Request) -> Response {
                 let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
                 Response::data(wire::encode_reads(&store.read_many(&keys))).with("Cache-Control", "no-store")
             }
+            "stored" => {
+                let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
+                Response::data(wire::encode_stored(&store.read_stored_many(&keys))).with("Cache-Control", "no-store")
+            }
             "write" => {
                 let Some(puts) = wire::decode_puts(&req.body) else { return bad_request() };
                 match store.write_many(&puts) {

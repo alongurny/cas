@@ -117,6 +117,30 @@ that many bytes.
 - A client keeps write bodies under the server's bound and splits on 413;
   reads and has-checks go in groups of 512 keys, four requests in flight.
 
+## Stored forms
+
+An optimization for copying many blobs; a server may leave it out (it
+answers 404), and a client then reads values with `batch/read`. A store
+keeps most blobs compressed, many as deltas on another blob; sending that
+form spares the server decoding it and the receiver compressing it again,
+as git sends its pack's deltas.
+
+| Request | Body | Answer |
+| --- | --- | --- |
+| `POST /batch/stored` | key frames | 200, per key: as `batch/read`, or `3` + length + zstd frame, or `4` + base key frame + length + delta frame |
+
+- The length is the value's, a u64 big-endian, at most 1 MiB (larger
+  values are sent as values). A zstd frame decodes to the value; a delta
+  frame is zstd with the value of blob `base` as a raw-content dictionary.
+- Gated and decided as `read` of each key. The answer is not checked by the
+  server: the reader decodes each form (getting a delta's base from what it
+  holds, or reading it as a value) and checks the value against its key, as
+  it would a read's.
+- A writer may keep a form it received as it is, once it has checked that
+  the form decodes to the value. A delta is kept only if its base is kept
+  in a form that can be a base and the chain stays within the store's
+  limit; otherwise the value is compressed afresh.
+
 ## Chunked transfer
 
 An optimization for writing big blobs; a server may leave it out (it answers

@@ -242,3 +242,84 @@ fn push_of_one_commit_asks_only_about_what_is_new() {
     // Only the name was read, not the 300-node history.
     assert_eq!(dst.reads.load(Ordering::SeqCst), 1);
 }
+
+/// A disk store after gc keeps most versions of a file as deltas; a pull
+/// over HTTP gets them in that form and keeps them so.
+#[test]
+fn a_pull_keeps_the_sources_deltas() {
+    use cas_core::Backend;
+    use cas_core::disk::DiskBackend;
+    let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let src_core = CoreStore::new(DiskBackend::open(a.path()).unwrap(), AllowAll, Policy::permissive());
+    let src = src_core.session(Who::anonymous());
+    let text = |i: usize| {
+        (0..400).map(|l| format!("line {l} of version {}\n", if l == 7 { i } else { 0 })).collect::<String>()
+    };
+    let mut root = big(&src);
+    // Within the delta chain limit, so the newest is a delta too.
+    for i in 0..8 {
+        root = edit(&src, &root, "d1/f1", &text(i));
+        history::commit(&src, b3(), "main", &root, Step::default(), None).unwrap();
+    }
+    let disk = DiskBackend::open(a.path()).unwrap();
+    let (order, hints) = cas_version::gc::delta_hints(&src, &|_| false).unwrap();
+    assert!(disk.repack(&order, &hints).unwrap().deltas >= 7);
+    let (tls, ca) = cas_core::server::self_signed();
+    let server =
+        Server::start(src_core, "127.0.0.1:0", 8, Arc::new(|_: &cas_core::server::Request| Who::anonymous()), tls)
+            .unwrap();
+    let remote = HttpStore::new(server.url()).unwrap().trusting(&ca).unwrap();
+    let dst =
+        CoreStore::new(DiskBackend::open(b.path()).unwrap(), AllowAll, Policy::permissive()).session(Who::anonymous());
+    sync::push(&remote, &dst, "main", "main").unwrap();
+    same_tree(&src, &dst, &root);
+    assert!(cas_version::fsck::fsck(&dst).unwrap().ok());
+    // The file's versions arrived as deltas and stayed deltas.
+    let f = match cas_version::lookup(&dst, &root, &Path::new("d1/f1").unwrap()).unwrap() {
+        Some(Node::File(f)) => f,
+        n => panic!("{n:?}"),
+    };
+    let had = DiskBackend::open(a.path()).unwrap().get_stored(f.key()).unwrap().unwrap();
+    let kept = DiskBackend::open(b.path()).unwrap().get_stored(f.key()).unwrap().unwrap();
+    assert!(had.base().is_some(), "source: {:?}", had.base());
+    assert!(kept.base().is_some(), "{:?}", kept.base());
+}
+
+/// A source whose stored forms do not decode to their keys' values is
+/// caught: nothing wrong is written.
+#[test]
+fn a_wrong_stored_form_is_refused() {
+    struct Liar(Arc<dyn Store>);
+    impl Store for Liar {
+        fn read(&self, key: &str) -> cas_core::Result<Option<Vec<u8>>> {
+            self.0.read(key)
+        }
+        fn write(&self, key: &str, value: &[u8], expect: &Expect) -> cas_core::Result<()> {
+            self.0.write(key, value, expect)
+        }
+        fn remove(&self, key: &str, expect: &Expect) -> cas_core::Result<()> {
+            self.0.remove(key, expect)
+        }
+        fn list(&self, span: &Span) -> cas_core::Result<ListPage> {
+            self.0.list(span)
+        }
+        fn read_stored_many(&self, keys: &[String]) -> Vec<cas_core::Result<Option<cas_core::Stored>>> {
+            let z = zstd::bulk::compress(b"not it", 3).unwrap();
+            keys.iter()
+                .map(|k| match self.0.read(k)? {
+                    Some(v) if v.starts_with(b"0/") => {
+                        Ok(Some(cas_core::Stored::Form { len: 6, form: cas_core::Form::Zstd(z.clone()) }))
+                    }
+                    v => Ok(v.map(cas_core::Stored::Value)),
+                })
+                .collect()
+        }
+    }
+    let src = store();
+    let root = big(&*src);
+    history::commit(&*src, b3(), "main", &root, Step::default(), None).unwrap();
+    let dst = store();
+    let err = sync::push(&Liar(src.clone()), &*dst, "main", "main").unwrap_err().to_string();
+    assert!(err.contains("wrong bytes"), "{err}");
+    assert!(history::head(&*dst, "main").unwrap().is_none());
+}

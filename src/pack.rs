@@ -348,10 +348,40 @@ fn with_dict_decompress(dict: &[u8], z: &[u8], size: usize) -> io::Result<Vec<u8
     Ok(out)
 }
 
+/// One zstd frame `z` decoded to exactly `len` bytes, with `dict` as a
+/// raw-content dictionary if given.
+pub fn zstd_exact(dict: Option<&[u8]>, z: &[u8], len: usize) -> io::Result<Vec<u8>> {
+    match dict {
+        Some(d) => with_dict_decompress(d, z, len),
+        None => {
+            let mut out = Vec::with_capacity(len);
+            DCTX.with(|c| c.borrow_mut().decompress(&mut out, z)).map_err(zerr)?;
+            if out.len() != len {
+                return Err(bad("zstd frame decodes to the wrong size"));
+            }
+            Ok(out)
+        }
+    }
+}
+
 fn with_dict_compress(dict: &[u8], value: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(value.len()));
     CCTX.with(|c| c.borrow_mut().compress_using_dict(&mut out, value, dict, 3)).map_err(zerr)?;
     Ok(out)
+}
+
+impl Frame {
+    /// A delta frame's base, value length and zstd bytes.
+    pub fn delta(&self) -> io::Result<Option<(&str, usize, &[u8])>> {
+        if self.base.is_none() {
+            return Ok(None);
+        }
+        let mut d = &self.bytes[self.data_at..];
+        let n = take_u16(&mut d)?;
+        let base = std::str::from_utf8(take(&mut d, n)?).map_err(bad)?;
+        let len = take_u32(&mut d)?;
+        Ok(Some((base, len, d)))
+    }
 }
 
 /// A frame as stored: its bytes, the base it is a delta against, and
@@ -642,6 +672,20 @@ impl Packs {
         let find = |st: &State| st.sealed.and_then(|p| st.idx[p].get(name).map(|offset| Loc { pack: p, offset }));
         let Some((loc, map)) = self.mapped(st, find)? else { return Ok(None) };
         frame_at(&map, loc)
+    }
+
+    /// The delta chain depth of `name` as a base: 0 for a plain whole
+    /// frame, `None` when it is not packed or cannot be a base.
+    pub fn depth(&self, name: &str) -> io::Result<Option<usize>> {
+        let mut name = name.to_string();
+        for d in 0..=MAX_DEPTH {
+            match self.frame(&name)? {
+                Some(f) if f.base.is_none() => return Ok(f.plain.then_some(d)),
+                Some(f) => name = f.base.unwrap(),
+                None => return Ok(None),
+            }
+        }
+        Ok(None)
     }
 
     /// Record `id` as the sealed pack.

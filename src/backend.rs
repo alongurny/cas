@@ -17,6 +17,18 @@ pub trait Backend: Send + Sync {
         blobs.iter().try_for_each(|(k, v)| self.put_blob(k, v))
     }
 
+    /// A blob as kept (spec/wire.md, "Stored forms"); by default its value.
+    fn get_stored(&self, key: &str) -> io::Result<Option<crate::store::Stored>> {
+        Ok(self.get(key)?.map(crate::store::Stored::Value))
+    }
+
+    /// [`Backend::put_blobs`] of verified values, each with the form another
+    /// store kept it in, which a backend may keep as it is.
+    fn put_stored(&self, blobs: &[(&str, &[u8], Option<&crate::store::Form>)]) -> io::Result<()> {
+        let plain: Vec<(&str, &[u8])> = blobs.iter().map(|b| (b.0, b.1)).collect();
+        self.put_blobs(&plain)
+    }
+
     /// Idempotent; durable on return.
     fn remove_blob(&self, key: &str) -> io::Result<()>;
 

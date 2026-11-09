@@ -10,3 +10,4 @@ cas-core = { path = ".." }
 cas-core = { path = "..", features = ["test-tls"] }
 proptest = "1.12.0"
 tempfile = "3.27.0"
+zstd = "0.13"

@@ -644,6 +644,13 @@ fn base_depth(
     Ok(d.filter(|d| *d < crate::pack::MAX_DEPTH))
 }
 
+/// How [`DiskBackend::put_stored`] writes one blob: a file (and the chunks
+/// it names), or a delta kept as it came.
+enum Enc {
+    File(Vec<u8>, PackedChunks),
+    Delta(String, Vec<u8>),
+}
+
 /// A repack's look at one entry: a stored frame to copy, or file bytes and
 /// the delta tried for them.
 enum Tried {
@@ -696,7 +703,124 @@ fn read_opt(path: &Path) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+impl DiskBackend {
+    /// What a blob file holds, in a form a peer can keep as it is.
+    fn stored_of_file(&self, file: Vec<u8>) -> io::Result<crate::store::Stored> {
+        use crate::store::{Form, Stored};
+        match file.first() {
+            Some(&RAW) => Ok(Stored::Value(file[1..].to_vec())),
+            Some(&ZSTD) => match zstd::zstd_safe::get_frame_content_size(&file[1..]) {
+                Ok(Some(n)) if n as usize <= crate::store::MAX_FORM_LEN => {
+                    Ok(Stored::Form { len: n as usize, form: Form::Zstd(file[1..].to_vec()) })
+                }
+                _ => Ok(Stored::Value(self.decode(file)?)),
+            },
+            _ => Ok(Stored::Value(self.decode(file)?)),
+        }
+    }
+}
+
 impl Backend for DiskBackend {
+    fn get_stored(&self, key: &str) -> io::Result<Option<crate::store::Stored>> {
+        use crate::store::{Form, Stored};
+        if !self.encoded {
+            return Ok(self.get(key)?.map(Stored::Value));
+        }
+        if let Some(p) = &self.packs
+            && let Some(f) = p.frame(key)?
+        {
+            if let Some((base, len, z)) = f.delta()? {
+                return Ok(Some(Stored::Form { len, form: Form::Delta { base: base.to_string(), z: z.to_vec() } }));
+            }
+            return self.stored_of_file(f.bytes[f.data_at..].to_vec()).map(Some);
+        }
+        match read_opt(&self.path(key))? {
+            Some(file) => self.stored_of_file(file).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    fn put_stored(&self, blobs: &[(&str, &[u8], Option<&crate::store::Form>)]) -> io::Result<()> {
+        use crate::pack::{Entry, MAX_DEPTH};
+        use crate::store::Form;
+        let Some(packs) = self.packs.as_ref().filter(|_| self.encoded && blobs.len() > 1) else {
+            let plain: Vec<(&str, &[u8])> = blobs.iter().map(|b| (b.0, b.1)).collect();
+            return self.put_blobs(&plain);
+        };
+        let mut todo = Vec::new();
+        for b in blobs {
+            if !self.has_blob(b.0)? {
+                todo.push(b);
+            }
+        }
+        // The values in this batch, for checking deltas on them.
+        let batch: std::collections::HashMap<&str, &[u8]> = todo.iter().map(|b| (b.0, b.1)).collect();
+        // A form is kept only when it decodes to the value: anything else is
+        // compressed again, on every core.
+        let encoded = parallel_map(&todo, |(_, v, form)| {
+            if v.len() <= CHUNK_OVER {
+                match form {
+                    Some(Form::Zstd(z)) if crate::pack::zstd_exact(None, z, v.len()).is_ok_and(|d| d == *v) => {
+                        return Ok(Enc::File([&[ZSTD][..], z].concat(), Vec::new()));
+                    }
+                    Some(Form::Delta { base, z }) => {
+                        let bv = match batch.get(base.as_str()) {
+                            Some(b) => Some(b.to_vec()),
+                            None => self.get(base)?,
+                        };
+                        if bv.is_some_and(|b| crate::pack::zstd_exact(Some(&b), z, v.len()).is_ok_and(|d| d == *v)) {
+                            return Ok(Enc::Delta(base.clone(), z.clone()));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let (file, chunks) = self.encode_pure(v)?;
+            Ok(Enc::File(file, chunks))
+        })?;
+        let mut w = packs.writer(&self.root.join("tmp"))?;
+        let mut chunks_seen = std::collections::HashSet::new();
+        for e in &encoded {
+            if let Enc::File(_, chunks) = e {
+                for (id, packed) in chunks {
+                    let hex = hex::encode(id);
+                    if chunks_seen.insert(hex.clone()) && !self.has_chunk(&hex)? {
+                        w.add(&format!("#{hex}"), &Entry::File(packed.clone()))?;
+                    }
+                }
+            }
+        }
+        // Chain depths of what this batch writes, for the deltas after them.
+        let mut depth: std::collections::HashMap<&str, Option<usize>> = std::collections::HashMap::new();
+        for ((key, value, _), e) in todo.iter().zip(encoded) {
+            match e {
+                Enc::File(file, _) => {
+                    depth.insert(key, matches!(file.first(), Some(&RAW | &ZSTD)).then_some(0));
+                    w.add(key, &Entry::File(file))?;
+                }
+                Enc::Delta(base, z) => {
+                    let bd = match depth.get(base.as_str()) {
+                        Some(d) => *d,
+                        None => packs.depth(&base)?,
+                    };
+                    match bd.filter(|d| *d < MAX_DEPTH) {
+                        Some(d) => {
+                            depth.insert(key, Some(d + 1));
+                            w.add(key, &Entry::Delta { base, len: value.len(), z })?;
+                        }
+                        None => {
+                            let (file, _) = self.encode_pure(value)?;
+                            depth.insert(key, matches!(file.first(), Some(&RAW | &ZSTD)).then_some(0));
+                            w.add(key, &Entry::File(file))?;
+                        }
+                    }
+                }
+            }
+        }
+        w.finish()?;
+        packs.compact(&self.root.join("tmp"))
+    }
+
     fn has(&self, key: &str) -> io::Result<bool> {
         match classify(key) {
             Some(Parsed::Blob { .. }) => self.has_blob(key),

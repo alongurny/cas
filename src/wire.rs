@@ -165,6 +165,70 @@ pub fn decode_reads(mut body: &[u8]) -> Option<Vec<ReadResult>> {
     Some(out)
 }
 
+/// A `batch/stored` answer: as `batch/read`'s, and also `3`, a u64 length
+/// and a frame (a zstd form), or `4`, a key frame (the base), a u64 length
+/// and a frame (a delta form).
+pub fn encode_stored(results: &[Result<Option<crate::store::Stored>, Error>]) -> Vec<u8> {
+    use crate::store::{Form, Stored};
+    let mut out = Vec::new();
+    for r in results {
+        match r {
+            Ok(None) => out.push(0),
+            Ok(Some(Stored::Value(v))) => {
+                out.push(1);
+                put_frame(&mut out, v);
+            }
+            Ok(Some(Stored::Form { len, form: Form::Zstd(z) })) => {
+                out.push(3);
+                out.extend_from_slice(&(*len as u64).to_be_bytes());
+                put_frame(&mut out, z);
+            }
+            Ok(Some(Stored::Form { len, form: Form::Delta { base, z } })) => {
+                out.push(4);
+                put_frame(&mut out, base.as_bytes());
+                out.extend_from_slice(&(*len as u64).to_be_bytes());
+                put_frame(&mut out, z);
+            }
+            Err(e) => {
+                out.push(2);
+                put_frame(&mut out, &encode_error(e));
+            }
+        }
+    }
+    out
+}
+
+pub type StoredResult = Result<Option<crate::store::Stored>, Error>;
+
+pub fn decode_stored(mut body: &[u8]) -> Option<Vec<StoredResult>> {
+    use crate::store::{Form, Stored};
+    let take_len = |b: &mut &[u8]| -> Option<usize> {
+        let (n, rest) = b.split_at_checked(8)?;
+        *b = rest;
+        usize::try_from(u64::from_be_bytes(n.try_into().ok()?)).ok()
+    };
+    let mut out = Vec::new();
+    while let Some((tag, rest)) = body.split_first() {
+        body = rest;
+        out.push(match tag {
+            0 => Ok(None),
+            1 => Ok(Some(Stored::Value(take_frame(&mut body)?.to_vec()))),
+            2 => Err(decode_error(take_frame(&mut body)?)?),
+            3 => {
+                let len = take_len(&mut body)?;
+                Ok(Some(Stored::Form { len, form: Form::Zstd(take_frame(&mut body)?.to_vec()) }))
+            }
+            4 => {
+                let base = String::from_utf8(take_frame(&mut body)?.to_vec()).ok()?;
+                let len = take_len(&mut body)?;
+                Ok(Some(Stored::Form { len, form: Form::Delta { base, z: take_frame(&mut body)?.to_vec() } }))
+            }
+            _ => return None,
+        });
+    }
+    Some(out)
+}
+
 /// A `batch/write` body: for each write, a key frame, an expect frame and
 /// a value frame.
 pub fn encode_puts(puts: &[crate::store::Put]) -> Vec<u8> {
@@ -184,7 +248,7 @@ pub fn decode_puts(mut body: &[u8]) -> Option<Vec<crate::store::Put>> {
         let (expect, rest) = decode_expect(body)?;
         body = rest;
         let value = take_frame(&mut body)?.to_vec();
-        out.push(crate::store::Put { key, value, expect });
+        out.push(crate::store::Put { key, value, expect, form: None });
     }
     Some(out)
 }

@@ -13,7 +13,8 @@ present without transferring its value.
 ## Copying a view
 
 `copy(src, dst, root)` writes everything reachable from `root` that `dst` lacks. It walks
-breadth first: each depth is one `has_many` on the destination and one `read_many` on the
+breadth first: each depth is one `has_many` on the destination and one `read_stored_many` (blobs in the
+form the source keeps them, wire.md "Stored forms") on the
 source, so a clone costs round trips in proportion to the depth of its trees, not their size
 (Thesis: 32,145 blobs in about a dozen rounds).
 

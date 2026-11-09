@@ -361,7 +361,7 @@ pub fn batches(h: &dyn Harness) {
     let ok = vec![
         Put::blob(blake3(&x), x.clone()),
         Put::blob(blake3(&z), z.clone()),
-        Put { key: "public/v".into(), value: view(&x), expect: A },
+        Put { key: "public/v".into(), value: view(&x), expect: A, form: None },
     ];
     s.write_many(&ok).unwrap();
     s.write("secret/v", &view(&y), &A).unwrap();
@@ -379,13 +379,14 @@ pub fn batches(h: &dyn Harness) {
     let w = blake3(b"w");
     let batch = vec![
         Put::blob(blake3(&y), y.clone()),
-        Put { key: "public/v".into(), value: view(&y), expect: A },
+        Put { key: "public/v".into(), value: view(&y), expect: A, form: None },
         Put::blob(w.clone(), b"w".to_vec()),
     ];
     assert_eq!(s.write_many(&batch), Err((1, Error::Conflict)));
     assert_eq!(s.read(&blake3(&y)).unwrap(), Some(y.clone()));
     assert_eq!(s.read(&w).unwrap(), None);
-    let batch = vec![Put::blob(w.clone(), b"w".to_vec()), Put { key: "ro/v".into(), value: view(&y), expect: A }];
+    let batch =
+        vec![Put::blob(w.clone(), b"w".to_vec()), Put { key: "ro/v".into(), value: view(&y), expect: A, form: None }];
     assert_eq!(s.write_many(&batch), Err((1, Error::Denied)));
     assert_eq!(s.read(&w).unwrap(), Some(b"w".to_vec()));
     let bad = vec![Put::blob(blake3(b"q"), b"not q".to_vec())];

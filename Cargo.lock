@@ -191,6 +191,7 @@ dependencies = [
  "cas-core",
  "proptest",
  "tempfile",
+ "zstd",
 ]
 
 [[package]]
