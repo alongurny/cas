@@ -103,30 +103,34 @@ the whole history to find the base of a sparse checkout; with that fixed
 
 ### git.git
 
-82,725 commits, git 2.43.0, one run each (REPEAT=1), 2026-11-09 after
-the single-thread round (cas at 3e5dd56 plus the bench build). git's
-clone uses four threads; with `pack.threads=1` it takes 28.5 s.
+82,725 commits, git 2.43.0, one run each (REPEAT=1), 2026-11-09 at
+823507b (bench build). git's clone uses four threads; with
+`pack.threads=1` it takes 28.5 s. Earlier runs timed git fast-import on
+a truncated stream: `fast-export --all` stopped at a commit with a
+declared iso-8859-8 encoding (61k of 83k commits). run.sh now passes
+`--reencode=yes --signed-tags=strip --tag-of-filtered-object=drop`, and
+a failing setup step shows as FAIL.
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.688 | 0.939 | 1.4 |
-| rev-list -- PATH, most-changed file (p0001) | 0.644 | 1.822 | 2.8 |
-| count commits (p5600) | 0.720 | 1.075 | 1.5 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.006 | 0.015 | 2.5 |
-| diff of the last step (p4000) | 0.004 | 0.008 | 2.0 |
-| checkout the tip into an empty dir (p0006) | 0.620 | 0.749 | 1.2 |
-| commit, nothing changed (p0005 status) | 0.218 | 0.417 | 1.9 |
-| commit 500 new files (p0008 odb-fsync) | 0.389 | 0.606 | 1.6 |
-| clone over the network (p5601) | 17.165 | 23.019 | 1.3 |
-| clone without blobs (p5600) | 7.044 | - | - |
-| fetch one file, no clone (cas only) | 0.176 | 0.009 | 0.1 |
-| push one new commit | 0.131 | 0.059 | 0.5 |
-| list every object (p1006 cat-file --batch-all-objects) | 0.747 | 0.253 | 0.3 |
-| merge-base of the tip and a node 100 back (p6010) | 0.009 | 0.019 | 2.1 |
-| last-modified of the root's entries (p8020) | - | 19.260 | - |
-| fsck (p1450) | 26.967 | 29.268 | 1.1 |
-| fast-import (p9300) / import-git | 80.694 | 89.241 | 1.1 |
-| gc (p5600) | 10.707 | 15.304 | 1.4 |
+| rev-list --all (p0001) | 0.823 | 0.305 | 0.4 |
+| rev-list -- PATH, most-changed file (p0001) | 0.732 | 0.429 | 0.6 |
+| count commits (p5600) | 0.763 | 0.272 | 0.4 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.008 | 0.024 | 3.0 |
+| diff of the last step (p4000) | 0.005 | 0.012 | 2.4 |
+| checkout the tip into an empty dir (p0006) | 1.147 | 1.009 | 0.9 |
+| commit, nothing changed (p0005 status) | 0.162 | 0.475 | 2.9 |
+| commit 500 new files (p0008 odb-fsync) | 0.511 | 0.548 | 1.1 |
+| clone over the network (p5601) | 20.156 | 22.595 | 1.1 |
+| clone without blobs (p5600) | 8.662 | - | - |
+| fetch one file, no clone (cas only) | 0.185 | 0.027 | 0.1 |
+| push one new commit | 0.145 | 0.068 | 0.5 |
+| list every object (p1006 cat-file --batch-all-objects) | 0.744 | 0.412 | 0.6 |
+| merge-base of the tip and a node 100 back (p6010) | 0.013 | 0.034 | 2.6 |
+| last-modified of the root's entries (p8020) | - | 3.875 | - |
+| fsck (p1450) | 30.016 | 24.342 | 0.8 |
+| fast-import (p9300) / import-git | 262.744 | 97.002 | 0.4 |
+| gc (p5600) | 12.435 | 13.147 | 1.1 |
 
 ## What the numbers say
 

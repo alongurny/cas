@@ -23,7 +23,7 @@ W=$(realpath "$W"); cd "$W"
 best() {
   local setup=$1 cmd=$2 b=""
   for _ in $(seq "$REPEAT"); do
-    eval "$setup" >/dev/null 2>&1
+    eval "$setup" >/dev/null 2>&1 || { echo FAIL; return; }
     local s e
     s=$(date +%s.%N); eval "$cmd" >/dev/null 2>&1 || { echo FAIL; return; }; e=$(date +%s.%N)
     b=$(echo "$s $e ${b:-1e9}" | awk '{d=$2-$1; print (d<$3)?d:$3}')
@@ -96,7 +96,7 @@ row "last-modified of the root's entries (p8020)" \
   : - : "$CAS --store c last-modified"
 row "fsck (p1450)" : "git -C g.git fsck --no-dangling" : "$CAS --store c fsck"
 row "fast-import (p9300) / import-git" \
-  "rm -rf gi.git; git init -q --bare gi.git; git -C g.git fast-export --all > export" "git -C gi.git fast-import --quiet < export" \
+  "rm -rf gi.git; git init -q --bare gi.git; git -C g.git fast-export --all --reencode=yes --signed-tags=strip --tag-of-filtered-object=drop > export" "git -C gi.git fast-import --quiet < export" \
   "rm -rf ci" "$CAS --store ci import-git $SRC"
 rm -rf ci gi.git export
 row "gc (p5600)" "rm -rf gc.git; cp -r g.git gc.git" "git -C gc.git gc -q" "rm -rf cg; cp -r c cg" "$CAS --store cg gc"
