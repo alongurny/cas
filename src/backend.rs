@@ -23,8 +23,9 @@ pub trait Backend: Send + Sync {
     }
 
     /// [`Backend::put_blobs`] of verified values, each with the form another
-    /// store kept it in, which a backend may keep as it is.
-    fn put_stored(&self, blobs: &[(&str, &[u8], Option<&crate::store::Form>)]) -> io::Result<()> {
+    /// store kept it in, which a backend may keep as it is, and a blob it
+    /// probably resembles, which a backend may keep it as a delta against.
+    fn put_stored(&self, blobs: &[crate::store::StoredPut]) -> io::Result<()> {
         let plain: Vec<(&str, &[u8])> = blobs.iter().map(|b| (b.0, b.1)).collect();
         self.put_blobs(&plain)
     }

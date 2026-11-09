@@ -67,21 +67,28 @@ pub trait Store: Send + Sync {
 
 /// One write of a batch. `form` is how another store kept a blob value
 /// (from [`Store::read_stored_many`]): a store that keeps that form may
-/// keep it as it is. It changes nothing about the write's outcome.
+/// keep it as it is. `like` names a blob this value probably resembles
+/// (the version before, at the same path): a store that keeps deltas may
+/// keep it as one against that blob. Neither changes the write's outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Put {
     pub key: String,
     pub value: Vec<u8>,
     pub expect: Expect,
     pub form: Option<Form>,
+    pub like: Option<String>,
 }
 
 impl Put {
     /// A blob write (expect absent).
     pub fn blob(key: impl Into<String>, value: Vec<u8>) -> Put {
-        Put { key: key.into(), value, expect: Expect::Absent, form: None }
+        Put { key: key.into(), value, expect: Expect::Absent, form: None, like: None }
     }
 }
+
+/// A blob of a durable batch for [`crate::Backend::put_stored`]: key, verified
+/// value, and the [`Put`]'s form and likely base.
+pub type StoredPut<'a> = (&'a str, &'a [u8], Option<&'a Form>, Option<&'a str>);
 
 /// A compressed form of a blob value (spec/wire.md, "Stored forms").
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -280,26 +287,25 @@ impl CoreStore {
     fn write_many(&self, who: &Who, puts: &[Put]) -> std::result::Result<(), (usize, Error)> {
         // The pending run of blobs and the index of its first; a failed
         // flush is reported there, as nothing in the run is known written.
-        let mut run: Vec<(&str, &[u8], Option<&Form>)> = Vec::new();
+        let mut run: Vec<StoredPut> = Vec::new();
         let mut start = 0;
-        let flush =
-            |run: &mut Vec<(&str, &[u8], Option<&Form>)>, start: usize| -> std::result::Result<(), (usize, Error)> {
-                let r = if run.iter().any(|b| b.2.is_some()) {
-                    self.backend.put_stored(run)
-                } else {
-                    let plain: Vec<(&str, &[u8])> = run.iter().map(|b| (b.0, b.1)).collect();
-                    self.backend.put_blobs(&plain)
-                };
-                run.clear();
-                r.map_err(|e| (start, Error::from(e)))
+        let flush = |run: &mut Vec<StoredPut>, start: usize| -> std::result::Result<(), (usize, Error)> {
+            let r = if run.iter().any(|b| b.2.is_some() || b.3.is_some()) {
+                self.backend.put_stored(run)
+            } else {
+                let plain: Vec<(&str, &[u8])> = run.iter().map(|b| (b.0, b.1)).collect();
+                self.backend.put_blobs(&plain)
             };
+            run.clear();
+            r.map_err(|e| (start, Error::from(e)))
+        };
         for (i, p) in puts.iter().enumerate() {
             match self.check_blob_write(who, &p.key, &p.value, &p.expect) {
                 Ok(true) => {
                     if run.is_empty() {
                         start = i;
                     }
-                    run.push((&p.key, &p.value, p.form.as_ref()));
+                    run.push((&p.key, &p.value, p.form.as_ref(), p.like.as_deref()));
                 }
                 Ok(false) => {
                     flush(&mut run, start)?;

@@ -300,10 +300,12 @@ impl DiskBackend {
                 if loose.contains(n) {
                     return new_entry(n);
                 }
+                // A packed delta is kept when it is on the base the hints
+                // pick, or there is no hint; a whole frame when there is no
+                // base to try.
+                let hint = hints.get(n).filter(|b| present.contains(*b));
                 match packs.frame(n)? {
-                    Some(f) if f.base.is_some() || !hints.get(n).is_some_and(|b| present.contains(b)) => {
-                        Ok(Tried::Reuse(f))
-                    }
+                    Some(f) if hint.is_none() || (f.base.is_some() && f.base.as_ref() == hint) => Ok(Tried::Reuse(f)),
                     _ => new_entry(n),
                 }
             })?;
@@ -362,6 +364,12 @@ impl DiskBackend {
                         if matches!(file.first(), Some(0 | 1)) {
                             depth.insert(n.clone(), 0);
                         }
+                        // A delta resolved to its plain value is compressed
+                        // again before it is stored whole.
+                        let file = match file.split_first() {
+                            Some((&RAW, v)) if !n.starts_with('#') => pack(v)?,
+                            _ => file,
+                        };
                         w.add(n, &Entry::File(file))?;
                         out.whole += 1;
                     }
@@ -744,7 +752,7 @@ impl Backend for DiskBackend {
         }
     }
 
-    fn put_stored(&self, blobs: &[(&str, &[u8], Option<&crate::store::Form>)]) -> io::Result<()> {
+    fn put_stored(&self, blobs: &[crate::store::StoredPut]) -> io::Result<()> {
         use crate::pack::{Entry, MAX_DEPTH};
         use crate::store::Form;
         let Some(packs) = self.packs.as_ref().filter(|_| self.encoded && blobs.len() > 1) else {
@@ -752,8 +760,11 @@ impl Backend for DiskBackend {
             return self.put_blobs(&plain);
         };
         let mut todo = Vec::new();
+        let mut once = std::collections::HashSet::new();
         for b in blobs {
-            if !self.has_blob(b.0)? {
+            // Each key once: two forms of one key in a batch could be deltas
+            // on each other.
+            if once.insert(b.0) && !self.has_blob(b.0)? {
                 todo.push(b);
             }
         }
@@ -761,8 +772,25 @@ impl Backend for DiskBackend {
         let batch: std::collections::HashMap<&str, &[u8]> = todo.iter().map(|b| (b.0, b.1)).collect();
         // A form is kept only when it decodes to the value: anything else is
         // compressed again, on every core.
-        let encoded = parallel_map(&todo, |(_, v, form)| {
+        let encoded = parallel_map(&todo, |(key, v, form, like)| {
             if v.len() <= CHUNK_OVER {
+                // A likely base: tried as a delta when no form came with it
+                // (git fast-import's delta against the path's last version).
+                if form.is_none()
+                    && let Some(base) = like.filter(|b| *b != *key)
+                {
+                    let bv = match batch.get(base) {
+                        Some(b) => Some(b.to_vec()),
+                        None => self.get(base)?,
+                    };
+                    let (file, chunks) = self.encode_pure(v)?;
+                    if let Some(bv) = bv.filter(|b| b.len() <= CHUNK_OVER)
+                        && let Some(Entry::Delta { z, .. }) = Entry::delta(base, &bv, v, &file)?
+                    {
+                        return Ok(Enc::Delta(base.to_string(), z));
+                    }
+                    return Ok(Enc::File(file, chunks));
+                }
                 match form {
                     Some(Form::Zstd(z)) if crate::pack::zstd_exact(None, z, v.len()).is_ok_and(|d| d == *v) => {
                         return Ok(Enc::File([&[ZSTD][..], z].concat(), Vec::new()));
@@ -796,7 +824,7 @@ impl Backend for DiskBackend {
         }
         // Chain depths of what this batch writes, for the deltas after them.
         let mut depth: std::collections::HashMap<&str, Option<usize>> = std::collections::HashMap::new();
-        for ((key, value, _), e) in todo.iter().zip(encoded) {
+        for ((key, value, _, _), e) in todo.iter().zip(encoded) {
             match e {
                 Enc::File(file, _) => {
                     depth.insert(key, matches!(file.first(), Some(&RAW | &ZSTD)).then_some(0));

@@ -55,6 +55,11 @@ impl std::hash::Hasher for OidHasher {
 
 type OidMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<OidHasher>>;
 type OidSet<K> = std::collections::HashSet<K, std::hash::BuildHasherDefault<OidHasher>>;
+/// A directory's leaves (greatest name, key) and the blobs above them.
+type DirBlobs = (Vec<(String, String)>, Vec<String>);
+
+/// Fetched file contents by git id and format, not written yet.
+type Bodies = OidMap<(Oid, &'static str), Vec<u8>>;
 
 fn oid(hex: &str) -> Result<Oid> {
     let b = hex.as_bytes();
@@ -198,16 +203,24 @@ struct Importer<'a> {
     trees: OidMap<Oid, View>,
     /// `tree` blobs queued already: big directories share most of theirs.
     chunks: std::collections::HashSet<String>,
+    /// Every key queued for writing.
+    written: cas_core::keyhash::KeySet,
     files: OidMap<(Oid, &'static str), View>,
     /// Leaf keys by a hash of the git entries they hold.
     leaves: OidMap<[u8; 32], String>,
+    /// The key of the last file written at each path: the next version's
+    /// likely delta base.
+    last_at: HashMap<String, String>,
+    /// The leaves (greatest name, key) and the blobs above them of the last
+    /// directory converted at each path, for the next one's delta bases.
+    last_dir: HashMap<String, DirBlobs>,
     n: Imported,
 }
 
 impl Importer<'_> {
     /// [`crate::put`], batched: the write happens at the next flush.
     /// `checked`: the bytes were made here and are valid by construction.
-    fn put(&mut self, alias: &str, bytes: Vec<u8>, checked: bool) -> Result<View> {
+    fn put(&mut self, alias: &str, bytes: Vec<u8>, checked: bool, like: Option<String>) -> Result<View> {
         let f = by_alias(alias).ok_or_else(|| Error::UnknownFormat(alias.to_string()))?;
         let key = self.alg.key(&bytes);
         if checked {
@@ -216,8 +229,15 @@ impl Importer<'_> {
             f.check(&key, &bytes)?;
         }
         let view = View { format: f.id().to_string(), key: key.clone() };
+        // A value met before (the same content under another mode) is not
+        // written again: a second write could make it a delta on a blob
+        // that is itself a delta on it.
+        if !self.written.insert(key.clone()) {
+            return Ok(view);
+        }
         self.pending_bytes += bytes.len();
-        self.pending.push(Put::blob(key, bytes));
+        let like = like.filter(|l| *l != key);
+        self.pending.push(Put { like, ..Put::blob(key, bytes) });
         if self.pending_bytes >= 128 << 20 {
             self.flush()?;
         }
@@ -231,9 +251,9 @@ impl Importer<'_> {
     }
 
     /// Fetch every tree and file under `roots` that is not converted yet,
-    /// one level at a time (one round trip to git each), writing the files.
-    /// The trees' contents are left in `raw`.
-    fn fetch(&mut self, roots: &[Oid], raw: &mut OidMap<Oid, Vec<u8>>) -> Result<()> {
+    /// one level at a time (one round trip to git each). The trees'
+    /// contents are left in `raw`, the files' in `bodies`.
+    fn fetch(&mut self, roots: &[Oid], raw: &mut OidMap<Oid, Vec<u8>>, bodies: &mut Bodies) -> Result<()> {
         let mut want: Vec<Oid> =
             roots.iter().filter(|r| !self.trees.contains_key(*r) && !raw.contains_key(*r)).copied().collect();
         want.sort_unstable();
@@ -265,13 +285,8 @@ impl Importer<'_> {
                 }
                 raw.insert(*id, body);
             }
-            for (id, alias) in std::mem::take(&mut files) {
-                let body = got.next().unwrap();
-                if !self.files.contains_key(&(id, alias)) {
-                    let v = self.put(alias, body, false)?;
-                    self.files.insert((id, alias), v);
-                    self.n.files += 1;
-                }
+            for f in std::mem::take(&mut files) {
+                bodies.insert(f, got.next().unwrap());
             }
             files = new_files;
             want = next;
@@ -279,11 +294,31 @@ impl Importer<'_> {
         Ok(())
     }
 
+    /// The view of git file `id` at `path`, written from `bodies` the first
+    /// time, with the path's last version as its likely delta base.
+    fn file(&mut self, id: &Oid, alias: &'static str, bodies: &mut Bodies, path: String) -> Result<View> {
+        let v = match self.files.get(&(*id, alias)) {
+            Some(v) => v.clone(),
+            None => {
+                let body = bodies
+                    .remove(&(*id, alias))
+                    .ok_or_else(|| Error::Io(format!("git blob {} not fetched", hex(id))))?;
+                let like = self.last_at.get(&path).cloned();
+                let v = self.put(alias, body, false, like)?;
+                self.files.insert((*id, alias), v.clone());
+                self.n.files += 1;
+                v
+            }
+        };
+        self.last_at.insert(path, v.key().to_string());
+        Ok(v)
+    }
+
     /// The `tree` view of git tree `id`, whose contents (and those of every
     /// tree under it not converted yet) [`Importer::fetch`] left in `raw`.
     /// A leaf whose git entries (name, mode, id) were met before is not
     /// encoded again: in most new trees only one leaf changed.
-    fn tree(&mut self, id: &Oid, raw: &OidMap<Oid, Vec<u8>>) -> Result<View> {
+    fn tree(&mut self, id: &Oid, raw: &OidMap<Oid, Vec<u8>>, bodies: &mut Bodies, path: &str) -> Result<View> {
         if let Some(v) = self.trees.get(id) {
             return Ok(v.clone());
         }
@@ -309,7 +344,7 @@ impl Importer<'_> {
             let (top, blobs) = TREE.blobs(self.alg, &[]);
             for (k, b) in blobs {
                 if self.chunks.insert(k) {
-                    self.put("tree", b, true)?;
+                    self.put("tree", b, true, None)?;
                 }
             }
             let v = View { format: format.to_string(), key: top };
@@ -338,14 +373,22 @@ impl Importer<'_> {
                 None => {
                     let mut items = Vec::with_capacity(part.len());
                     for (name, alias, c) in part {
+                        let at = if path.is_empty() { name.to_string() } else { format!("{path}/{name}") };
                         let child = match alias {
-                            None => self.tree(c, raw)?,
-                            Some(a) => self.files[&(*c, *a)].clone(),
+                            None => self.tree(c, raw, bodies, &at)?,
+                            Some(a) => self.file(c, a, bodies, at)?,
                         };
                         items.push(Item { name: name.to_string(), child });
                     }
                     let bytes = crate::dir::tree_leaf(&items);
-                    let k = self.put("tree", bytes, true)?.key;
+                    // Like the leaf of this path's last version that covered
+                    // the same names, as gc pairs them.
+                    let last = part.last().unwrap().0;
+                    let like = self.last_dir.get(path).and_then(|(ls, _)| {
+                        ls.get(ls.partition_point(|(l, _)| l.as_str() < last).min(ls.len().saturating_sub(1)))
+                            .map(|l| l.1.clone())
+                    });
+                    let k = self.put("tree", bytes, true, like)?.key;
                     self.chunks.insert(k.clone());
                     self.leaves.insert(fp, k.clone());
                     k
@@ -354,12 +397,18 @@ impl Importer<'_> {
             leaves.push((part.last().unwrap().0.to_string(), key, h));
         }
         let mut blobs = Vec::new();
+        let leaf_list: Vec<(String, String)> = leaves.iter().map(|(l, k, _)| (l.clone(), k.clone())).collect();
         let top = crate::dir::tree_upper(self.alg, leaves, &mut blobs);
-        for (k, b) in blobs {
+        let old_upper = self.last_dir.get(path).map(|(_, u)| u.clone()).unwrap_or_default();
+        let mut upper = Vec::with_capacity(blobs.len());
+        for (i, (k, b)) in blobs.into_iter().enumerate() {
+            upper.push(k.clone());
             if self.chunks.insert(k) {
-                self.put("tree", b, true)?;
+                let like = old_upper.get(i.min(old_upper.len().saturating_sub(1))).cloned();
+                self.put("tree", b, true, like)?;
             }
         }
+        self.last_dir.insert(path.to_string(), (leaf_list, upper));
         let v = View { format: format.to_string(), key: top };
         self.trees.insert(*id, v.clone());
         self.n.trees += 1;
@@ -380,8 +429,11 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
         cat: CatFile::start(repo)?,
         trees: OidMap::default(),
         chunks: Default::default(),
+        written: Default::default(),
         files: OidMap::default(),
         leaves: OidMap::default(),
+        last_at: HashMap::new(),
+        last_dir: HashMap::new(),
         n: Imported::default(),
         pending: Vec::new(),
         pending_bytes: 0,
@@ -400,10 +452,10 @@ pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &s
             };
             parsed.push((commit, parents, oid(tree)?, message));
         }
-        let mut raw = OidMap::default();
-        im.fetch(&parsed.iter().map(|p| p.2).collect::<Vec<_>>(), &mut raw)?;
+        let (mut raw, mut bodies) = (OidMap::default(), Bodies::default());
+        im.fetch(&parsed.iter().map(|p| p.2).collect::<Vec<_>>(), &mut raw, &mut bodies)?;
         for (commit, parents, tree, message) in parsed {
-            let version = im.tree(&tree, &raw)?;
+            let version = im.tree(&tree, &raw, &mut bodies, "")?;
             let message = message.trim_end();
             let step = Step { changelog: (!message.is_empty()).then(|| message.to_string()), compatible: false };
             let mut after = BTreeMap::new();

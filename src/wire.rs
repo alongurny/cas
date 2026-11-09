@@ -248,7 +248,7 @@ pub fn decode_puts(mut body: &[u8]) -> Option<Vec<crate::store::Put>> {
         let (expect, rest) = decode_expect(body)?;
         body = rest;
         let value = take_frame(&mut body)?.to_vec();
-        out.push(crate::store::Put { key, value, expect, form: None });
+        out.push(crate::store::Put { key, value, expect, form: None, like: None });
     }
     Some(out)
 }

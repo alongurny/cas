@@ -790,11 +790,13 @@ impl Packs {
         Ok(out.into_iter().take(limit).collect())
     }
 
-    /// Keep the number of packs logarithmic, like git's geometric repack
-    /// (`git repack --geometric=2`): packs are in age order, and the newest
-    /// ones are merged into one while the pack before them holds at most
-    /// twice as many entries as they do together. Each entry is then
-    /// copied O(log n) times in all, and a lookup searches O(log n) packs.
+    /// Keep the number of packs logarithmic, like git's geometric repack:
+    /// packs are in age order, and the newest ones are merged into one
+    /// while the pack before them holds at most as many entries as they do
+    /// together (a binary counter: after n equal batches the packs hold the
+    /// binary digits of n). Each entry is then copied at most log2 n times
+    /// in all, and a lookup searches O(log n) packs. A factor of 2 instead
+    /// copied two thirds more during a clone.
     /// Frames are copied as they are, deltas included. Best effort: another
     /// process compacting at the same time makes this one skip.
     pub fn compact(&self, tmp: &Path) -> io::Result<()> {
@@ -811,7 +813,7 @@ impl Packs {
         };
         let Some(last) = ids.len().checked_sub(1) else { return Ok(()) };
         let (mut first, mut acc) = (last, sizes[last]);
-        while first > 0 && sizes[first - 1] <= 2 * acc {
+        while first > 0 && sizes[first - 1] <= acc {
             first -= 1;
             acc += sizes[first];
         }

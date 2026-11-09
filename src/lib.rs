@@ -28,5 +28,5 @@ pub mod conformance;
 pub use backend::Backend;
 pub use gate::{AllowAll, DenyAll, Gate, Op, Who};
 pub use policy::Policy;
-pub use store::{CoreStore, Form, Put, Session, Store, Stored, list_all};
+pub use store::{CoreStore, Form, Put, Session, Store, Stored, StoredPut, list_all};
 pub use types::{Error, Expect, Invalid, ListPage, Result, Span};
