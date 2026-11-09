@@ -44,7 +44,7 @@ const CHUNKED: u8 = 2;
 
 /// `bytes` behind a one-byte header, compressed when that is smaller.
 fn pack(bytes: &[u8]) -> io::Result<Vec<u8>> {
-    let z = zstd::bulk::compress(bytes, 3)?;
+    let z = crate::pack::zstd3(bytes)?;
     Ok(if z.len() < bytes.len() { [&[ZSTD][..], &z].concat() } else { [&[RAW][..], bytes].concat() })
 }
 
@@ -113,7 +113,7 @@ impl DiskBackend {
             self.store_chunk(&id, piece, pending.as_deref_mut())?;
             ids.extend_from_slice(&id);
         }
-        let z = zstd::bulk::compress(&ids, 3)?;
+        let z = crate::pack::zstd3(&ids)?;
         Ok([&[CHUNKED][..], &z].concat())
     }
 
@@ -134,7 +134,7 @@ impl DiskBackend {
             }
             ids.extend_from_slice(&id);
         }
-        let z = zstd::bulk::compress(&ids, 3)?;
+        let z = crate::pack::zstd3(&ids)?;
         Ok(([&[CHUNKED][..], &z].concat(), chunks))
     }
 

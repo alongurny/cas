@@ -39,8 +39,23 @@ const BITS: u32 = 6;
 
 /// How many levels a name ends a blob at (spec/formats/tree.md).
 pub fn height(name: &str) -> u32 {
+    // Names repeat across the versions of a directory: remember them.
+    thread_local! {
+        static SEEN: std::cell::RefCell<std::collections::HashMap<Box<str>, u32>> = Default::default();
+    }
+    if let Some(h) = SEEN.with(|m| m.borrow().get(name).copied()) {
+        return h;
+    }
     let h = blake3_alg().hash(name.as_bytes());
-    u64::from_le_bytes(h[..8].try_into().unwrap()).trailing_zeros() / BITS
+    let h = u64::from_le_bytes(h[..8].try_into().unwrap()).trailing_zeros() / BITS;
+    SEEN.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= 1 << 20 {
+            m.clear();
+        }
+        m.insert(name.into(), h);
+    });
+    h
 }
 
 fn blake3_alg() -> &'static Algorithm {
@@ -279,16 +294,24 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// The algorithm table of a blob: the names of the algorithms of its keys.
 fn alg_table<'k>(keys: impl Iterator<Item = &'k str>) -> Vec<&'k str> {
-    let set: BTreeSet<&str> = keys.map(|k| k.split_once(':').unwrap().0).collect();
-    set.into_iter().collect()
+    let mut algs: Vec<&str> = Vec::with_capacity(1);
+    for k in keys {
+        let a = k.split_once(':').unwrap().0;
+        // Nearly always one algorithm: a linear look beats a set.
+        if !algs.contains(&a) {
+            algs.push(a);
+        }
+    }
+    algs.sort_unstable();
+    algs
 }
 
 fn put_key(out: &mut Vec<u8>, algs: &[&str], key: &str) {
     let (alg, hex) = key.split_once(':').unwrap();
     varint(out, algs.binary_search(&alg).unwrap() as u64);
     let h = hex.as_bytes();
-    let val = |c: u8| (c as char).to_digit(16).unwrap() as u8;
-    out.extend(h.chunks(2).map(|p| (val(p[0]) << 4) | val(p[1])));
+    let val = |c: u8| if c <= b'9' { c - b'0' } else { (c | 0x20) - b'a' + 10 };
+    out.extend(h.chunks_exact(2).map(|p| (val(p[0]) << 4) | val(p[1])));
 }
 
 fn get_key(r: &mut Reader, algs: &[&'static Algorithm], used: &mut [bool]) -> std::result::Result<String, String> {
@@ -352,40 +375,50 @@ fn get_algs(r: &mut Reader) -> std::result::Result<Vec<&'static Algorithm>, Stri
 
 /// The bytes of one blob. Only the whole empty directory is empty.
 pub fn tree_encode(blob: &Blob) -> Vec<u8> {
-    let mut out = Vec::new();
     match blob {
-        Blob::Items(items) if items.is_empty() => {}
-        Blob::Items(items) => {
-            out.push(0);
-            let algs = alg_table(items.iter().flat_map(|i| [i.child.format(), i.child.key()]));
-            put_algs(&mut out, &algs);
-            let formats: Vec<&str> =
-                items.iter().map(|i| i.child.format()).collect::<BTreeSet<_>>().into_iter().collect();
-            varint(&mut out, formats.len() as u64);
-            for f in &formats {
-                put_key(&mut out, &algs, f);
-            }
-            varint(&mut out, items.len() as u64);
-            let mut prev = "";
-            for i in items {
-                put_name(&mut out, prev, &i.name);
-                varint(&mut out, formats.binary_search(&i.child.format()).unwrap() as u64);
-                put_key(&mut out, &algs, i.child.key());
-                prev = &i.name;
-            }
-        }
-        Blob::Parts { level, parts } => {
-            varint(&mut out, *level);
-            let algs = alg_table(parts.iter().map(|(_, k)| k.as_str()));
-            put_algs(&mut out, &algs);
-            varint(&mut out, parts.len() as u64);
-            let mut prev = "";
-            for (name, key) in parts {
-                put_name(&mut out, prev, name);
-                put_key(&mut out, &algs, key);
-                prev = name;
-            }
-        }
+        Blob::Items(items) => encode_items(items),
+        Blob::Parts { level, parts } => encode_parts(*level, parts),
+    }
+}
+
+fn encode_items(items: &[Item]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + items.len() * 48);
+    if items.is_empty() {
+        return out;
+    }
+    out.push(0);
+    let algs = alg_table(items.iter().flat_map(|i| [i.child.format(), i.child.key()]));
+    put_algs(&mut out, &algs);
+    let mut formats: Vec<&str> = items.iter().map(|i| i.child.format()).collect();
+    formats.sort_unstable();
+    formats.dedup();
+    varint(&mut out, formats.len() as u64);
+    for f in &formats {
+        put_key(&mut out, &algs, f);
+    }
+    varint(&mut out, items.len() as u64);
+    let mut prev = "";
+    for i in items {
+        put_name(&mut out, prev, &i.name);
+        let fi = if formats.len() == 1 { 0 } else { formats.binary_search(&i.child.format()).unwrap() };
+        varint(&mut out, fi as u64);
+        put_key(&mut out, &algs, i.child.key());
+        prev = &i.name;
+    }
+    out
+}
+
+fn encode_parts(level: u64, parts: &[(String, String)]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(16 + parts.len() * 48);
+    varint(&mut out, level);
+    let algs = alg_table(parts.iter().map(|(_, k)| k.as_str()));
+    put_algs(&mut out, &algs);
+    varint(&mut out, parts.len() as u64);
+    let mut prev = "";
+    for (name, key) in parts {
+        put_name(&mut out, prev, name);
+        put_key(&mut out, &algs, key);
+        prev = name;
     }
     out
 }
@@ -480,54 +513,79 @@ fn decode(b: &[u8], check_cut: bool) -> std::result::Result<Blob, String> {
     Ok(blob)
 }
 
-/// Cut `items` (sorted by name) after each name higher than `level`.
-fn cut<T>(items: Vec<T>, name: impl Fn(&T) -> &str, level: u64) -> Vec<Vec<T>> {
-    let mut out = Vec::new();
-    let mut cur = Vec::new();
-    for it in items {
-        let end = u64::from(height(name(&it))) > level;
-        cur.push(it);
-        if end {
-            out.push(std::mem::take(&mut cur));
-        }
-    }
-    if !cur.is_empty() {
-        out.push(cur);
-    }
-    out
-}
-
 fn tree_blobs(alg: &'static Algorithm, items: &[Item]) -> (String, Vec<(String, Vec<u8>)>) {
     let mut out = Vec::new();
-    let emit = |blob: Blob, out: &mut Vec<(String, Vec<u8>)>| {
-        let bytes = tree_encode(&blob);
-        let key = alg.key(&bytes);
-        out.push((key.clone(), bytes));
-        key
-    };
     if items.is_empty() {
-        let k = emit(Blob::Items(Vec::new()), &mut out);
+        let bytes = encode_items(&[]);
+        let k = alg.key(&bytes);
+        out.push((k.clone(), bytes));
         return (k, out);
     }
-    let mut list: Vec<(String, String)> = cut(items.to_vec(), |i: &Item| &i.name, 0)
-        .into_iter()
-        .map(|c| {
-            let last = c.last().unwrap().name.clone();
-            (last, emit(Blob::Items(c), &mut out))
+    // Leaves end after each name of height above 0; each part above keeps
+    // its greatest name's height, for the cuts on the next levels.
+    let mut leaves = Vec::new();
+    let mut start = 0;
+    for (i, it) in items.iter().enumerate() {
+        let h = height(&it.name);
+        if h > 0 || i + 1 == items.len() {
+            let bytes = encode_items(&items[start..=i]);
+            let key = alg.key(&bytes);
+            out.push((key.clone(), bytes));
+            leaves.push((it.name.clone(), key, h));
+            start = i + 1;
+        }
+    }
+    let top = tree_upper(alg, leaves, &mut out);
+    (top, out)
+}
+
+/// The leaf of a `tree` directory holding `items` (sorted, valid names,
+/// at least one), as [`tree_cut`] cuts them: its bytes.
+pub(crate) fn tree_leaf(items: &[Item]) -> Vec<u8> {
+    debug_assert!(!items.is_empty());
+    encode_items(items)
+}
+
+/// Where the leaves of a `tree` directory end: after each index whose
+/// name has height above 0, and after the last.
+pub(crate) fn tree_cut<'n>(names: impl ExactSizeIterator<Item = &'n str>) -> Vec<(usize, u32)> {
+    let n = names.len();
+    names
+        .enumerate()
+        .filter_map(|(i, name)| {
+            let h = height(name);
+            (h > 0 || i + 1 == n).then_some((i, h))
         })
-        .collect();
+        .collect()
+}
+
+/// The blobs above `leaves` (greatest name, key, that name's height) of a
+/// `tree` directory, appended to `out`; the key of the top.
+pub(crate) fn tree_upper(
+    alg: &'static Algorithm,
+    mut list: Vec<(String, String, u32)>,
+    out: &mut Vec<(String, Vec<u8>)>,
+) -> String {
     let mut level = 1;
     while list.len() > 1 {
-        list = cut(list, |p: &(String, String)| &p.0, level)
-            .into_iter()
-            .map(|c| {
-                let last = c.last().unwrap().0.clone();
-                (last, emit(Blob::Parts { level, parts: c }, &mut out))
-            })
-            .collect();
+        let mut next = Vec::new();
+        let mut cur: Vec<(String, String)> = Vec::new();
+        let n = list.len();
+        for (i, (name, key, h)) in list.into_iter().enumerate() {
+            cur.push((name, key));
+            if u64::from(h) > level || i + 1 == n {
+                let last = cur.last().unwrap().0.clone();
+                let bytes = encode_parts(level, &cur);
+                let key = alg.key(&bytes);
+                out.push((key.clone(), bytes));
+                next.push((last, key, h));
+                cur.clear();
+            }
+        }
+        list = next;
         level += 1;
     }
-    (list.pop().unwrap().1, out)
+    list.pop().unwrap().1
 }
 
 fn read_tree_blob(store: &dyn Store, key: &str) -> Result<Blob> {
