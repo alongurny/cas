@@ -13,6 +13,7 @@ pub mod client;
 pub mod disk;
 pub mod gate;
 pub mod key;
+pub mod keyhash;
 pub mod mem;
 pub mod pack;
 pub mod policy;

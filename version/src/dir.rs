@@ -75,6 +75,21 @@ impl Dir {
         }
     }
 
+    /// [`Dir::blob_children`] without the checks of the encoding and
+    /// without the children `skip` says to leave out, for walks over blobs
+    /// read before (gc's mark).
+    pub(crate) fn blob_children_light(
+        &self,
+        key: &str,
+        bytes: &[u8],
+        skip: &dyn Fn(&str) -> bool,
+    ) -> Result<Vec<View>> {
+        match self {
+            Dir::Text => Ok(self.blob_children(key, bytes)?.into_iter().filter(|v| !skip(v.key())).collect()),
+            Dir::Tree => tree_children(bytes, skip).map_err(|e| malformed(key, e)),
+        }
+    }
+
     /// The views inside one blob: the entries, or a `tree` blob's parts.
     pub fn blob_children(&self, key: &str, bytes: &[u8]) -> Result<Vec<View>> {
         match self {
@@ -169,6 +184,140 @@ fn tree_find_memo(
     };
     memo.insert(id, a.clone());
     Ok(a)
+}
+
+/// The entries of a `tree` leaf one at a time, without allocating each:
+/// for merge-joins of leaves (gc's pairing). Checks bounds and indices,
+/// not the canonical form.
+pub(crate) struct LeafIter<'a> {
+    r: Reader<'a>,
+    algs: Vec<&'static Algorithm>,
+    formats: Vec<String>,
+    left: usize,
+    name: Vec<u8>,
+    alg: Option<&'static Algorithm>,
+    digest: &'a [u8],
+    fi: usize,
+}
+
+impl<'a> LeafIter<'a> {
+    /// `None` when `b` is not a leaf (an inner blob).
+    pub(crate) fn new(b: &'a [u8]) -> std::result::Result<Option<LeafIter<'a>>, String> {
+        let mut it = LeafIter {
+            r: Reader { b, at: 0 },
+            algs: Vec::new(),
+            formats: Vec::new(),
+            left: 0,
+            name: Vec::new(),
+            alg: None,
+            digest: &[],
+            fi: 0,
+        };
+        if b.is_empty() {
+            return Ok(Some(it));
+        }
+        if it.r.varint()? != 0 {
+            return Ok(None);
+        }
+        it.algs = get_algs(&mut it.r)?;
+        let mut used = vec![false; it.algs.len()];
+        let nf = it.r.count()?;
+        it.formats = (0..nf).map(|_| get_key(&mut it.r, &it.algs, &mut used)).collect::<std::result::Result<_, _>>()?;
+        it.left = it.r.count()?;
+        Ok(Some(it))
+    }
+
+    /// Step to the next entry; false at the end.
+    pub(crate) fn advance(&mut self) -> std::result::Result<bool, String> {
+        if self.left == 0 {
+            return Ok(false);
+        }
+        self.left -= 1;
+        let shared = self.r.varint()? as usize;
+        let len = self.r.count()?;
+        let rest = self.r.take(len)?;
+        self.name.truncate(shared.min(self.name.len()));
+        if self.name.len() != shared {
+            return Err("shared prefix too long".into());
+        }
+        self.name.extend_from_slice(rest);
+        self.fi = self.r.varint()? as usize;
+        if self.fi >= self.formats.len() {
+            return Err("format index out of range".into());
+        }
+        let a = *self.algs.get(self.r.varint()? as usize).ok_or("algorithm index out of range")?;
+        self.alg = Some(a);
+        self.digest = self.r.take(a.digest_len)?;
+        Ok(true)
+    }
+
+    pub(crate) fn name(&self) -> &[u8] {
+        &self.name
+    }
+
+    /// Whether this entry's child has the same key as `other`'s.
+    pub(crate) fn same_key(&self, other: &LeafIter) -> bool {
+        self.digest == other.digest && self.alg.map(|a| a.name) == other.alg.map(|a| a.name)
+    }
+
+    /// The entry as a view.
+    pub(crate) fn view(&self) -> View {
+        let a = self.alg.expect("an entry was read");
+        let mut key = String::with_capacity(a.name.len() + 1 + 2 * self.digest.len());
+        key.push_str(a.name);
+        key.push(':');
+        for b in self.digest {
+            key.push(HEX[(b >> 4) as usize] as char);
+            key.push(HEX[(b & 15) as usize] as char);
+        }
+        View { format: self.formats[self.fi].clone(), key }
+    }
+}
+
+/// The views a `tree` blob holds, in one pass that allocates only them:
+/// for walks such as gc's mark, which need the children and not the
+/// names. Checks bounds and indices, not the canonical form.
+pub(crate) fn tree_children(b: &[u8], skip: &dyn Fn(&str) -> bool) -> std::result::Result<Vec<View>, String> {
+    if b.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut r = Reader { b, at: 0 };
+    let level = r.varint()?;
+    let algs = get_algs(&mut r)?;
+    let mut used = vec![false; algs.len()];
+    let formats: Vec<String> = if level == 0 {
+        let nf = r.count()?;
+        (0..nf).map(|_| get_key(&mut r, &algs, &mut used)).collect::<std::result::Result<_, _>>()?
+    } else {
+        Vec::new()
+    };
+    let n = r.count()?;
+    let mut out = Vec::new();
+    let mut buf = Vec::new();
+    for _ in 0..n {
+        r.varint()?;
+        let len = r.count()?;
+        r.take(len)?;
+        let fi = if level == 0 { Some(r.varint()? as usize) } else { None };
+        let a = *algs.get(r.varint()? as usize).ok_or("algorithm index out of range")?;
+        buf.clear();
+        buf.extend_from_slice(a.name.as_bytes());
+        buf.push(b':');
+        hex_into(&mut buf, r.take(a.digest_len)?);
+        let key = std::str::from_utf8(&buf).map_err(|_| "algorithm name is not UTF-8")?;
+        if skip(key) {
+            continue;
+        }
+        let format = match fi {
+            Some(fi) => formats.get(fi).ok_or("format index out of range")?.clone(),
+            None => tree_format().to_string(),
+        };
+        out.push(View { format, key: key.to_string() });
+    }
+    if r.at != b.len() {
+        return Err("trailing bytes".into());
+    }
+    Ok(out)
 }
 
 /// One pass over a `tree` blob for `name`, allocating only the answer: its
@@ -292,6 +441,14 @@ impl<'a> Reader<'a> {
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
+/// `bytes` in lowercase hex, appended to `out`.
+fn hex_into(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.reserve(2 * bytes.len());
+    for &b in bytes {
+        out.extend_from_slice(&[HEX[usize::from(b >> 4)], HEX[usize::from(b & 15)]]);
+    }
+}
+
 /// The algorithm table of a blob: the names of the algorithms of its keys.
 fn alg_table<'k>(keys: impl Iterator<Item = &'k str>) -> Vec<&'k str> {
     let mut algs: Vec<&str> = Vec::with_capacity(1);
@@ -319,14 +476,11 @@ fn get_key(r: &mut Reader, algs: &[&'static Algorithm], used: &mut [bool]) -> st
     let a = *algs.get(i).ok_or("algorithm index out of range")?;
     used[i] = true;
     let d = r.take(a.digest_len)?;
-    let mut s = String::with_capacity(a.name.len() + 1 + 2 * d.len());
-    s.push_str(a.name);
-    s.push(':');
-    for b in d {
-        s.push(HEX[(b >> 4) as usize] as char);
-        s.push(HEX[(b & 15) as usize] as char);
-    }
-    Ok(s)
+    let mut s = Vec::with_capacity(a.name.len() + 1 + 2 * d.len());
+    s.extend_from_slice(a.name.as_bytes());
+    s.push(b':');
+    hex_into(&mut s, d);
+    String::from_utf8(s).map_err(|_| "algorithm name is not UTF-8".into())
 }
 
 fn put_name(out: &mut Vec<u8>, prev: &str, name: &str) {

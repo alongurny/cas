@@ -42,6 +42,15 @@ pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     }
 }
 
+/// [`children`] without checking a directory blob's encoding, and without
+/// those `skip` says to leave out: for gc.
+pub(crate) fn children_light(store: &dyn Store, r: &View, skip: &dyn Fn(&str) -> bool) -> Result<Vec<View>> {
+    match r.known_format().map(|f| &f.kind) {
+        Some(Kind::Dir(d)) => d.blob_children_light(r.key(), &read_blob(store, r.key())?, skip),
+        _ => Ok(children(store, r)?.into_iter().filter(|v| !skip(v.key())).collect()),
+    }
+}
+
 /// Copy one raw blob unless the destination has it.
 fn copy_blob(src: &dyn Store, dst: &dyn Store, key: &str, n: &mut Copied) -> Result<()> {
     if has(dst, key)? {

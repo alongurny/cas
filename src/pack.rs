@@ -665,6 +665,23 @@ impl Packs {
 
     /// The frame stored for `name`, as it is in its pack, to copy into
     /// another pack unchanged (a repack reusing deltas, as git does).
+    /// `f` of a packed `name`'s file data (`None` for a delta), read in
+    /// place: for scans that look at one byte of every blob.
+    pub fn peek<R>(&self, name: &str, f: impl FnOnce(Option<&[u8]>) -> io::Result<R>) -> io::Result<Option<R>> {
+        let Some((loc, map)) = self.locate_mapped(name, false)? else { return Ok(None) };
+        let mut b = map.bytes().get(loc.offset as usize..).ok_or_else(|| bad("offset past the pack"))?;
+        let kind = take(&mut b, 1)?[0];
+        let n = take_u16(&mut b)?;
+        take(&mut b, n)?;
+        let n = take_u32(&mut b)?;
+        let data = take(&mut b, n)?;
+        match kind {
+            FILE => f(Some(data)).map(Some),
+            DELTA => f(None).map(Some),
+            k => Err(bad(format!("frame kind {k}"))),
+        }
+    }
+
     pub fn frame(&self, name: &str) -> io::Result<Option<Frame>> {
         let Some((loc, map)) = self.locate_mapped(name, false)? else { return Ok(None) };
         frame_at(&map, loc)

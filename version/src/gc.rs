@@ -5,15 +5,16 @@
 //! phase: a blob is removed only when two runs in a row found it
 //! unreachable, so a writer has until the next run to link what it wrote.
 
-use crate::dir::{Blob, tree_decode_uncut};
+use crate::dir::LeafIter;
 use crate::formats::{self, METAFORMAT};
 use crate::history::{self, NodeId};
-use crate::sync::children;
+use crate::sync::children_light;
 use crate::tree;
 use crate::uni::Value;
 use crate::{Result, View, by_alias, is_blob_key, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::key::{Parsed, classify};
+use cas_core::keyhash::KeySet;
 use cas_core::{Expect, Span, Store, list_all};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -72,9 +73,9 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
 }
 
 /// Every blob reachable from the variables in `store`.
-pub fn mark(store: &dyn Store) -> Result<HashSet<String>> {
+pub fn mark(store: &dyn Store) -> Result<KeySet> {
     let keys = list_all(store, &Span::all())?;
-    let mut marked = HashSet::new();
+    let mut marked = KeySet::default();
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
     let mut todo: Vec<View> = Vec::new();
     for k in &keys {
@@ -99,9 +100,9 @@ pub fn mark(store: &dyn Store) -> Result<HashSet<String>> {
         if !marked.insert(r.key().to_string()) {
             continue;
         }
-        match children(store, &r) {
+        match children_light(store, &r, &|k| marked.contains(k)) {
             Ok(c) => {
-                todo.extend(c.into_iter().filter(|c| !marked.contains(c.key())));
+                todo.extend(c);
                 // Versions oldest first, each walked before the next, as
                 // fsck does: blobs are deltas on the version before's.
                 if r.known_format().is_some_and(|f| f.alias == "history")
@@ -280,21 +281,47 @@ fn pair_trees(
             }
         }
     }
-    let mut olds: HashMap<String, View> = HashMap::new();
-    for (_, k) in &old_only {
-        if let Blob::Items(items) =
-            tree_decode_uncut(&crate::read_blob(store, k)?).map_err(|e| crate::malformed(k, e))?
-        {
-            olds.extend(items.into_iter().map(|i| (i.name, i.child)));
-        }
-    }
+    // A merge-join of the differing leaves, old and new, by name: only the
+    // entries that changed are made into views.
+    let read = |k: &str| crate::read_blob(store, k);
+    let bad = |k: &str, e: String| crate::malformed(k, e);
+    let old_bytes: Vec<(&str, Vec<u8>)> =
+        old_only.iter().map(|(_, k)| Ok((k.as_str(), read(k)?))).collect::<Result<_>>()?;
+    let mut olds = old_bytes.iter().filter_map(|(k, b)| LeafIter::new(b).map_err(|e| bad(k, e)).transpose());
+    let mut cur = olds.next().transpose()?;
+    let mut has_old = match cur.as_mut() {
+        Some(c) => c.advance().map_err(|e| bad("old leaf", e))?,
+        None => false,
+    };
     for (_, k) in &new_only {
-        if let Blob::Items(items) =
-            tree_decode_uncut(&crate::read_blob(store, k)?).map_err(|e| crate::malformed(k, e))?
-        {
-            for item in items {
-                pair(store, olds.get(&item.name), &item.child, order, hints, walked, placed)?;
+        let bytes = read(k)?;
+        let Some(mut it) = LeafIter::new(&bytes).map_err(|e| bad(k, e))? else { continue };
+        while it.advance().map_err(|e| bad(k, e))? {
+            // Old entries before this name are gone from the new directory.
+            loop {
+                if !has_old {
+                    match olds.next().transpose()? {
+                        Some(mut c) => {
+                            has_old = c.advance().map_err(|e| bad("old leaf", e))?;
+                            cur = Some(c);
+                            continue;
+                        }
+                        None => break,
+                    }
+                }
+                let c = cur.as_mut().unwrap();
+                if c.name() < it.name() {
+                    has_old = c.advance().map_err(|e| bad("old leaf", e))?;
+                } else {
+                    break;
+                }
             }
+            let same_name = has_old && cur.as_ref().is_some_and(|c| c.name() == it.name());
+            if same_name && cur.as_ref().unwrap().same_key(&it) {
+                continue;
+            }
+            let old = same_name.then(|| cur.as_ref().unwrap().view());
+            pair(store, old.as_ref(), &it.view(), order, hints, walked, placed)?;
         }
     }
     Ok(())

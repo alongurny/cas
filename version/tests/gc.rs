@@ -90,3 +90,44 @@ fn history_and_format_objects_are_reachable() {
     let dir = formats::by_alias("dir").unwrap();
     assert!(marked.contains(dir.id()));
 }
+
+/// Delta hints between big `tree` directories pair each changed file with
+/// its old self by name, across leaves that differ, and skip what did not
+/// change.
+#[test]
+fn hints_pair_changed_files_of_big_directories_by_name() {
+    let s = store();
+    let tree = formats::by_alias("tree").unwrap();
+    let mut m = BTreeMap::new();
+    for i in 0..3000 {
+        m.insert(
+            Path::new(format!("f{i:05}")).unwrap(),
+            Node::File(put(&*s, b3(), "raw", format!("v1 {i}").as_bytes()).unwrap()),
+        );
+    }
+    let v1 = build(&*s, b3(), tree, &m).unwrap();
+    history::commit(&*s, b3(), "main", &v1, history::Step::default(), None).unwrap();
+    let changed = [7usize, 1500, 1501, 2999];
+    let mut m2 = m.clone();
+    for i in changed {
+        m2.insert(
+            Path::new(format!("f{i:05}")).unwrap(),
+            Node::File(put(&*s, b3(), "raw", format!("v2 {i}").as_bytes()).unwrap()),
+        );
+    }
+    // One removed and one added name too.
+    m2.remove(&Path::new("f00100").unwrap());
+    m2.insert(Path::new("f01500x").unwrap(), Node::File(put(&*s, b3(), "raw", b"new").unwrap()));
+    let v2 = build(&*s, b3(), tree, &m2).unwrap();
+    history::commit(&*s, b3(), "main", &v2, history::Step::default(), None).unwrap();
+    let (_, hints) = gc::delta_hints(&*s, &|_| false).unwrap();
+    let key = |m: &BTreeMap<Path, Node>, i: usize| match &m[&Path::new(format!("f{i:05}")).unwrap()] {
+        Node::File(f) => f.key().to_string(),
+        Node::Dir => unreachable!(),
+    };
+    for i in changed {
+        assert_eq!(hints.get(&key(&m2, i)), Some(&key(&m, i)), "f{i:05}");
+    }
+    // Unchanged files are hinted to nothing.
+    assert!(!hints.contains_key(&key(&m2, 8)));
+}

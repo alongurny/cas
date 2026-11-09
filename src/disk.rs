@@ -384,16 +384,20 @@ impl DiskBackend {
     /// The chunk ids of a chunked blob, `None` for any other. A packed delta
     /// is never chunked, so it is not resolved.
     fn chunk_ids_of(&self, key: &str) -> io::Result<Option<Vec<u8>>> {
-        let file = match read_opt(&self.path(key))? {
-            Some(f) => f,
-            None => match self.packs.as_ref().map(|p| p.frame(key)).transpose()?.flatten() {
-                Some(f) if f.base.is_none() => f.bytes[f.data_at..].to_vec(),
-                _ => return Ok(None),
-            },
-        };
-        match file.first() {
-            Some(&CHUNKED) => Ok(Some(unpack(&file)?.1)),
+        let ids = |file: &[u8]| match file.first() {
+            Some(&CHUNKED) => Ok(Some(unpack(file)?.1)),
             _ => Ok(None),
+        };
+        // Packs first, looking at the one byte in place: no system call and
+        // no copy for the blobs that are not chunked (nearly all).
+        if let Some(p) = &self.packs
+            && let Some(r) = p.peek(key, |data| data.map_or(Ok(None), ids))?
+        {
+            return Ok(r);
+        }
+        match read_opt(&self.path(key))? {
+            Some(f) => ids(&f),
+            None => Ok(None),
         }
     }
 
