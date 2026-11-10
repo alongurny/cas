@@ -74,6 +74,8 @@ fn a_git_history_imports_with_its_shape_tags_and_notes() {
     let edit = h.nodes.values().flat_map(|n| n.after.values()).filter_map(|s| s.notes.as_ref());
     let edit: Vec<String> = edit.map(|v| String::from_utf8(stepnotes::show(&s, v.key()).unwrap()).unwrap()).collect();
     assert!(edit.iter().any(|e| e.starts_with("# main edit / why: a greeting\n| diff ")), "{edit:?}");
+    let readme0 = String::from_utf8(annotated::show(&s, h.nodes[&root].notes["README"].key()).unwrap()).unwrap();
+    assert_eq!(readme0, "# first\n| hi\n", "a first commit's subject is on its files' lines");
     let run_sh = String::from_utf8(annotated::show(&s, h.nodes[&tip].notes["src/run.sh"].key()).unwrap()).unwrap();
     assert!(run_sh.ends_with(" first\n| #!/bin/sh\n"), "{run_sh}");
     // The tip's files say per line which commit last changed it.

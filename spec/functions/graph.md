@@ -14,7 +14,9 @@ All integers are big-endian.
       k u8                number of predecessors
       k × u32             each predecessor's record position; the top bit
                           set means the step is declared compatible
-      notes len u32, notes  the steps' changelogs joined by " / "
+      notes len u32, notes  what the steps say, joined by " / ": each step's
+                          changelog, else its step notes' own note, else
+                          `(notes)` when it has notes
       filter              see below
 
 A node's predecessors are its `after` entries in their order in the

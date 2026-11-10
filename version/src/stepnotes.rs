@@ -192,6 +192,49 @@ fn file_lines(store: &dyn Store, version: Option<&View>, path: &str) -> Result<O
     Ok((!b.contains(&0)).then(|| lines(&b).len()))
 }
 
+/// [`verify`] for many: files found through `memo`, their lines counted
+/// by `count` (none: not a text file).
+pub(crate) fn verify_with(
+    store: &dyn Store,
+    key: &str,
+    memo: &mut crate::dir::FindMemo,
+    count: &dyn Fn(&View) -> Result<Option<usize>>,
+) -> Result<()> {
+    let sn = StepNotes::decode(&read_blob(store, key)?).map_err(|e| malformed(key, e))?;
+    for (p, n) in &sn.paths {
+        for (version, runs) in [(sn.before.as_ref(), &n.old), (Some(&sn.after), &n.new)] {
+            let (Some(runs), Some(version)) = (runs, version) else {
+                if runs.is_some() {
+                    return Err(malformed(key, format!("{p}: old runs in a step from nothing")));
+                }
+                continue;
+            };
+            let file = crate::tree::object_at_memo(store, version, &crate::Path::new(p.as_str())?, memo)?;
+            let have = match file {
+                Some(f) if !f.is_dir_view() && annotated::is_text_format(&f) => count(&f)?,
+                _ => None,
+            };
+            if have != Some(len(runs)) {
+                return Err(malformed(key, format!("{p}: runs for {} lines, the file has {have:?}", len(runs))));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The notes on the new files' lines as annotated files (path to view):
+/// for a first node, which has no step to hold step notes.
+pub fn file_notes(store: &dyn Store, alg: &'static Algorithm, sn: &StepNotes) -> Result<BTreeMap<String, View>> {
+    let mut out = BTreeMap::new();
+    for (p, n) in &sn.paths {
+        let Some(runs) = &n.new else { continue };
+        let Some(f) = crate::object_at(store, &sn.after, &crate::Path::new(p.as_str())?)? else { continue };
+        let notes: Vec<String> = expand(runs).into_iter().map(String::from).collect();
+        out.insert(p.clone(), annotated::write(store, alg, &f, &notes)?);
+    }
+    Ok(out)
+}
+
 /// Whether every path's runs cover its files' lines; the notes.
 pub fn verify(store: &dyn Store, key: &str) -> Result<StepNotes> {
     let sn = StepNotes::decode(&read_blob(store, key)?).map_err(|e| malformed(key, e))?;

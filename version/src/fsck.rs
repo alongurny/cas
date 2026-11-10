@@ -10,7 +10,7 @@ use crate::{Error, Result, View, by_id, is_blob_key};
 use cas_core::key::{Parsed, classify};
 use cas_core::keyhash::{DigestSet, SharedDigestSet};
 use cas_core::{Span, Store, list_all};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 /// What a check found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -52,37 +52,40 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
     // the histories' own parts (which name every version, in id order)
     // after them.
     let mut versions = Vec::new();
-    let mut r = Walker { store, blobs: &blobs, seen: &seen, local: DigestSet::default(), r: Report::default() };
+    let mut r = Walker::new(store, &blobs, &seen);
     let mut later = Vec::new();
     r.walk(todo, Some((&mut versions, &mut later)));
-    let mut r = r.r;
+    let (mut r, mut notes, mut lens) = (r.r, r.notes, r.lens);
     // Each thread takes a run of consecutive versions, oldest first, so
     // that its decodes find their bases in the cache. A blob is checked by
     // the first thread to reach it.
     let threads = cas_core::threads::get().min(versions.len()).max(1);
     let per = versions.len().div_ceil(threads).max(1);
-    let parts: Vec<Report> = std::thread::scope(|sc| {
+    let parts: Vec<(Report, Vec<View>, HashMap<String, usize>)> = std::thread::scope(|sc| {
         let handles: Vec<_> = versions
             .chunks(per)
             .map(|run| {
                 let (blobs, seen) = (&blobs, &seen);
                 sc.spawn(move || {
-                    let mut w = Walker { store, blobs, seen, local: DigestSet::default(), r: Report::default() };
+                    let mut w = Walker::new(store, blobs, seen);
                     // Popped last first: reversed, the oldest goes first.
                     w.walk(run.iter().rev().cloned().collect(), None);
-                    w.r
+                    (w.r, w.notes, w.lens)
                 })
             })
             .collect();
         handles.into_iter().map(|h| h.join().expect("fsck thread panicked")).collect()
     });
-    let mut w = Walker { store, blobs: &blobs, seen: &seen, local: DigestSet::default(), r: Report::default() };
+    let mut w = Walker::new(store, &blobs, &seen);
     w.walk(later, None);
-    for p in parts.into_iter().chain([w.r]) {
+    for (p, n, l) in parts.into_iter().chain([(w.r, w.notes, w.lens)]) {
         r.checked += p.checked;
         r.missing.extend(p.missing);
         r.bad.extend(p.bad);
+        notes.extend(n);
+        lens.extend(l);
     }
+    r.bad.extend(check_notes(store, &notes, &lens));
     r.missing.sort();
     r.bad.sort();
     r.unreachable = blobs.iter().filter(|k| !seen.contains(k)).count();
@@ -96,9 +99,18 @@ struct Walker<'a> {
     /// What this thread has met, asked before the shared set.
     local: DigestSet,
     r: Report,
+    /// Notes met, to check once every file's lines are counted.
+    notes: Vec<View>,
+    /// Lines of the text files read, by key.
+    lens: HashMap<String, usize>,
 }
 
-impl Walker<'_> {
+impl<'a> Walker<'a> {
+    fn new(store: &'a dyn Store, blobs: &'a BTreeSet<&'a str>, seen: &'a SharedDigestSet) -> Walker<'a> {
+        let (notes, lens) = Default::default();
+        Walker { store, blobs, seen, local: DigestSet::default(), r: Report::default(), notes, lens }
+    }
+
     /// Check everything reachable from `todo` (popped from the end) that no
     /// thread has reached yet. With `defer`, a history's versions are put in
     /// its first list (oldest first) and its parts in the second, instead of
@@ -154,6 +166,15 @@ impl Walker<'_> {
                     Err(e) => r.bad.push((v.key().to_string(), e.to_string())),
                 }
             }
+            // Notes are checked against their files after the walk, which
+            // counts the lines of every text file it reads.
+            match v.known_format().map(|f| f.alias) {
+                Some("annotated" | "step-notes") => self.notes.push(v.clone()),
+                Some(_) if crate::annotated::is_text_format(&v) && !bytes.contains(&0) => {
+                    self.lens.insert(v.key().to_string(), crate::annotated::lines(&bytes).len());
+                }
+                _ => {}
+            }
             // The format object itself is a blob too.
             if is_blob_key(v.format()) && by_id(v.format()).is_none() && !self.blobs.contains(v.format()) {
                 r.missing.push((v.key().to_string(), v.format().to_string()));
@@ -172,4 +193,59 @@ impl Walker<'_> {
             }
         }
     }
+}
+
+/// Notes that do not cover their files' lines exactly, on every thread.
+/// Lines come from `lens` (the walk's count), or a read for a file it missed.
+fn check_notes(store: &dyn Store, notes: &[View], lens: &HashMap<String, usize>) -> Vec<(String, String)> {
+    let count = |f: &View| -> Result<Option<usize>> {
+        match lens.get(f.key()) {
+            Some(&n) => Ok(Some(n)),
+            None => {
+                let b = crate::read_blob(store, f.key())?;
+                Ok((!b.contains(&0)).then(|| crate::annotated::lines(&b).len()))
+            }
+        }
+    };
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let threads = cas_core::threads::get().clamp(1, notes.len().max(1));
+    std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads)
+            .map(|_| {
+                sc.spawn(|| {
+                    let mut memo = crate::dir::FindMemo::default();
+                    let mut bad = Vec::new();
+                    // Runs of nodes in order, so the memo meets neighbours.
+                    loop {
+                        let k = next.fetch_add(64, std::sync::atomic::Ordering::Relaxed);
+                        let Some(run) = notes.get(k..(k + 64).min(notes.len())).filter(|r| !r.is_empty()) else {
+                            break;
+                        };
+                        for v in run {
+                            let res = match v.known_format().map(|f| f.alias) {
+                                Some("step-notes") => crate::stepnotes::verify_with(store, v.key(), &mut memo, &count),
+                                _ => crate::annotated::Annotated::decode(
+                                    &crate::read_blob(store, v.key()).unwrap_or_default(),
+                                )
+                                .map_err(|e| crate::malformed(v.key(), e))
+                                .and_then(|a| match count(&a.target)? {
+                                    Some(n) if n == a.len() => Ok(()),
+                                    n => Err(crate::malformed(
+                                        v.key(),
+                                        format!("notes for {} lines, the text has {n:?}", a.len()),
+                                    )),
+                                }),
+                            };
+                            match res {
+                                Ok(()) | Err(Error::Missing(_)) => {}
+                                Err(e) => bad.push((v.key().to_string(), e.to_string())),
+                            }
+                        }
+                    }
+                    bad
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().expect("fsck thread panicked")).collect()
+    })
 }

@@ -329,6 +329,15 @@ fn step_notes_are_checked() {
         assert!(stepnotes::verify(&s, &k).is_err(), "{bad}");
     }
     assert!(stepnotes::check(text.replace("new\n1 \n1 two\n", "").as_bytes()).is_err(), "a path with no note");
+    // fsck finds notes that do not cover their file.
+    history::commit(&s, b3(), "main", &a, Step::default(), None).unwrap();
+    let wrong = cas_version::write_blob(&s, b3(), text.replace("1 two", "2 two").as_bytes()).unwrap();
+    let wrong = View::new(v.format(), wrong).unwrap();
+    history::commit(&s, b3(), "main", &b, Step { notes: Some(wrong.clone()), ..Step::default() }, None).unwrap();
+    formats::publish(&s).unwrap();
+    let report = cas_version::fsck::fsck(&s).unwrap();
+    assert_eq!(report.bad.len(), 1, "{:?}", report.bad);
+    assert_eq!(report.bad[0].0, wrong.key());
     // A form whose text is not the diff is refused.
     assert!(stepnotes::from_form(&s, Some(&a), &b, b"| diff\n").is_err());
 }

@@ -91,8 +91,9 @@ fn added_since(store: &dyn Store, r: &View, old: &dyn Fn(&str) -> bool) -> Optio
 }
 
 /// Whether the history at `r` has no graph cached within
-/// [`crate::graph::NEAR`] saves but has one further back.
-fn graph_far(store: &dyn Store, r: &View) -> bool {
+/// [`crate::graph::NEAR`] saves but has one further back, or (`full`) none
+/// at all.
+fn graph_far(store: &dyn Store, r: &View, full: bool) -> bool {
     let cached = |v: &View| matches!(crate::derived::readable_cache(store, &crate::graph::GRAPH, v), Ok(Some(_)));
     let mut at = r.clone();
     for i in 0..1000 {
@@ -101,17 +102,20 @@ fn graph_far(store: &dyn Store, r: &View) -> bool {
         }
         match crate::graph::replaced(store, &at) {
             Some(p) => at = p,
-            None => return false,
+            None => return full,
         }
     }
-    false
+    full
 }
 
 /// How many saves back a cached ancestry still serves a history (its newer
 /// nodes are looked up in the history): gc rebuilds one only past that.
 const NEAR: usize = 64;
 
-pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()> {
+/// `full`: a full run, which also builds a graph for a history that has
+/// none (as after the graph function changed), as git gc writes its
+/// commit-graph.
+pub fn index_histories(store: &dyn Store, alg: &'static Algorithm, full: bool) -> Result<()> {
     for k in variables(store)? {
         if !matches!(classify(&k), Some(Parsed::Var)) || k.starts_with("derived") {
             continue;
@@ -127,7 +131,7 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
             }
             // A graph that was built once is kept within reach: path-log
             // extends one up to NEAR saves back.
-            if graph_far(store, &r) {
+            if graph_far(store, &r, full) {
                 let _ = crate::graph::graph(store, alg, &r);
             }
         }
@@ -322,7 +326,7 @@ fn known(store: &dyn Store) -> Result<(Option<Vec<u8>>, Option<DigestSet>)> {
 /// blobs. Garbage among the old ones waits for the next full run, which
 /// comes when the blobs outside the set grow past a quarter of it.
 pub fn collect_with(store: &dyn Store, alg: &'static Algorithm, full: bool) -> Result<Report> {
-    index_histories(store, alg)?;
+    index_histories(store, alg, full)?;
     let (old_var, old) = pending(store)?;
     let blobs: Vec<String> = list_all(store, &Span::all())?
         .into_iter()

@@ -57,13 +57,14 @@ A URL is https:// (the only protocol); --ca trusts the CA certificates in <file>
 instead of the public ones. -j <threads> caps the threads a command uses
 (default: one per core).
 History options: -H <history> (default main), -n <node> (a tag, `latest`, or a key
-prefix; default latest), --doc <text>, --compatible. There is no commit
+prefix; default latest), --compatible. There is no commit
 message: a step says why through its notes (commit --notes), and a release
 through its changelog (publish --changelog).
   commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
                                   caches stat data, so unchanged files are not rehashed)
   commit <dir> --notes <file>     ... with a note on each line of the step's diff
-                                  (<file>: what status --diff prints, notes added)
+                                  (<file>: what status --diff prints, notes added;
+                                  a first node keeps them on its files' lines)
   commit <dir> --annotate <path>=<file>  ... with notes on the file <path> as it is
                                   (<file>: its lines as `| line`, with `# note` lines)
   notes [<path>]                  a node's annotated files, or <path>'s with its notes
@@ -168,7 +169,6 @@ struct Args {
     history: String,
     node: String,
     changelog: Option<String>,
-    doc: Option<String>,
     compatible: bool,
     full: bool,
     notes: Option<String>,
@@ -188,7 +188,6 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         history: "main".into(),
         node: "latest".into(),
         changelog: None,
-        doc: None,
         compatible: false,
         full: false,
         notes: None,
@@ -214,7 +213,6 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
                     .into());
             }
             "--changelog" => a.changelog = Some(value("--changelog")?),
-            "--doc" => a.doc = Some(value("--doc")?),
             "--compatible" => a.compatible = true,
             "--full" => a.full = true,
             "--notes" => a.notes = Some(value("--notes")?),
@@ -398,15 +396,29 @@ fn run(a: Args) -> Res<()> {
             .map_err(e)?;
             formats::publish(s).map_err(e)?;
             let mut step = step;
+            let mut first_notes = BTreeMap::new();
             if let Some(file) = &a.notes {
                 // The notes are written on the diff from the tip to this
                 // version, which the file's text must be exactly; they are
                 // kept on the files' lines, the diff is not stored.
                 let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
                 let sn = stepnotes::from_form(s, head.as_ref(), &root, &form).map_err(|x| format!("{file}: {x}"))?;
-                step.notes = sn.map(|sn| stepnotes::write(s, b3(), &sn)).transpose().map_err(e)?;
+                if head.is_none() {
+                    // A first node has no step: its notes are on its files.
+                    if let Some(sn) = &sn {
+                        if !sn.note.is_empty() || sn.paths.values().any(|p| !p.note.is_empty()) {
+                            return Err(format!(
+                                "{file}: a first node has no step, so notes go on its files' lines, \
+                                 not on the diff or a path line"
+                            ));
+                        }
+                        first_notes = stepnotes::file_notes(s, b3(), sn).map_err(e)?;
+                    }
+                } else {
+                    step.notes = sn.map(|sn| stepnotes::write(s, b3(), &sn)).transpose().map_err(e)?;
+                }
             }
-            let mut notes = BTreeMap::new();
+            let mut notes = first_notes;
             for spec in &a.annotate {
                 let (p, file) = spec.rsplit_once('=').ok_or(format!("--annotate {spec}: <path>=<file>"))?;
                 let path = Path::new(p).map_err(e)?;
@@ -421,18 +433,26 @@ fn run(a: Args) -> Res<()> {
                 }
                 notes.insert(p.to_string(), annotated::write(s, b3(), &target, &lines).map_err(e)?);
             }
-            let id = history::commit_with_notes(s, b3(), name, &root, step, a.doc.clone(), notes).map_err(e)?;
+            let id = history::commit_with_notes(s, b3(), name, &root, step, None, notes).map_err(e)?;
             out!("{}", id);
         }
         Some(cmd @ ("status" | "reset" | "clean")) => {
             let dir = arg(1, "<dir>")?;
-            let v = at()?.version();
             let dirf = formats::by_alias("tree").unwrap();
             if cmd == "status" && a.show_diff {
-                let root = fs::import_worktree(s, b3(), dirf, dir.as_ref(), Some(&a.store), Some(&v)).map_err(e)?;
-                let d = annotated::diff(s, Some(&v), &root).map_err(e)?;
+                // Before the first commit, the diff from nothing.
+                let v = match history::head(s, name).map_err(e)? {
+                    Some(_) => Some(at()?.version()),
+                    None => None,
+                };
+                let root = fs::import_worktree(s, b3(), dirf, dir.as_ref(), Some(&a.store), v.as_ref()).map_err(e)?;
+                formats::publish(s).map_err(e)?;
+                let d = annotated::diff(s, v.as_ref(), &root).map_err(e)?;
                 std::io::Write::write_all(&mut std::io::stdout(), &annotated::render(&d, &[])).map_err(e)?;
-            } else if cmd == "status" {
+                return Ok(());
+            }
+            let v = at()?.version();
+            if cmd == "status" {
                 for c in fs::status(s, b3(), dirf, dir.as_ref(), Some(&a.store), &v).map_err(e)? {
                     let mark = match (&c.old, &c.new) {
                         (None, _) => "added",
@@ -724,8 +744,7 @@ fn run(a: Args) -> Res<()> {
             let step = Step { changelog: Some(text.trim_end().to_string()), ..step.clone() };
             let mine = load(s, name)?.1;
             let (_, outcome) =
-                history::record(s, b3(), &public, |p| merge::publish(&mine, p, step.clone(), a.doc.clone()))
-                    .map_err(e)?;
+                history::record(s, b3(), &public, |p| merge::publish(&mine, p, step.clone(), None)).map_err(e)?;
             report(outcome)?;
         }
         Some("merge") => {

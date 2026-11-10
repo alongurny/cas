@@ -577,7 +577,8 @@ impl<'s> Stored<'s> {
 
     /// The history's log (as [`History::log`]) with each node's
     /// predecessors by position in it, whether each step is compatible,
-    /// and its notes (the steps' changelogs joined by " / "): checked as
+    /// and what its steps say ([`crate::history::Step::line`], joined by
+    /// " / "): checked as
     /// [`Stored::read_all_with_log`] checks, without building a
     /// [`History`]. Nodes are numbered in id order, which is the leaves'
     /// order, so no map of ids is needed.
@@ -651,23 +652,20 @@ impl<'s> Stored<'s> {
         }
         let mut ids: Vec<Option<NodeId>> = ids.into_iter().map(Some).collect();
         let mut entries: Vec<Option<Entry>> = entries.into_iter().map(Some).collect();
-        Ok(log
-            .iter()
+        log.iter()
             .map(|&i| {
                 let e = entries[i].take().unwrap();
-                let mut logs = e.node.after.into_values().filter_map(|s| s.summary().map(String::from));
-                let notes = match (logs.next(), logs.next()) {
-                    (None, _) => String::new(),
-                    (Some(a), None) => a,
-                    (Some(a), Some(b)) => [a, b].into_iter().chain(logs).collect::<Vec<_>>().join(" / "),
-                };
-                LogRecord {
+                let mut logs = Vec::new();
+                for s in e.node.after.into_values() {
+                    logs.extend(s.line(self.store)?);
+                }
+                Ok(LogRecord {
                     id: ids[i].take().unwrap(),
                     after: preds[i].iter().map(|&(p, c)| (pos[p], c)).collect(),
-                    notes,
-                }
+                    notes: logs.join(" / "),
+                })
             })
-            .collect())
+            .collect::<Result<_>>()
     }
 
     /// The leaf that holds `id` if any node does.

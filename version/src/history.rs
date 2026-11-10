@@ -79,6 +79,24 @@ impl Step {
     pub fn summary(&self) -> Option<&str> {
         self.changelog.as_deref().or(self.notes.as_ref().map(|_| "(notes)"))
     }
+
+    /// What the step says in one line, for a log: its changelog, or else
+    /// its step notes' own note (read from `store`), or else `(notes)` when
+    /// it has notes.
+    pub fn line(&self, store: &dyn Store) -> Result<Option<String>> {
+        if let Some(c) = &self.changelog {
+            return Ok(Some(c.clone()));
+        }
+        let Some(v) = &self.notes else { return Ok(None) };
+        if v.known_format().is_some_and(|f| f.alias == "step-notes") {
+            let sn = crate::stepnotes::StepNotes::decode(&crate::read_blob(store, v.key())?)
+                .map_err(|e| crate::malformed(v.key(), e))?;
+            if !sn.note.is_empty() {
+                return Ok(Some(sn.note));
+            }
+        }
+        Ok(Some("(notes)".into()))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

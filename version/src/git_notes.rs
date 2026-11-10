@@ -10,7 +10,7 @@ use crate::history::{History, NodeId};
 use crate::{Node, Result, View, walk};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 /// Nodes whose diffs are computed together, in parallel.
@@ -145,8 +145,13 @@ pub fn annotate(
         let mut i = w * WINDOW;
         {
             for r in done {
-                let (edges, notes) = r?;
+                let (edges, notes, files) = r?;
                 let n = &order[i];
+                if !files.is_empty()
+                    && let Some(x) = h.nodes.get_mut(n)
+                {
+                    x.notes = files;
+                }
                 for (p, v) in notes {
                     if let Some(step) = h.nodes.get_mut(n).and_then(|x| x.after.get_mut(&p)) {
                         step.notes = Some(v);
@@ -259,7 +264,8 @@ fn blame(i: usize, e: &Edges, states: &mut HashMap<usize, State>, waiting: &mut 
     s
 }
 
-type Done = (Edges, Vec<(NodeId, View)>);
+/// A node's edges, its steps' notes, and (a first node) its files' notes.
+type Done = (Edges, Vec<(NodeId, View)>, BTreeMap<String, View>);
 
 /// Node `n`'s diffs from its predecessors, and the annotated diff of its
 /// step from its first parent.
@@ -278,9 +284,17 @@ fn node_edges(
     let (s, m) = (&subj[index[n]], &msg[index[n]]);
     let mut edges = Edges { preds: Vec::new(), root: Vec::new() };
     let mut notes = Vec::new();
+    let mut files = BTreeMap::new();
     if node.after.is_empty() {
-        let d = annotated::diff(store, None, &n.version())?;
+        let (d, lens) = annotated::diff_with_lens(store, None, &n.version())?;
         edges.root = parse(&d)?;
+        // A first commit has no step: its subject goes on its files' lines.
+        if !s.is_empty()
+            && let Some(sn) = crate::stepnotes::from_lines(None, &n.version(), &d, &lens, &diff_notes(&d, s, m))
+                .map_err(|e| crate::malformed("diff", e))?
+        {
+            files = crate::stepnotes::file_notes(store, alg, &sn)?;
+        }
     }
     // The step from the first parent is the
     // commit's (git's own view of a merge); the
@@ -318,5 +332,5 @@ fn node_edges(
             }
         }
     }
-    Ok((edges, notes))
+    Ok((edges, notes, files))
 }

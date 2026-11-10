@@ -106,6 +106,15 @@ fn notes(h: &History, id: &NodeId) -> String {
     n.join(" / ")
 }
 
+/// What a node's steps say, each in one line (Step::line), joined by " / ".
+fn lines(store: &dyn Store, h: &History, id: &NodeId) -> Result<String> {
+    let mut n = Vec::new();
+    for s in h.nodes[id].after.values() {
+        n.extend(s.line(store)?);
+    }
+    Ok(n.join(" / "))
+}
+
 impl Graph {
     /// The graph of `h`, taking filters from `reuse` (by node id) where it
     /// has them and diffing the rest, on up to `threads` threads.
@@ -153,13 +162,15 @@ impl Graph {
         let nodes = log
             .iter()
             .zip(filters)
-            .map(|(id, f)| Record {
-                id: id.clone(),
-                after: h.nodes[id].after.iter().map(|(p, s)| (pos[p], s.compatible)).collect(),
-                notes: notes(h, id),
-                filter: f.unwrap(),
+            .map(|(id, f)| {
+                Ok(Record {
+                    id: id.clone(),
+                    after: h.nodes[id].after.iter().map(|(p, s)| (pos[p], s.compatible)).collect(),
+                    notes: lines(store, h, id)?,
+                    filter: f.unwrap(),
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         Ok(Graph { nodes })
     }
 
@@ -415,7 +426,10 @@ pub fn extended(store: &dyn Store, input: &View, limit: usize) -> Result<Option<
                 None => Filter::Root,
                 Some(p) => Filter::of(diff(store, &p.version(), &id.version(), None)?.iter().map(|c| &c.path)),
             };
-            let notes: Vec<&str> = n.after.values().filter_map(|s| s.summary()).collect();
+            let mut notes = Vec::new();
+            for s in n.after.values() {
+                notes.extend(s.line(store)?);
+            }
             nodes.push(Record { id: id.clone(), after, notes: notes.join(" / "), filter });
         }
         nodes.extend(old.nodes.into_iter().map(|mut r| {

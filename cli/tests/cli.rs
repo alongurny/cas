@@ -128,7 +128,7 @@ fn private_history_rebase_publish_merge_and_gc() {
     let s = store.to_str().unwrap();
     std::fs::write(work.join("notes"), "one\ntwo\nthree\n").unwrap();
     std::fs::write(work.join("other"), "1\n").unwrap();
-    cas(&store, &["commit", w, "--doc", "the first version"]);
+    cas(&store, &["commit", w]);
     cas(&store, &["tag", "v1"]);
     // A private history starts as a copy of main.
     assert!(cas(&store, &["push", s, "--as", "alon"]).starts_with("Created"));
