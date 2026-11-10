@@ -19,6 +19,7 @@ pub mod pack;
 pub mod policy;
 pub mod server;
 pub mod store;
+pub mod threads;
 pub mod types;
 pub mod wire;
 

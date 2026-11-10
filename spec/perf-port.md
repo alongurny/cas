@@ -187,6 +187,12 @@ a failing setup step shows as FAIL.
   git.git instructions: ls 77M -> 53M, diff 38M -> 25M; wall ls 12.5 ms
   (git 5.1), diff 6.2 ms (git 3.2), merge-base 12 ms (git 9; the ancestry
   blob's decompression, hash check and validation are most of it).
+- **Threads:** `-j N` caps the threads a command uses (default one per
+  core), so single-thread numbers stay comparable. fsck walks the
+  histories' versions in consecutive runs, one per thread, oldest first
+  within each, sharing a sharded set of what is reached; a history's own
+  parts (which name every version in id order) are walked last. git.git,
+  4 cores: fsck 21.4 s on one thread, 13.9 s on four (git 30 s).
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
   (git's 423k objects); import (101 s) is slower than fast-import (82-93 s)
   but not than fast-export plus fast-import (~100-110 s).

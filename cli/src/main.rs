@@ -50,9 +50,10 @@ fn flush_out() {
     }
 }
 
-const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--ca FILE] [--meta DIR] COMMAND
+const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--ca FILE] [--meta DIR] [-j THREADS] COMMAND
 A URL is https:// (the only protocol); --ca trusts the CA certificates in FILE
-instead of the public ones.
+instead of the public ones. -j THREADS caps the threads a command uses
+(default: one per core).
 History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
 prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   commit DIR                    add DIR as a new node after the tip (DIR/.cas-index
@@ -178,6 +179,10 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--token-file" => a.token_file = Some(value("--token-file")?),
             "--ca" => a.ca = Some(value("--ca")?),
             "--meta" => a.meta = value("--meta")?,
+            "-j" => {
+                let n = value("-j")?;
+                cas_core::threads::set(n.parse().map_err(|_| format!("-j wants a number of threads, not {n:?}"))?);
+            }
             _ => a.rest.push(arg),
         }
     }

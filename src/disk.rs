@@ -700,7 +700,7 @@ fn var_names(dir: &Path, prefix: String, keys: &mut Vec<String>) -> io::Result<(
 
 /// `f` over `items` on up to one thread per core, results in order.
 fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> + Sync) -> io::Result<Vec<U>> {
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(items.len().max(1));
+    let threads = crate::threads::get().min(items.len().max(1));
     if threads <= 1 {
         return items.iter().map(&f).collect();
     }
