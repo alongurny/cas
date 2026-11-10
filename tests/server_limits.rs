@@ -1,5 +1,5 @@
 //! `cas serve` reads request bodies only up to its bound (spec/wire.md: 413),
-//! and takes no chunked request bodies (411).
+//! chunked request bodies included.
 
 use cas_core::client::HttpStore;
 use cas_core::mem::MemBackend;
@@ -71,18 +71,31 @@ fn a_declared_length_over_the_bound_is_refused_unread() {
 }
 
 #[test]
-fn a_chunked_body_is_refused_unread() {
+fn a_chunked_body_is_read_up_to_the_bound() {
     let served = serve();
-    let chunk = vec![b'a'; 4096];
-    let mut body = Vec::new();
-    for _ in 0..4 {
-        body.extend_from_slice(format!("{:x}\r\n", chunk.len()).as_bytes());
-        body.extend_from_slice(&chunk);
-        body.extend_from_slice(b"\r\n");
-    }
-    body.extend_from_slice(b"0\r\n\r\n");
-    let head = "PUT /k/main HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
-    assert!(raw(&served, head, &body).starts_with("HTTP/1.1 411"));
+    let chunked = |data: &[u8]| {
+        let mut body = Vec::new();
+        for c in data.chunks(256) {
+            body.extend_from_slice(format!("{:x}\r\n", c.len()).as_bytes());
+            body.extend_from_slice(c);
+            body.extend_from_slice(b"\r\n");
+        }
+        body.extend_from_slice(b"0\r\n\r\n");
+        body
+    };
+    let b3 = cas_core::algo::lookup("blake3").unwrap();
+    let fits = vec![b'a'; MAX - 100];
+    let head = format!("PUT /k/{} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", b3.key(&fits));
+    // The body is an expectation (0: absent) and the value.
+    let got = raw(&served, &head, &chunked(&[&[0], &fits[..]].concat()));
+    assert!(got.starts_with("HTTP/1.1 2"), "{got}");
+    let store = HttpStore::new(&served.url).unwrap().trusting(&served.ca).unwrap();
+    assert_eq!(store.read(&b3.key(&fits)).unwrap(), Some(fits));
+    let over = vec![b'b'; MAX + 1];
+    let head = format!("PUT /k/{} HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n", b3.key(&over));
+    assert!(raw(&served, &head, &chunked(&over)).starts_with("HTTP/1.1 413"));
+    let head = "PUT /k/main HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\n";
+    assert!(raw(&served, head, b"").starts_with("HTTP/1.1 411"));
 }
 
 #[test]

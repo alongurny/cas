@@ -10,6 +10,7 @@ pub mod checks;
 pub mod events;
 pub mod forge;
 pub mod gate;
+pub mod git;
 pub mod issues;
 pub mod migrate;
 pub mod mirror;

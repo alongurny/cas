@@ -18,6 +18,7 @@ pub mod fsck;
 pub mod gc;
 pub mod git;
 mod git_notes;
+pub mod gitobj;
 pub mod graph;
 pub mod history;
 mod htree;

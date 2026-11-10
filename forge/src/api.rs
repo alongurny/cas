@@ -46,6 +46,9 @@ pub fn router(forge: Arc<Forge>, opts: Options) -> Arc<Router> {
         if let Some(rest) = path.strip_prefix("/api/v1/") {
             return Some(Route::Reply(api(&forge, &opts, req, rest, query)));
         }
+        if let Some((p, what)) = crate::git::route(path) {
+            return Some(Route::Reply(forge.git(req, &p, what, query)));
+        }
         if wire_path(path.trim_start_matches('/')) {
             return None;
         }

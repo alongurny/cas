@@ -420,9 +420,54 @@ fn read_request(r: &mut BufReader<Conn>, max_body: usize) -> io::Result<Next> {
         headers.push((k.trim().to_string(), v.trim().to_string()));
     }
     let mut req = Request { method: method.to_string(), url: url.to_string(), headers, body: Vec::new() };
-    if req.header("Transfer-Encoding").is_some() {
-        // Clients send a Content-Length; chunked request bodies are not taken.
-        return Ok(Next::Refuse(Response::new(411)));
+    let too_large = || {
+        Next::Refuse(
+            Response::data(format!("request bodies are limited to {max_body} bytes"))
+                .status(413)
+                .with("CAS-Reason", "too-large"),
+        )
+    };
+    if req.header("Expect").is_some_and(|e| e.eq_ignore_ascii_case("100-continue")) {
+        r.get_mut().write_all(b"HTTP/1.1 100 Continue\r\n\r\n")?;
+        r.get_mut().flush()?;
+    }
+    if let Some(te) = req.header("Transfer-Encoding") {
+        // Chunked bodies (git sends large pushes so), up to the same bound.
+        if !te.eq_ignore_ascii_case("chunked") {
+            return Ok(Next::Refuse(Response::new(411)));
+        }
+        let mut body = Vec::new();
+        loop {
+            let mut budget = MAX_HEAD;
+            let Line::Text(size) = read_line(r, &mut budget)? else { return Ok(Next::Refuse(bad_request())) };
+            let size = size.split(';').next().unwrap_or("").trim();
+            let Ok(n) = usize::from_str_radix(size, 16) else { return Ok(Next::Refuse(bad_request())) };
+            if n == 0 {
+                // Trailers, up to the blank line.
+                loop {
+                    let mut budget = MAX_HEAD;
+                    match read_line(r, &mut budget)? {
+                        Line::Text(t) if t.is_empty() => break,
+                        Line::Text(_) => {}
+                        _ => return Ok(Next::Refuse(bad_request())),
+                    }
+                }
+                break;
+            }
+            if body.len() + n > max_body {
+                return Ok(too_large());
+            }
+            let at = body.len();
+            body.resize(at + n, 0);
+            r.read_exact(&mut body[at..])?;
+            let mut crlf = [0u8; 2];
+            r.read_exact(&mut crlf)?;
+            if &crlf != b"\r\n" {
+                return Ok(Next::Refuse(bad_request()));
+            }
+        }
+        req.body = body;
+        return Ok(Next::Request(req));
     }
     let len = match req.header("Content-Length") {
         None => 0,
@@ -432,11 +477,7 @@ fn read_request(r: &mut BufReader<Conn>, max_body: usize) -> io::Result<Next> {
         },
     };
     if len > max_body {
-        return Ok(Next::Refuse(
-            Response::data(format!("request bodies are limited to {max_body} bytes"))
-                .status(413)
-                .with("CAS-Reason", "too-large"),
-        ));
+        return Ok(too_large());
     }
     req.body = vec![0; len];
     r.read_exact(&mut req.body)?;

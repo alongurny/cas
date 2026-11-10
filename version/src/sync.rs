@@ -42,6 +42,8 @@ pub fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
         Some((_, "history" | "history-part")) => Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default()),
         Some((_, a @ ("annotated" | "diff"))) => Ok(crate::annotated::children(a, &read_blob(store, r.key())?)),
         Some((_, "step-notes")) => Ok(crate::stepnotes::children(&read_blob(store, r.key())?)),
+        Some((_, "git-tree" | "git-commit" | "git-tag")) => Ok(crate::gitobj::children(&read_blob(store, r.key())?)),
+        Some((_, "git-links")) => Ok(crate::gitobj::links_children(&read_blob(store, r.key())?)),
         _ => Ok(Vec::new()),
     }
 }
@@ -107,6 +109,12 @@ fn children_of_light(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<
         Some((_, "history-part")) => Ok(Some(crate::htree::part_children(r.key(), bytes)?)),
         Some((_, a @ ("annotated" | "diff"))) => Ok(Some(crate::annotated::children(a, bytes))),
         Some((_, "step-notes")) => Ok(Some(crate::stepnotes::children(bytes))),
+        Some((_, "git-tree" | "git-commit" | "git-tag")) => {
+            Ok(Some(crate::gitobj::children(bytes).into_iter().filter(|v| !skip.contains(v.key())).collect()))
+        }
+        Some((_, "git-links")) => {
+            Ok(Some(crate::gitobj::links_children(bytes).into_iter().filter(|v| !skip.contains(v.key())).collect()))
+        }
         _ => Ok(None),
     }
 }

@@ -192,6 +192,8 @@ pub struct Imported {
     pub files: usize,
     /// Submodule entries, which have no content here and are left out.
     pub skipped: usize,
+    /// The node each git commit (40 hex digits) became.
+    pub nodes: BTreeMap<String, NodeId>,
 }
 
 /// One entry of a git tree.
@@ -823,5 +825,6 @@ pub fn import_with_filters(
     if notes {
         crate::git_notes::annotate(store, alg, &mut h, &order, &subjects, &first)?;
     }
+    im.n.nodes = nodes;
     Ok((h, im.n, filters))
 }

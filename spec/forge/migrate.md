@@ -17,7 +17,7 @@ to migrate again); the others go on.
 | visibility, description | the project's `visibility` and `description`; `from` in its settings is the repository's Gitea URL |
 | collaborators | members: Gitea's `admin` and `owner` as admin, `write` as write, the rest read |
 | labels | labels with their colors and descriptions; an exclusive scoped label `scope/name` joins set `scope` with rule `one` |
-| code | mirror `gitea` ([mirror](mirror.md)): the default branch to `h/dev`, other branches to `u/<owner>/<branch>`, tags to `h/release` |
+| code | mirror `gitea` ([mirror](mirror.md)): the default branch to `h/dev`, other branches to `u/<owner>/<branch>`, tags to `h/release`; git's objects too, so the project served as git ([git](git.md)) has the same commit ids |
 | issues | issues with their numbers, titles, bodies, states, authors, times (`created`, `updated`, `closed`), labels, assignees, comments, and `from`, the issue's Gitea URL; all in one step of the issues history |
 | pull requests | proposals with their numbers ([proposal](proposal.md)); see below |
 | users met on the way | accounts without passwords (`cas-forge password` sets one); a Gitea email is kept |

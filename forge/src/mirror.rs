@@ -72,10 +72,17 @@ impl Forge {
         let branches =
             String::from_utf8_lossy(&git(&dir, &["for-each-ref", "--format=%(refname:short)", "refs/heads"])?)
                 .into_owned();
+        // Git's own objects come too, so the commits keep their ids.
+        let packed = self.mirror_objects(&dir, r.doc.s("packed"))?;
+        let (lv, mut links) = self.git_links(p)?;
+        let linked = links.len();
         let mut out = Pulled::default();
         for b in branches.lines().filter(|b| !b.is_empty()) {
             let (h, im) = cas_version::git::import(&*self.store, self.alg, &dir, b)?;
             out.commits = out.commits.max(im.commits);
+            for (c, n) in &im.nodes {
+                links.entry(n.clone()).or_insert_with(|| c.clone());
+            }
             let target = if b == default { DEV.to_string() } else { format!("u/{}/{}", p.owner, b.replace('/', "-")) };
             if crate::names::check_history(&target).is_err() {
                 continue;
@@ -90,13 +97,54 @@ impl Forge {
                 out.moved.push(target);
             }
         }
+        if links.len() != linked {
+            self.save_links(p, lv, &links)?;
+        }
         let tip = String::from_utf8_lossy(&git(&dir, &["rev-parse", &default])?).trim().to_string();
         record::update(&*self.store, self.alg, &var, |cur| {
             let mut r = cur.ok_or_else(|| Error::missing("mirror gone"))?;
-            r.doc.set_num("last", now()).set("tip", tip.clone()).set_num("commits", out.commits as u64);
+            r.doc
+                .set("packed", packed.clone())
+                .set_num("last", now())
+                .set("tip", tip.clone())
+                .set_num("commits", out.commits as u64);
             Ok((Some(r), ()))
         })?;
         Ok(out)
+    }
+
+    /// Store the objects of the cache repository `dir` that are new since
+    /// the tips in `packed` (space-separated commit ids); the tips now.
+    fn mirror_objects(&self, dir: &FsPath, packed: &str) -> Result<String> {
+        let tips = String::from_utf8_lossy(&git(dir, &["for-each-ref", "--format=%(objectname)"])?).into_owned();
+        let tips: Vec<&str> = tips.lines().filter(|l| !l.is_empty()).collect();
+        let mut revs: String = tips.iter().map(|t| format!("{t}\n")).collect();
+        for old in packed.split_whitespace() {
+            if git(dir, &["cat-file", "-e", &format!("{old}^{{commit}}")]).is_ok() {
+                revs.push_str(&format!("^{old}\n"));
+            }
+        }
+        let mut c = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["pack-objects", "--revs", "--stdout", "--delta-base-offset", "-q"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| Error::new(500, format!("git: {e}")))?;
+        let mut w = c.stdin.take().unwrap();
+        let feed = std::thread::spawn(move || w.write_all(revs.as_bytes()));
+        let o = c.wait_with_output().map_err(|e| Error::new(500, format!("git: {e}")))?;
+        let _ = feed.join();
+        if !o.status.success() {
+            return Err(Error::new(502, format!("git pack-objects: {}", String::from_utf8_lossy(&o.stderr).trim())));
+        }
+        cas_version::gitobj::unpack(&*self.store, &o.stdout)?;
+        let mut tips: Vec<&str> = tips;
+        tips.sort();
+        tips.dedup();
+        Ok(tips.join(" "))
     }
 
     /// Move history `var` to `h` when `h` extends what it holds (or it is

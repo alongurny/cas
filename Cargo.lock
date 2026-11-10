@@ -247,6 +247,7 @@ name = "cas-version"
 version = "0.1.0"
 dependencies = [
  "cas-core",
+ "flate2",
  "libc",
  "proptest",
  "similar",
