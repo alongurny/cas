@@ -289,15 +289,37 @@ pub(crate) fn is_text_format(v: &View) -> bool {
 fn hunks(out: &mut Vec<u8>, a: &[u8], b: &[u8]) {
     use similar::{Algorithm, DiffTag, capture_diff_slices, group_diff_ops};
     let (x, y) = (lines(a), lines(b));
+    // The common start and end are equal lines as Myers would find them
+    // (it strips them first too): compared once here, so that the lines
+    // between are the only ones numbered.
+    let pre = x.iter().zip(&y).take_while(|(p, q)| p == q).count();
+    let suf = x[pre..].iter().rev().zip(y[pre..].iter().rev()).take_while(|(p, q)| p == q).count();
+    let (xm, ym) = (&x[pre..x.len() - suf], &y[pre..y.len() - suf]);
     // Myers compares lines many times: compare numbers, one per distinct line.
     let mut ids: std::collections::HashMap<&[u8], u32> = std::collections::HashMap::new();
     let mut id = |l| {
         let n = ids.len() as u32;
         *ids.entry(l).or_insert(n)
     };
-    let xi: Vec<u32> = x.iter().map(|&l| id(l)).collect();
-    let yi: Vec<u32> = y.iter().map(|&l| id(l)).collect();
-    let ops = capture_diff_slices(Algorithm::Myers, &xi, &yi);
+    let xi: Vec<u32> = xm.iter().map(|&l| id(l)).collect();
+    let yi: Vec<u32> = ym.iter().map(|&l| id(l)).collect();
+    let mut ops = Vec::new();
+    if pre > 0 {
+        ops.push(similar::DiffOp::Equal { old_index: 0, new_index: 0, len: pre });
+    }
+    for op in capture_diff_slices(Algorithm::Myers, &xi, &yi) {
+        let (tag, o, n) = op.as_tag_tuple();
+        let (old_index, new_index) = (o.start + pre, n.start + pre);
+        ops.push(match tag {
+            DiffTag::Equal => similar::DiffOp::Equal { old_index, new_index, len: o.len() },
+            DiffTag::Delete => similar::DiffOp::Delete { old_index, old_len: o.len(), new_index },
+            DiffTag::Insert => similar::DiffOp::Insert { old_index, new_index, new_len: n.len() },
+            DiffTag::Replace => similar::DiffOp::Replace { old_index, old_len: o.len(), new_index, new_len: n.len() },
+        });
+    }
+    if suf > 0 {
+        ops.push(similar::DiffOp::Equal { old_index: x.len() - suf, new_index: y.len() - suf, len: suf });
+    }
     let mut shift: isize = 0;
     for group in group_diff_ops(ops, CONTEXT) {
         let Some(first) = group.first() else { continue };

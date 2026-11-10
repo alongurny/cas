@@ -29,29 +29,29 @@ fn whole(message: &str) -> String {
 /// One note per line of a diff: the whole message on the header line (the
 /// step's note), the subject on every `+` and `-` line, and on the `path`
 /// line of a path with no such lines (binary, a directory, an empty file).
-fn diff_notes(d: &[u8], subject: &str, message: &str) -> Vec<String> {
+fn diff_notes<'a>(d: &[u8], subject: &'a str, message: &'a str) -> Vec<&'a str> {
     let ls = annotated::lines(d);
-    let mut out = vec![String::new(); ls.len()];
-    out[0] = message.to_string();
+    let mut out = vec![""; ls.len()];
+    out[0] = message;
     let mut path_line: Option<usize> = None;
     let mut lines_noted = false;
     let mut last = false;
     for (i, l) in ls.iter().enumerate().skip(1) {
         if l.starts_with(b"path ") {
             if let Some(p) = path_line.filter(|_| !lines_noted) {
-                out[p] = subject.to_string();
+                out[p] = subject;
             }
             (path_line, lines_noted) = (Some(i), false);
         }
         let changed = if *l == b"\\\n" { last } else { l.starts_with(b"+") || l.starts_with(b"-") };
         if changed {
-            out[i] = subject.to_string();
+            out[i] = subject;
             lines_noted = true;
         }
         last = changed;
     }
     if let Some(p) = path_line.filter(|_| !lines_noted) {
-        out[p] = subject.to_string();
+        out[p] = subject;
     }
     out
 }
@@ -143,9 +143,11 @@ pub fn annotate(
         });
         let done = slots.into_iter().map(|m| m.into_inner().unwrap().unwrap());
         let mut i = w * WINDOW;
+        let mut puts = Vec::new();
         {
             for r in done {
-                let (edges, notes, files) = r?;
+                let (edges, notes, files, p) = r?;
+                puts.extend(p);
                 let n = &order[i];
                 if !files.is_empty()
                     && let Some(x) = h.nodes.get_mut(n)
@@ -166,6 +168,7 @@ pub fn annotate(
                 i += 1;
             }
         }
+        store.write_many(&puts).map_err(|(_, e)| crate::Error::from(e))?;
     }
     // The tips' annotated files: each line names the node that last
     // changed it and what its commit said.
@@ -265,7 +268,7 @@ fn blame(i: usize, e: &Edges, states: &mut HashMap<usize, State>, waiting: &mut 
 }
 
 /// A node's edges, its steps' notes, and (a first node) its files' notes.
-type Done = (Edges, Vec<(NodeId, View)>, BTreeMap<String, View>);
+type Done = (Edges, Vec<(NodeId, View)>, BTreeMap<String, View>, Vec<cas_core::store::Put>);
 
 /// Node `n`'s diffs from its predecessors, and the annotated diff of its
 /// step from its first parent.
@@ -285,6 +288,7 @@ fn node_edges(
     let mut edges = Edges { preds: Vec::new(), root: Vec::new() };
     let mut notes = Vec::new();
     let mut files = BTreeMap::new();
+    let mut puts = Vec::new();
     if node.after.is_empty() {
         let (d, lens) = annotated::diff_with_lens(store, None, &n.version())?;
         edges.root = parse(&d)?;
@@ -327,10 +331,15 @@ fn node_edges(
         if !s.is_empty() {
             let sn = crate::stepnotes::from_lines(Some(&p.version()), &n.version(), &d, &lens, &diff_notes(&d, s, m))
                 .map_err(|e| crate::malformed("diff", e))?;
+            // Written with the window's others in one batch: one write
+            // each waits on the store's lock.
             if let Some(sn) = sn {
-                notes.push((p.clone(), crate::stepnotes::write(store, alg, &sn)?));
+                let bytes = sn.encode();
+                let key = alg.key(&bytes);
+                notes.push((p.clone(), View::new(crate::by_alias("step-notes").unwrap().id(), key.clone())?));
+                puts.push(cas_core::store::Put::blob(key, bytes));
             }
         }
     }
-    Ok((edges, notes, files))
+    Ok((edges, notes, files, puts))
 }

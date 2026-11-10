@@ -30,15 +30,16 @@ pub struct StepNotes {
     pub paths: BTreeMap<String, PathNotes>,
 }
 
-fn runs_of(notes: &[String]) -> Option<Runs> {
-    if notes.iter().all(String::is_empty) {
+fn runs_of<N: AsRef<str>>(notes: &[N]) -> Option<Runs> {
+    if notes.iter().all(|n| n.as_ref().is_empty()) {
         return None;
     }
     let mut runs: Runs = Vec::new();
     for n in notes {
+        let n = n.as_ref();
         match runs.last_mut() {
             Some((c, last)) if last == n => *c += 1,
-            _ => runs.push((1, n.clone())),
+            _ => runs.push((1, n.to_string())),
         }
     }
     Some(runs)
@@ -257,18 +258,21 @@ pub fn write(store: &dyn Store, alg: &'static Algorithm, sn: &StepNotes) -> Resu
 }
 
 /// The diff's lines, each as (path, side, index): what a note on it belongs
-/// to. `side` is `'s'` for the step (the header), `'p'` for the path, `'o'`
-/// and `'n'` for a line of the old and new file.
-fn places(d: &[u8]) -> Vec<(String, u8, usize)> {
-    let mut out = Vec::new();
-    let (mut path, mut o, mut n) = (String::new(), 0, 0);
+/// to. `path` indexes the returned paths (0: none). `side` is `'s'` for the
+/// step (the header), `'P'` for a `path` line, `'p'` for the path's other
+/// header lines, `'o'` and `'n'` for a line of the old and new file.
+fn places(d: &[u8]) -> (Vec<String>, Vec<(u32, u8, usize)>) {
+    let mut paths = vec![String::new()];
+    let mut out: Vec<(u32, u8, usize)> = Vec::new();
+    let (mut o, mut n) = (0, 0);
     let start = |a: usize, b: usize| if b == 0 { a } else { a - 1 };
     for (i, l) in lines(d).into_iter().enumerate() {
+        let path = paths.len() as u32 - 1;
         let place = if i == 0 {
-            (String::new(), b's', 0)
+            (0, b's', 0)
         } else if let Some(p) = l.strip_prefix(b"path ") {
-            path = String::from_utf8_lossy(p.strip_suffix(b"\n").unwrap_or(p)).into_owned();
-            (path.clone(), b'p', 0)
+            paths.push(String::from_utf8_lossy(p.strip_suffix(b"\n").unwrap_or(p)).into_owned());
+            (path + 1, b'P', 0)
         } else if l.starts_with(b"@@ ") {
             let h = String::from_utf8_lossy(l);
             let nums: Vec<usize> = h
@@ -279,107 +283,110 @@ fn places(d: &[u8]) -> Vec<(String, u8, usize)> {
             if let [a, b, c, d] = nums[..] {
                 (o, n) = (start(a, b), start(c, d));
             }
-            (path.clone(), b'p', 0)
+            (path, b'p', 0)
         } else if l == b"\\\n" {
-            out.last().cloned().unwrap_or((path.clone(), b'p', 0))
+            out.last().copied().unwrap_or((path, b'p', 0))
         } else {
             match l.first() {
                 Some(b' ') => {
                     o += 1;
                     n += 1;
-                    (path.clone(), b'n', n - 1)
+                    (path, b'n', n - 1)
                 }
                 Some(b'-') => {
                     o += 1;
-                    (path.clone(), b'o', o - 1)
+                    (path, b'o', o - 1)
                 }
                 Some(b'+') => {
                     n += 1;
-                    (path.clone(), b'n', n - 1)
+                    (path, b'n', n - 1)
                 }
-                _ => (path.clone(), b'p', 0),
+                _ => (path, b'p', 0),
             }
         };
         out.push(place);
     }
-    out
+    (paths, out)
 }
 
 /// Step notes from a note on each line of the diff `d` from `before` to
 /// `after` (`lens`: its text files' line counts). `None` when every note is
 /// empty.
-pub fn from_lines(
+pub fn from_lines<N: AsRef<str>>(
     before: Option<&View>,
     after: &View,
     d: &[u8],
     lens: &Lens,
-    notes: &[String],
+    notes: &[N],
 ) -> std::result::Result<Option<StepNotes>, String> {
     let mut sn =
         StepNotes { before: before.cloned(), after: after.clone(), note: String::new(), paths: BTreeMap::new() };
-    let mut sides: BTreeMap<(String, u8), Vec<String>> = BTreeMap::new();
-    let mut path_notes: BTreeMap<String, String> = BTreeMap::new();
-    for ((path, side, i), note) in places(d).into_iter().zip(notes) {
+    let mut sides: BTreeMap<(u32, u8), Vec<&str>> = BTreeMap::new();
+    let mut path_notes: BTreeMap<u32, &str> = BTreeMap::new();
+    let (paths, places) = places(d);
+    for ((path, side, i), note) in places.into_iter().zip(notes) {
+        let note = note.as_ref();
         if note.is_empty() {
             continue;
         }
         if !is_note(note) {
             return Err(format!("a note has a control character: {note:?}"));
         }
+        let name = &paths[path as usize];
         match side {
-            b's' => sn.note.clone_from(note),
-            b'p' => {
-                let p = path_notes.entry(path.clone()).or_default();
+            b's' => note.clone_into(&mut sn.note),
+            b'p' | b'P' => {
+                let p = path_notes.entry(path).or_default();
                 if p.is_empty() {
-                    p.clone_from(note);
-                } else if p != note {
-                    return Err(format!("{path}: two notes for the path: {p:?} and {note:?}"));
+                    *p = note;
+                } else if *p != note {
+                    return Err(format!("{name}: two notes for the path: {p:?} and {note:?}"));
                 }
             }
             _ => {
-                let (o, n) = lens.get(&path).copied().unwrap_or_default();
+                let (o, n) = lens.get(name).copied().unwrap_or_default();
                 let total =
-                    if side == b'o' { o } else { n }.ok_or_else(|| format!("{path}: a note on a line of no text"))?;
-                let v = sides.entry((path.clone(), side)).or_insert_with(|| vec![String::new(); total]);
-                *v.get_mut(i).ok_or_else(|| format!("{path}: line {} past the file's end", i + 1))? = note.clone();
+                    if side == b'o' { o } else { n }.ok_or_else(|| format!("{name}: a note on a line of no text"))?;
+                let v = sides.entry((path, side)).or_insert_with(|| vec![""; total]);
+                *v.get_mut(i).ok_or_else(|| format!("{name}: line {} past the file's end", i + 1))? = note;
             }
         }
     }
     for (p, n) in path_notes {
-        sn.paths.entry(p).or_default().note = n;
+        sn.paths.entry(paths[p as usize].clone()).or_default().note = n.to_string();
     }
     for ((p, side), notes) in sides {
-        let e = sn.paths.entry(p).or_default();
+        let e = sn.paths.entry(paths[p as usize].clone()).or_default();
         if side == b'o' { e.old = runs_of(&notes) } else { e.new = runs_of(&notes) }
     }
     Ok((!sn.is_empty()).then_some(sn))
 }
 
+/// A path's notes with its runs spelled out, a note per line.
+type Expanded<'a> = (&'a PathNotes, Vec<&'a str>, Vec<&'a str>);
+
 /// A note for each line of the diff from `sn`'s notes.
-fn line_notes(sn: &StepNotes, d: &[u8]) -> Vec<String> {
-    let expanded: BTreeMap<&str, (Vec<&str>, Vec<&str>)> = sn
-        .paths
+fn line_notes<'a>(sn: &'a StepNotes, d: &[u8]) -> Vec<&'a str> {
+    let (paths, places) = places(d);
+    let expanded: Vec<Option<Expanded>> = paths
         .iter()
-        .map(|(p, n)| {
-            (
-                p.as_str(),
-                (n.old.as_ref().map(expand).unwrap_or_default(), n.new.as_ref().map(expand).unwrap_or_default()),
-            )
+        .map(|p| {
+            sn.paths.get(p).map(|n| {
+                (n, n.old.as_ref().map(expand).unwrap_or_default(), n.new.as_ref().map(expand).unwrap_or_default())
+            })
         })
         .collect();
-    places(d)
+    places
         .into_iter()
-        .enumerate()
-        .map(|(k, (path, side, i))| {
-            let line = lines(d)[k];
-            let e = expanded.get(path.as_str());
+        .map(|(path, side, i)| {
+            let e = expanded[path as usize].as_ref();
             match side {
-                b's' => sn.note.clone(),
+                b's' => sn.note.as_str(),
                 // The path's note on its `path` line only.
-                b'p' if line.starts_with(b"path ") => sn.paths.get(&path).map(|n| n.note.clone()).unwrap_or_default(),
-                b'p' => String::new(),
-                b'o' => e.and_then(|e| e.0.get(i)).unwrap_or(&"").to_string(),
-                _ => e.and_then(|e| e.1.get(i)).unwrap_or(&"").to_string(),
+                b'P' => e.map_or("", |e| e.0.note.as_str()),
+                b'p' => "",
+                b'o' => e.and_then(|e| e.1.get(i).copied()).unwrap_or(""),
+                _ => e.and_then(|e| e.2.get(i).copied()).unwrap_or(""),
             }
         })
         .collect()
@@ -390,7 +397,7 @@ pub fn show(store: &dyn Store, key: &str) -> Result<Vec<u8>> {
     let sn = verify(store, key)?;
     let d = annotated::diff(store, sn.before.as_ref(), &sn.after)?;
     let notes = line_notes(&sn, &d);
-    Ok(annotated::render(&d, &notes.iter().map(String::as_str).collect::<Vec<_>>()))
+    Ok(annotated::render(&d, &notes))
 }
 
 /// Step notes from the authoring form of the diff from `before` to
