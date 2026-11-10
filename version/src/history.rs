@@ -451,6 +451,39 @@ impl History {
 
 pub use crate::htree::{Changed, Entry, Part, Root, Stored, generations, height};
 
+/// `nodes` with every node after those of its predecessors that are among
+/// them (a topological order, oldest first).
+pub fn predecessors_first(nodes: BTreeMap<NodeId, HistNode>) -> Vec<(NodeId, HistNode)> {
+    let mut out = Vec::with_capacity(nodes.len());
+    let mut done = std::collections::HashSet::new();
+    for id in nodes.keys() {
+        let mut stack = vec![(id, false)];
+        while let Some((n, expanded)) = stack.pop() {
+            if done.contains(n) {
+                continue;
+            }
+            if expanded {
+                done.insert(n);
+                out.push(n);
+                continue;
+            }
+            stack.push((n, true));
+            stack.extend(
+                nodes[n].after.keys().filter(|p| nodes.contains_key(*p) && !done.contains(*p)).map(|p| (p, false)),
+            );
+        }
+    }
+    let order: Vec<NodeId> = out.into_iter().cloned().collect();
+    let mut nodes = nodes;
+    order
+        .into_iter()
+        .map(|id| {
+            let n = nodes.remove(&id).unwrap();
+            (id, n)
+        })
+        .collect()
+}
+
 /// Write `h` whole: its root and every part the store lacks.
 pub fn write(store: &dyn Store, alg: &'static Algorithm, h: &History) -> Result<View> {
     crate::htree::write(store, alg, h)

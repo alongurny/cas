@@ -377,11 +377,77 @@ fn reusable(store: &dyn Store, input: &View, limit: usize) -> Option<Graph> {
     None
 }
 
-/// The graph of the history at `input` if one is cached, else its order
-/// and notes from the history itself (no filters, nothing diffed).
+/// How many saves back [`extended`] looks for a cached graph.
+pub const NEAR: usize = 64;
+
+/// The graph of a history the one at `input` replaced (within `limit`
+/// saves), extended by the nodes added since: their steps are diffed, the
+/// rest is the cached graph's. Not recorded (a commit would rewrite the whole
+/// graph); gc records a fresh one when none is cached within [`NEAR`] saves.
+/// `None` when no such graph is cached, or a node of it changed since (a
+/// rebuild is needed).
+pub fn extended(store: &dyn Store, input: &View, limit: usize) -> Result<Option<Graph>> {
+    let mut at = input.clone();
+    for _ in 0..limit {
+        let Some(prev) = replaced(store, &at) else { return Ok(None) };
+        at = prev;
+        let Some(r) = derived::readable_cache(store, &GRAPH, &at)? else { continue };
+        let old = read(store, &r)?;
+        let new = crate::history::Stored::open(store, Some(input))?;
+        let changed = crate::history::Stored::open(store, Some(&at))?.changed(&new)?;
+        if !changed.old.is_empty() {
+            return Ok(None);
+        }
+        // Newest first, as the log is: the added nodes, then the old graph.
+        let added: Vec<(NodeId, crate::history::HistNode)> =
+            crate::history::predecessors_first(changed.added).into_iter().rev().collect();
+        let k = added.len();
+        let mut pos: HashMap<&NodeId, usize> = added.iter().enumerate().map(|(i, (id, _))| (id, i)).collect();
+        pos.extend(old.nodes.iter().enumerate().map(|(i, r)| (&r.id, k + i)));
+        let mut nodes = Vec::with_capacity(k + old.nodes.len());
+        for (id, n) in &added {
+            let mut after = Vec::new();
+            for (p, step) in &n.after {
+                let Some(&i) = pos.get(p) else { return Ok(None) };
+                after.push((i, step.compatible));
+            }
+            let filter = match n.after.keys().next() {
+                None => Filter::Root,
+                Some(p) => Filter::of(diff(store, &p.version(), &id.version(), None)?.iter().map(|c| &c.path)),
+            };
+            let notes: Vec<&str> = n.after.values().filter_map(|s| s.changelog.as_deref()).collect();
+            nodes.push(Record { id: id.clone(), after, notes: notes.join(" / "), filter });
+        }
+        nodes.extend(old.nodes.into_iter().map(|mut r| {
+            for a in &mut r.after {
+                a.0 += k;
+            }
+            r
+        }));
+        return Ok(Some(Graph { nodes }));
+    }
+    Ok(None)
+}
+
+/// The graph of the history at `input`, cheaply: cached, or [`extended`]
+/// from one of a history it replaced, else built and recorded ([`graph`]).
+pub fn graph_near(store: &dyn Store, alg: &'static Algorithm, input: &View) -> Result<Graph> {
+    if let Some(r) = derived::readable_cache(store, &GRAPH, input)? {
+        return read(store, &r);
+    }
+    match extended(store, input, NEAR)? {
+        Some(g) => Ok(g),
+        None => graph(store, alg, input),
+    }
+}
+
+/// The graph of the history at `input` if one is cached (or [`extended`]
+/// from one), else its order and notes from the history itself (no
+/// filters, nothing diffed).
 pub fn graph_or_order(store: &dyn Store, input: &View) -> Result<Graph> {
     match derived::readable_cache(store, &GRAPH, input)? {
         Some(r) => read(store, &r),
+        None if let Some(g) = extended(store, input, NEAR)? => Ok(g),
         None => {
             let log = crate::history::Stored::open(store, Some(input))?.read_log()?;
             Ok(Graph {

@@ -503,7 +503,7 @@ fn run(a: Args) -> Res<()> {
         Some("last-modified") => {
             let dir = prefix(1)?;
             let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
-            let g = graph::graph(s, b3(), &v).map_err(e)?;
+            let g = graph::graph_near(s, b3(), &v).map_err(e)?;
             let tip = at()?.version();
             let entries: Vec<Path> = walk(s, &tip, dir.as_ref())
                 .filter_map(|item| match item {

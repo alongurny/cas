@@ -207,3 +207,34 @@ fn graphs_are_built_from_the_replaced_historys_graph() {
         .collect();
     assert_eq!(f0, want);
 }
+
+/// Without a graph of its own, a history's graph is the replaced history's
+/// extended by the nodes added since, equal to one built from nothing.
+#[test]
+fn a_graph_extends_without_being_recorded() {
+    use cas_version::graph::{Graph, extended, graph, graph_or_order};
+    use cas_version::history;
+    let s = store();
+    let mut v = build(&s, b3(), formats::by_alias("dir").unwrap(), &BTreeMap::new()).unwrap();
+    let edit = |v: &View, p: &str, t: &str| {
+        let f = put(&s, b3(), "raw", t.as_bytes()).unwrap();
+        update(&s, b3(), v, &BTreeMap::from([(Path::new(p).unwrap(), Edit::Set(Node::File(f)))])).unwrap()
+    };
+    for i in 0..4 {
+        v = edit(&v, &format!("d/f{}", i % 2), &format!("{i}"));
+        history::commit(&s, b3(), "main", &v, Step::default(), None).unwrap();
+    }
+    graph(&s, b3(), &history::head(&s, "main").unwrap().unwrap()).unwrap();
+    for (i, p) in ["e", "d/f0", "e"].iter().enumerate() {
+        v = edit(&v, p, &format!("later {i}"));
+        let step = Step { changelog: Some(format!("step {i}")), compatible: i == 1 };
+        history::commit(&s, b3(), "main", &v, step, None).unwrap();
+    }
+    let head = history::head(&s, "main").unwrap().unwrap();
+    let g = extended(&s, &head, 64).unwrap().expect("a graph three saves back");
+    let h = history::read(&s, &head).unwrap();
+    assert_eq!(g, Graph::build(&s, &h, None, 1).unwrap());
+    assert_eq!(graph_or_order(&s, &head).unwrap(), g);
+    assert!(derived::cached(&s, &cas_version::graph::GRAPH, &head).unwrap().is_none(), "not recorded");
+    assert_eq!(g.path_log(&s, &Path::new("e").unwrap()).unwrap(), vec![0, 2]);
+}

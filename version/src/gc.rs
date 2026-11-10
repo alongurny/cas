@@ -83,30 +83,28 @@ fn added_since(store: &dyn Store, r: &View, old: &dyn Fn(&str) -> bool) -> Optio
         if old(at.key()) {
             let new = history::Stored::open(store, Some(r)).ok()?;
             let added = history::Stored::open(store, Some(&at)).ok()?.changed(&new).ok()?.added;
-            // Predecessors first.
-            let mut out = Vec::with_capacity(added.len());
-            let mut done = HashSet::new();
-            for id in added.keys() {
-                let mut stack = vec![(id.clone(), false)];
-                while let Some((n, expanded)) = stack.pop() {
-                    if done.contains(&n) {
-                        continue;
-                    }
-                    if expanded {
-                        done.insert(n.clone());
-                        out.push((n.clone(), added[&n].clone()));
-                        continue;
-                    }
-                    stack.push((n.clone(), true));
-                    for p in added[&n].after.keys().filter(|p| added.contains_key(*p) && !done.contains(*p)) {
-                        stack.push((p.clone(), false));
-                    }
-                }
-            }
+            let out = history::predecessors_first(added);
             return Some(out);
         }
     }
     None
+}
+
+/// Whether the history at `r` has no graph cached within
+/// [`crate::graph::NEAR`] saves but has one further back.
+fn graph_far(store: &dyn Store, r: &View) -> bool {
+    let cached = |v: &View| matches!(crate::derived::readable_cache(store, &crate::graph::GRAPH, v), Ok(Some(_)));
+    let mut at = r.clone();
+    for i in 0..1000 {
+        if cached(&at) {
+            return i > crate::graph::NEAR;
+        }
+        match crate::graph::replaced(store, &at) {
+            Some(p) => at = p,
+            None => return false,
+        }
+    }
+    false
 }
 
 /// How many saves back a cached ancestry still serves a history (its newer
@@ -121,10 +119,17 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
         if let Some(v) = store.read(&k)?
             && let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok())
             && r.known_format().is_some_and(|f| f.alias == "history")
-            && !crate::ancestry::near(store, &r, NEAR)
-            && let Ok(h) = history::read(store, &r)
         {
-            crate::ancestry::record(store, alg, &r, &h);
+            if !crate::ancestry::near(store, &r, NEAR)
+                && let Ok(h) = history::read(store, &r)
+            {
+                crate::ancestry::record(store, alg, &r, &h);
+            }
+            // A graph that was built once is kept within reach: path-log
+            // extends one up to NEAR saves back.
+            if graph_far(store, &r) {
+                let _ = crate::graph::graph(store, alg, &r);
+            }
         }
     }
     Ok(())
