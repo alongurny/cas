@@ -1,6 +1,6 @@
 # Importing git
 
-`cas import-git REPO [REV] [-H NAME]` (module `git`) turns the commits reachable from `REV` into a
+`cas import-git <repo> [<rev>] [-H <name>]` (module `git`) turns the commits reachable from `<rev>` into a
 new history named `NAME` (default `main`). It runs `git` and only reads the repository.
 
 | git | CAS |

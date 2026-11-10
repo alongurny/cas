@@ -1,6 +1,6 @@
 # The status watcher
 
-`cas watch DIR` follows a working directory, as git's fsmonitor does, so
+`cas watch <dir>` follows a working directory, as git's fsmonitor does, so
 that `commit` and `status` look only at what changed instead of at every
 file. It is optional: without a running watcher, both look at everything,
 using the stat cache (`.cas-index`) to avoid rehashing unchanged files.

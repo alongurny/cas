@@ -3,7 +3,7 @@
 //! The store is a directory (default `.cas`, or `$CAS_STORE`), or an
 //! `https://` URL of a `cas serve` (HTTPS only). The history option defaults to `main`.
 //! A served store with access control (spec/access.md) needs
-//! `--token-file FILE`; tokens are never taken from the environment.
+//! `--token-file <file>`; tokens are never taken from the environment.
 
 /// glibc's malloc spent a quarter of fsck finding room for the values
 /// deltas decode into (git.git fsck 37.6 -> 25.3 s, gc 15.9 -> 13.4 s).
@@ -51,68 +51,69 @@ fn flush_out() {
     }
 }
 
-const USAGE: &str = "usage: cas [--store DIR|URL] [--token-file FILE] [--ca FILE] [--meta DIR] [-j THREADS] COMMAND
-A URL is https:// (the only protocol); --ca trusts the CA certificates in FILE
-instead of the public ones. -j THREADS caps the threads a command uses
+const USAGE: &str =
+    "usage: cas [--store <dir>|<url>] [--token-file <file>] [--ca <file>] [--meta <dir>] [-j <threads>] <command>
+A URL is https:// (the only protocol); --ca trusts the CA certificates in <file>
+instead of the public ones. -j <threads> caps the threads a command uses
 (default: one per core).
-History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
-prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
-  commit DIR                    add DIR as a new node after the tip (DIR/.cas-index
-                                caches stat data, so unchanged files are not rehashed)
-  commit DIR --notes FILE       ... with a note on each line of the step's diff
-                                (FILE: what status --diff prints, notes added)
-  commit DIR --annotate PATH=FILE   ... with notes on the file PATH as it is
-                                (FILE: its lines as `| line`, with `# note` lines)
-  notes [PATH]                  a node's annotated files, or PATH's with its notes
-  status DIR                    how DIR differs from the node (nothing is stored)
-  status DIR --diff             the line diff from the node to DIR, to annotate
-                                (stores DIR's file blobs)
-  watch DIR                     follow DIR's changes (inotify) until stopped, so
-                                commit and status look only at what changed
-  reset DIR                     make DIR the node's version again (discards changes)
-  clean DIR                     remove from DIR the paths the node does not have
-  stash DIR | stash pop DIR     keep DIR in history stash/HISTORY and reset it, or
-                                put the newest stash back into DIR and drop it
-  log                           nodes, newest first, with tags and changelogs
-  ls [PREFIX]                   paths of a node's version
-  diff [--annotated]            changes from a node's predecessor (--annotated:
-                                the line diff with the step's notes)
-  annotated make FILE           store FILE's text and notes (the authoring form:
-                                `| line`, `# note`); prints the annotation's view
-  annotated show KEY            an annotation's text with its notes
-  checkout DEST [PREFIX]        write a node's version (or a prefix) to DEST
-  sparse DEST PATH...           check out only PATHs (files or directories) of a
-                                node into DEST; a commit of DEST keeps the rest
-  summary                       directory and file counts (derived, cached)
-  path-log PATH                 nodes whose step changed PATH
-  tag NAME                      tag a node (-n) in the history
-  compatible FROM TO            whether upgrading FROM to TO is compatible
-  merge-base A B                best common ancestors of nodes A and B
-  last-modified [PREFIX]        each entry under PREFIX with the node that last changed it
-  objects                       every blob key in the store
-  fsck                          check every reachable blob: readable, valid, complete
-  show KEY                      print a blob: uni-bin as text, else raw
-  push STORE [--as NAME]        send the history (fast-forward only)
-  pull STORE [--as NAME]        fetch history NAME (fast-forward only)
-  rebase ONTO                   replay this history's own nodes onto history ONTO
-  publish PUBLIC                add this history's tip to the release history PUBLIC
-                                as one node, -m its release notes (no annotations
-                                reach PUBLIC; spec/release-history.md)
-  merge [OTHER]                 merge history OTHER in (or the two tips) as one node
-  import-git REPO [REV]         import a git repository's commits (default HEAD)
-                                as history -H (refused if it exists)
-  gc [--full]                   one collection run (two-phase); without --full,
-                                walks and repacks only what came since the last
-                                full run while that is small
-  serve ADDR --cert FILE --key FILE [--open] [--max-body BYTES]
-                                serve the store over HTTPS (the only protocol)
-                                with the PEM certificate chain and key, under
-                                the access policy in --meta, or with --open to anyone;
-                                request bodies up to BYTES (default 64 MiB)
-  access show                   the policy in --meta (default .cas-meta)
-  access user NAME              add or re-key NAME; prints its token once
-  access grant WHO 'ACTION SCOPE'   e.g. grant '*' 'read blobs'
-  access revoke WHO 'ACTION SCOPE'";
+History options: -H <history> (default main), -n <node> (a tag, `latest`, or a key
+prefix; default latest), -m <changelog>, --doc <text>, --compatible.
+  commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
+                                  caches stat data, so unchanged files are not rehashed)
+  commit <dir> --notes <file>     ... with a note on each line of the step's diff
+                                  (<file>: what status --diff prints, notes added)
+  commit <dir> --annotate <path>=<file>  ... with notes on the file <path> as it is
+                                  (<file>: its lines as `| line`, with `# note` lines)
+  notes [<path>]                  a node's annotated files, or <path>'s with its notes
+  status <dir>                    how <dir> differs from the node (nothing is stored)
+  status <dir> --diff             the line diff from the node to <dir>, to annotate
+                                  (stores <dir>'s file blobs)
+  watch <dir>                     follow <dir>'s changes (inotify) until stopped, so
+                                  commit and status look only at what changed
+  reset <dir>                     make <dir> the node's version again (discards changes)
+  clean <dir>                     remove from <dir> the paths the node does not have
+  stash <dir> | stash pop <dir>   keep <dir> in history stash/<history> and reset it, or
+                                  put the newest stash back into <dir> and drop it
+  log                             nodes, newest first, with tags and changelogs
+  ls [<prefix>]                   paths of a node's version
+  diff [--annotated]              changes from a node's predecessor (--annotated:
+                                  the line diff with the step's notes)
+  annotated make <file>           store <file>'s text and notes (the authoring form:
+                                  `| line`, `# note`); prints the annotation's view
+  annotated show <key>            an annotation's text with its notes
+  checkout <dest> [<prefix>]      write a node's version (or a prefix) to <dest>
+  sparse <dest> <path>...         check out only <path>s (files or directories) of a
+                                  node into <dest>; a commit of <dest> keeps the rest
+  summary                         directory and file counts (derived, cached)
+  path-log <path>                 nodes whose step changed <path>
+  tag <name>                      tag a node (-n) in the history
+  compatible <from> <to>          whether upgrading <from> to <to> is compatible
+  merge-base <a> <b>              best common ancestors of nodes <a> and <b>
+  last-modified [<prefix>]        each entry under <prefix> with the node that last changed it
+  objects                         every blob key in the store
+  fsck                            check every reachable blob: readable, valid, complete
+  show <key>                      print a blob: uni-bin as text, else raw
+  push <store> [--as <name>]      send the history (fast-forward only)
+  pull <store> [--as <name>]      fetch history <name> (fast-forward only)
+  rebase <onto>                   replay this history's own nodes onto history <onto>
+  publish [--as <name>]           add this history's tip to the release history
+                                  (default public) as one node, -m its release
+                                  notes (no annotations reach it; spec/release-history.md)
+  merge [<other>]                 merge history <other> in (or the two tips) as one node
+  import-git <repo> [<rev>]       import a git repository's commits (default HEAD)
+                                  as history -H (refused if it exists)
+  gc [--full]                     one collection run (two-phase); without --full,
+                                  walks and repacks only what came since the last
+                                  full run while that is small
+  serve <addr> --cert <file> --key <file> [--open] [--max-body <bytes>]
+                                  serve the store over HTTPS (the only protocol)
+                                  with the PEM certificate chain and key, under
+                                  the access policy in --meta, or with --open to anyone;
+                                  request bodies up to <bytes> (default 64 MiB)
+  access show                     the policy in --meta (default .cas-meta)
+  access user <name>              add or re-key <name>; prints its token once
+  access grant <who> '<action> <scope>'  e.g. grant '*' 'read blobs'
+  access revoke <who> '<action> <scope>'";
 
 type Res<T> = Result<T, String>;
 
@@ -364,7 +365,7 @@ fn run(a: Args) -> Res<()> {
     };
     match a.rest.first().map(String::as_str) {
         Some("commit") => {
-            let dir = arg(1, "DIR")?;
+            let dir = arg(1, "<dir>")?;
             // The stat cache in DIR spares rehashing unchanged files; a sparse
             // checkout keeps the rest of the history's head.
             let head = match history::head(s, name).map_err(e)? {
@@ -398,7 +399,7 @@ fn run(a: Args) -> Res<()> {
             }
             let mut notes = BTreeMap::new();
             for spec in &a.annotate {
-                let (p, file) = spec.rsplit_once('=').ok_or(format!("--annotate {spec}: PATH=FILE"))?;
+                let (p, file) = spec.rsplit_once('=').ok_or(format!("--annotate {spec}: <path>=<file>"))?;
                 let path = Path::new(p).map_err(e)?;
                 let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
                 let (text, lines) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
@@ -415,7 +416,7 @@ fn run(a: Args) -> Res<()> {
             out!("{}", id);
         }
         Some(cmd @ ("status" | "reset" | "clean")) => {
-            let dir = arg(1, "DIR")?;
+            let dir = arg(1, "<dir>")?;
             let v = at()?.version();
             let dirf = formats::by_alias("tree").unwrap();
             if cmd == "status" && a.show_diff {
@@ -438,7 +439,7 @@ fn run(a: Args) -> Res<()> {
         }
         Some("stash") => {
             let pop = a.rest.get(1).is_some_and(|x| x == "pop");
-            let dir = arg(if pop { 2 } else { 1 }, "DIR")?;
+            let dir = arg(if pop { 2 } else { 1 }, "<dir>")?;
             let dirf = formats::by_alias("tree").unwrap();
             let stash = format!("stash/{name}");
             if pop {
@@ -471,6 +472,7 @@ fn run(a: Args) -> Res<()> {
             for (t, n) in &heads.tags {
                 tags.entry(n).or_default().push(t);
             }
+            let mut stored = None;
             for r in &g.nodes {
                 let after: Vec<String> = r
                     .after
@@ -478,7 +480,14 @@ fn run(a: Args) -> Res<()> {
                     .map(|&(p, c)| format!("{}{}", short(g.nodes[p].id.version().key()), if c { "~" } else { "" }))
                     .collect();
                 let t = tags.get(&r.id).map(|t| format!(" ({})", t.join(", "))).unwrap_or_default();
-                out!("{}{t}  [{}]  {}", short(r.id.version().key()), after.join(" "), r.notes);
+                // A first node has no step: what it says is its doc.
+                let doc = if r.after.is_empty() && r.notes.is_empty() {
+                    let st = stored.get_or_insert(history::Stored::open(s, Some(&v)).map_err(e)?);
+                    st.get(&r.id).map_err(e)?.and_then(|n| n.doc).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                out!("{}{t}  [{}]  {}{doc}", short(r.id.version().key()), after.join(" "), r.notes);
             }
         }
         Some("ls") => {
@@ -528,7 +537,7 @@ fn run(a: Args) -> Res<()> {
         }
         Some("annotated") => match a.rest.get(1).map(String::as_str) {
             Some("make") => {
-                let file = arg(2, "FILE")?;
+                let file = arg(2, "<file>")?;
                 let form = std::fs::read(&file).map_err(|x| format!("{file}: {x}"))?;
                 let (text, notes) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
                 let target = cas_version::put(s, b3(), "raw", &text).map_err(e)?;
@@ -537,23 +546,23 @@ fn run(a: Args) -> Res<()> {
                 out!("{v}");
             }
             Some("show") => {
-                let key = arg(2, "KEY")?;
+                let key = arg(2, "<key>")?;
                 let form = annotated::show(s, &key).map_err(e)?;
                 std::io::Write::write_all(&mut std::io::stdout(), &form).map_err(e)?;
             }
-            _ => return Err(format!("annotated make FILE | annotated show KEY\n{USAGE}")),
+            _ => return Err(format!("annotated make <file> | annotated show <key>\n{USAGE}")),
         },
         Some("checkout") => {
-            let dest = arg(1, "DEST")?;
+            let dest = arg(1, "<dest>")?;
             let n = fs::checkout_indexed(s, &at()?.version(), prefix(2)?.as_ref(), dest.as_ref(), Some(&a.store))
                 .map_err(e)?;
             out!("{n} paths written to {dest}");
         }
         Some("sparse") => {
-            let dest = arg(1, "DEST")?;
+            let dest = arg(1, "<dest>")?;
             let paths = a.rest[2..].iter().map(Path::new).collect::<Result<Vec<_>, _>>().map_err(e)?;
             if paths.is_empty() {
-                return Err("sparse needs at least one PATH".into());
+                return Err("sparse needs at least one <path>".into());
             }
             let n = fs::checkout_sparse(s, &at()?.version(), &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
             out!("{n} paths written to {dest}");
@@ -564,7 +573,7 @@ fn run(a: Args) -> Res<()> {
             out!("{v}");
         }
         Some("path-log") => {
-            let p = Path::new(arg(1, "PATH")?).map_err(e)?;
+            let p = Path::new(arg(1, "<path>")?).map_err(e)?;
             let Some(v) = history::head(s, name).map_err(e)? else { return Ok(()) };
             // A cached graph skips the steps its filters rule out; without
             // one, walking every step is faster than building the graph.
@@ -574,7 +583,7 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some("tag") => {
-            let t = arg(1, "NAME")?;
+            let t = arg(1, "<name>")?;
             let id = at()?;
             history::edit(s, b3(), name, |_, root| {
                 root.tags.insert(t.clone(), id.clone());
@@ -588,7 +597,7 @@ fn run(a: Args) -> Res<()> {
             let v = history::head(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
             // With the ancestry of this very history, only its root is read.
             if let Some(ix) = cas_version::ancestry::exact(s, &v)
-                && let Some(bases) = quick_merge_bases(s, &v, &ix, &arg(1, "A")?, &arg(2, "B")?)
+                && let Some(bases) = quick_merge_bases(s, &v, &ix, &arg(1, "<a>")?, &arg(2, "<b>")?)
             {
                 for b in bases {
                     out!("{b}");
@@ -596,7 +605,7 @@ fn run(a: Args) -> Res<()> {
                 return Ok(());
             }
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
-            let (x, y) = (find_node(&st, &arg(1, "A")?, name)?, find_node(&st, &arg(2, "B")?, name)?);
+            let (x, y) = (find_node(&st, &arg(1, "<a>")?, name)?, find_node(&st, &arg(2, "<b>")?, name)?);
             // From the ancestry blob gc and import keep, when there is one.
             let index = cas_version::ancestry::cached(s, &st, &v, 64);
             for b in cas_version::ancestry::merge_bases(&st, index.as_ref(), &x, &y).map_err(e)? {
@@ -631,7 +640,7 @@ fn run(a: Args) -> Res<()> {
             }
         }
         Some("watch") => {
-            let dir = arg(1, "DIR")?;
+            let dir = arg(1, "<dir>")?;
             let w = cas_version::watch::Watcher::start(dir.as_ref()).map_err(e)?;
             eprintln!("watching {dir}");
             w.run().map_err(e)?;
@@ -657,18 +666,18 @@ fn run(a: Args) -> Res<()> {
         }
         Some("compatible") => {
             let h = load(s, name)?.1;
-            let (x, y) = (node(&h, &arg(1, "FROM")?, name)?, node(&h, &arg(2, "TO")?, name)?);
+            let (x, y) = (node(&h, &arg(1, "<from>")?, name)?, node(&h, &arg(2, "<to>")?, name)?);
             out!("{}", if h.compatible(&x, &y) { "compatible" } else { "breaking" });
         }
         Some("show") => {
-            let bytes = read_blob(s, &arg(1, "KEY")?).map_err(e)?;
+            let bytes = read_blob(s, &arg(1, "<key>")?).map_err(e)?;
             match Value::deserialize(&bytes) {
                 Ok(v) => out!("{v}"),
                 Err(_) => print!("{}", String::from_utf8_lossy(&bytes)),
             }
         }
         Some(cmd @ ("push" | "pull")) => {
-            let other = open(&arg(1, "STORE")?, remote)?;
+            let other = open(&arg(1, "<store>")?, remote)?;
             let remote = a.remote.clone().unwrap_or_else(|| name.to_string());
             let (outcome, n) = if cmd == "push" {
                 sync::push(s, &*other, name, &remote)
@@ -679,7 +688,7 @@ fn run(a: Args) -> Res<()> {
             out!("{outcome:?}: {} blobs copied, {} already present", n.blobs, n.present);
         }
         Some("rebase") => {
-            let onto = arg(1, "ONTO")?;
+            let onto = arg(1, "<onto>")?;
             let target = load(s, &onto)?.1;
             let (old, mine) = load(s, name)?;
             let (h, outcome) = merge::rebase(s, b3(), &mine, &target).map_err(e)?;
@@ -689,7 +698,10 @@ fn run(a: Args) -> Res<()> {
             report(outcome)?;
         }
         Some("publish") => {
-            let public = arg(1, "PUBLIC")?;
+            if let Some(x) = a.rest.get(1) {
+                return Err(format!("publish takes no {x:?}: the release history is `public`, or --as <name>"));
+            }
+            let public = a.remote.clone().unwrap_or_else(|| "public".into());
             let mine = load(s, name)?.1;
             let (_, outcome) =
                 history::record(s, b3(), &public, |p| merge::publish(&mine, p, step.clone(), a.doc.clone()))
@@ -718,7 +730,7 @@ fn run(a: Args) -> Res<()> {
             report(outcome)?;
         }
         Some("import-git") => {
-            let repo = arg(1, "REPO")?;
+            let repo = arg(1, "<repo>")?;
             let rev = a.rest.get(2).cloned().unwrap_or_else(|| "HEAD".into());
             let start = std::time::Instant::now();
             let (h, n, filters) = cas_version::git::import_with_filters(s, b3(), repo.as_ref(), &rev).map_err(e)?;
@@ -790,13 +802,13 @@ fn run(a: Args) -> Res<()> {
                     return Ok(());
                 }
                 Some("user") => {
-                    let t = rules.add_user(&arg(2, "NAME")?).map_err(e)?;
+                    let t = rules.add_user(&arg(2, "<name>")?).map_err(e)?;
                     access::save(&*meta, b3(), old, &rules).map_err(e)?;
                     out!("{t}");
                     return Ok(());
                 }
                 Some(op @ ("grant" | "revoke")) => {
-                    let (who, g) = (arg(2, "WHO")?, Grant::parse(&arg(3, "GRANT")?).map_err(e)?);
+                    let (who, g) = (arg(2, "<who>")?, Grant::parse(&arg(3, "<grant>")?).map_err(e)?);
                     let set = rules.grants.entry(who.clone()).or_default();
                     if op == "grant" {
                         set.insert(g);
@@ -814,7 +826,7 @@ fn run(a: Args) -> Res<()> {
             access::save(&*meta, b3(), old, &rules).map_err(e)?;
         }
         Some("serve") => {
-            let addr = arg(1, "ADDR")?;
+            let addr = arg(1, "<addr>")?;
             let max_body = match a.rest.iter().position(|x| x == "--max-body") {
                 Some(i) => a.rest.get(i + 1).and_then(|n| n.parse().ok()).ok_or("--max-body takes a byte count")?,
                 None => cas_core::server::DEFAULT_MAX_BODY,
@@ -824,7 +836,7 @@ fn run(a: Args) -> Res<()> {
                     .rest
                     .iter()
                     .position(|x| x == name)
-                    .ok_or(format!("serve needs {name} FILE (it speaks only HTTPS)"))?;
+                    .ok_or(format!("serve needs {name} <file> (it speaks only HTTPS)"))?;
                 a.rest.get(i + 1).cloned().ok_or(format!("{name} needs a file"))
             };
             let tls = if a.rest.iter().any(|x| x == "--insecure-http") {

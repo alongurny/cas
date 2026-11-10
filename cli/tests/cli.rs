@@ -147,12 +147,12 @@ fn private_history_rebase_publish_merge_and_gc() {
     let no = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
         .arg(&store)
-        .args(["publish", "main", "-H", "alon"])
+        .args(["publish", "--as", "main", "-H", "alon"])
         .output()
         .unwrap();
     assert!(!no.status.success());
     assert!(cas(&store, &["rebase", "main", "-H", "alon"]).starts_with("Done"));
-    assert!(cas(&store, &["publish", "main", "-H", "alon", "-m", "notes: upper case"]).starts_with("Done"));
+    assert!(cas(&store, &["publish", "--as", "main", "-H", "alon", "-m", "notes: upper case"]).starts_with("Done"));
     let log = cas(&store, &["log"]);
     assert_eq!(log.lines().count(), 3, "{log}");
     assert!(log.lines().next().unwrap().contains("notes: upper case") && log.contains("(v1)"), "{log}");

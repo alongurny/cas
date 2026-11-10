@@ -193,7 +193,7 @@ file. `git status` and `git commit -a` rehash only the files whose stat data
 changed. Fsmonitor goes further and asks the OS what changed. Git can also
 check out on several workers (`checkout.workers`).
 
-- **Stat cache:** `cas commit DIR` keeps a local stat cache (outside the
+- **Stat cache:** `cas commit <dir>` keeps a local stat cache (outside the
   store, like `.git/index`) from path to stat data and view. It rehashes only
   the files whose stat changed, and reuses a directory's view when nothing
   under it changed (git's cache-tree). Racy-git rule: an entry whose mtime is
@@ -316,7 +316,7 @@ for both tools. Results are recorded per corpus:
     grow by a node without rewriting the rest.
 
 - 2026-11-08, step 4 and compaction (aef38de):
-  - `commit DIR` keeps a stat cache in `DIR/.cas-index`, and checkout
+  - `commit <dir>` keeps a stat cache in `<dir>/.cas-index`, and checkout
     writes it. Commit of an unchanged Thesis tree: 0.018 s, git 0.126 s.
   - Batched writes merge the newest packs geometrically (as `git repack
     --geometric=2`), so a store keeps O(log n) packs. git.git clone went
@@ -343,7 +343,7 @@ Each step comes with its row in the benchmark, measured before and after.
 The `t/perf` port runs alongside step 1, so every later step is measured on
 all corpora.
 - 2026-11-09, working-directory commands on the stat cache (`src/fs.rs`).
-  `status DIR` imports DIR into an overlay session, so nothing reaches the
+  `status <dir>` imports `<dir>` into an overlay session, so nothing reaches the
   store, and diffs it against the node. `reset DIR` rewrites what differs
   and removes extra paths (git's `reset --hard`); `clean DIR` only removes
   paths the node lacks. `stash DIR` commits DIR into history `stash/NAME`
