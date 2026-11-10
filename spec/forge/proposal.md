@@ -39,5 +39,7 @@ Merge is a rebase only: the source's steps beyond the target are replayed
 on the target's tip, and the target moves by one compare-and-set to the
 result. The gates of the target ([project](project.md)) are checked
 first. A promoted thread's first comment becomes the note of its line in
-the newest replayed step that added a line with the thread's text. Merging sets `state` to `merged`
+the newest replayed step that added a line with the thread's text. A line
+no replayed step added (a line of the source's first node, merged into an
+empty target) gets no note. Merging sets `state` to `merged`
 and `merged` to the new tip.

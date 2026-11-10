@@ -18,7 +18,6 @@ pub mod proposals;
 pub mod reach;
 pub mod record;
 pub mod releases;
-pub mod web;
 
 pub use forge::Forge;
 pub use names::{ProjectId, Role};
