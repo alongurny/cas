@@ -327,11 +327,13 @@ pub(crate) fn check_part(b: &[u8]) -> std::result::Result<(), String> {
 /// The views a part refers to: versions of a leaf's nodes, or child parts.
 pub(crate) fn part_children(key: &str, b: &[u8]) -> Result<Vec<View>> {
     Ok(match Part::decode(b).map_err(|e| malformed(key, e))? {
-        // A node's version, and its steps' notes.
+        // A node's version, its steps' notes and its annotated files.
         Part::Leaf(n) => n
             .iter()
             .flat_map(|(id, e)| {
-                std::iter::once(id.version()).chain(e.node.after.values().filter_map(|s| s.notes.clone()))
+                std::iter::once(id.version())
+                    .chain(e.node.after.values().filter_map(|s| s.notes.clone()))
+                    .chain(e.node.notes.values().cloned())
             })
             .collect(),
         Part::Inner { parts, .. } => parts.into_values().collect(),

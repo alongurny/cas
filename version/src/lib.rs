@@ -74,6 +74,11 @@ impl View {
         by_id(&self.format)
     }
 
+    /// Whether this is a view of a directory.
+    pub fn is_dir_view(&self) -> bool {
+        self.is_dir()
+    }
+
     pub(crate) fn is_dir(&self) -> bool {
         self.known_format().is_some_and(|f| matches!(f.kind, Kind::Dir(_)))
     }
@@ -205,6 +210,8 @@ pub enum Error {
     Io(String),
     /// An access policy or grant that does not parse (spec/access.md).
     Policy(String),
+    /// Notes where a release history allows none (spec/release-history.md).
+    NotRelease(String),
 }
 
 impl fmt::Display for Error {
@@ -220,6 +227,7 @@ impl fmt::Display for Error {
             Error::Diverged(t) => write!(f, "branch {t} has diverged"),
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Policy(e) => write!(f, "policy: {e}"),
+            Error::NotRelease(e) => write!(f, "not a release history: {e}"),
         }
     }
 }

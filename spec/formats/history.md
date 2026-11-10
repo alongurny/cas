@@ -41,6 +41,9 @@ A node is a map with these keys, each optional:
 - `'after'`: a map from the id of each node this one follows (its
   predecessors, all nodes of the history) to a step.
 - `'doc'`: a string, documentation of this version.
+- `'notes'`: a map from a path of this version's files to a view (a string)
+  of an [annotated](annotated.md) blob whose annotated blob is the file
+  there: notes on the file as it is, where no change is there to annotate.
 
 A node with no `'after'` is a root. A node with two or more predecessors is
 a merge. The `'after'` relation must be acyclic.
@@ -59,6 +62,10 @@ keys:
   compatible upgrade; absent, the step breaks compatibility. The default
   is deliberately conservative: compatibility is an explicit, per-step
   promise, not inferred from version numbers.
+
+A history people work in keeps notes on every step and file it likes; a
+release history, the one clients get, keeps none
+([release-history.md](../release-history.md)).
 
 ## Order and derived notions
 

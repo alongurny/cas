@@ -428,3 +428,50 @@ pub(crate) fn children(alias: &str, b: &[u8]) -> Vec<View> {
         _ => Vec::new(),
     }
 }
+
+/// Notes for `new`'s lines taken from `old`'s (both line lists): each new
+/// line takes the note of an unused old line with the same `key`, in order.
+fn carry_notes<'a>(old: &[(Vec<u8>, &'a str)], new: &[Vec<u8>]) -> Vec<String> {
+    let mut by: std::collections::HashMap<&[u8], std::collections::VecDeque<&'a str>> = Default::default();
+    for (k, n) in old {
+        by.entry(k.as_slice()).or_default().push_back(n);
+    }
+    new.iter().map(|k| by.get_mut(k.as_slice()).and_then(|q| q.pop_front()).unwrap_or("").to_string()).collect()
+}
+
+/// Keys of a diff's lines for carrying notes: a line within its path, with
+/// what names versions or line numbers reduced to its first word.
+fn diff_keys(d: &[u8]) -> Vec<Vec<u8>> {
+    let mut path: &[u8] = b"";
+    lines(d)
+        .into_iter()
+        .map(|l| {
+            if let Some(p) = l.strip_prefix(b"path ") {
+                path = p;
+            }
+            let word = |w: &[u8]| l.starts_with(w);
+            let line: &[u8] =
+                if word(b"old ") || word(b"new ") || word(b"@@ ") || word(b"diff ") { &l[..3] } else { l };
+            [path, b"\0", line].concat()
+        })
+        .collect()
+}
+
+/// The annotation `old` carried over to `target`, a text much like the one
+/// `old` annotates (a rebased diff, a file after a merge): each line of
+/// `target` takes the note of a like line of the old text, others none.
+/// For a `diff` target, lines match within their path, and version and line
+/// numbers are ignored. `None` when no note carries over.
+pub fn carry(store: &dyn Store, alg: &'static Algorithm, old: &View, target: &View) -> Result<Option<View>> {
+    let a = verify(store, old.key())?;
+    let (old_text, new_text) = (read_blob(store, a.target.key())?, read_blob(store, target.key())?);
+    let is_diff = |v: &View| v.known_format().is_some_and(|f| f.alias == "diff");
+    let keys =
+        |v: &View, b: &[u8]| if is_diff(v) { diff_keys(b) } else { lines(b).into_iter().map(<[u8]>::to_vec).collect() };
+    let old_lines: Vec<(Vec<u8>, &str)> = keys(&a.target, &old_text).into_iter().zip(a.notes()).collect();
+    let notes = carry_notes(&old_lines, &keys(target, &new_text));
+    if notes.iter().all(String::is_empty) {
+        return Ok(None);
+    }
+    write(store, alg, target, &notes).map(Some)
+}

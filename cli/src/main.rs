@@ -61,6 +61,9 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
                                 caches stat data, so unchanged files are not rehashed)
   commit DIR --notes FILE       ... with a note on each line of the step's diff
                                 (FILE: what status --diff prints, notes added)
+  commit DIR --annotate PATH=FILE   ... with notes on the file PATH as it is
+                                (FILE: its lines as `| line`, with `# note` lines)
+  notes [PATH]                  a node's annotated files, or PATH's with its notes
   status DIR                    how DIR differs from the node (nothing is stored)
   status DIR --diff             the line diff from the node to DIR, to annotate
                                 (stores DIR's file blobs)
@@ -92,7 +95,9 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   push STORE [--as NAME]        send the history (fast-forward only)
   pull STORE [--as NAME]        fetch history NAME (fast-forward only)
   rebase ONTO                   replay this history's own nodes onto history ONTO
-  publish PUBLIC                add this history's tip to history PUBLIC as one node
+  publish PUBLIC                add this history's tip to the release history PUBLIC
+                                as one node, -m its release notes (no annotations
+                                reach PUBLIC; spec/release-history.md)
   merge [OTHER]                 merge history OTHER in (or the two tips) as one node
   import-git REPO [REV]         import a git repository's commits (default HEAD)
                                 as history -H (refused if it exists)
@@ -159,6 +164,7 @@ struct Args {
     compatible: bool,
     full: bool,
     notes: Option<String>,
+    annotate: Vec<String>,
     show_diff: bool,
     annotated: bool,
     remote: Option<String>,
@@ -178,6 +184,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         compatible: false,
         full: false,
         notes: None,
+        annotate: Vec::new(),
         show_diff: false,
         annotated: false,
         remote: None,
@@ -198,6 +205,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--compatible" => a.compatible = true,
             "--full" => a.full = true,
             "--notes" => a.notes = Some(value("--notes")?),
+            "--annotate" => a.annotate.push(value("--annotate")?),
             "--diff" => a.show_diff = true,
             "--annotated" => a.annotated = true,
             "--as" => a.remote = Some(value("--as")?),
@@ -388,7 +396,22 @@ fn run(a: Args) -> Res<()> {
                 }
                 step.notes = Some(annotated::write(s, b3(), &d, &notes).map_err(e)?);
             }
-            let id = history::commit(s, b3(), name, &root, step, a.doc.clone()).map_err(e)?;
+            let mut notes = BTreeMap::new();
+            for spec in &a.annotate {
+                let (p, file) = spec.rsplit_once('=').ok_or(format!("--annotate {spec}: PATH=FILE"))?;
+                let path = Path::new(p).map_err(e)?;
+                let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
+                let (text, lines) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
+                let Some(target) = cas_version::object_at(s, &root, &path).map_err(e)?.filter(|v| !v.is_dir_view())
+                else {
+                    return Err(format!("--annotate {p}: no such file in {dir}"));
+                };
+                if text != read_blob(s, target.key()).map_err(e)? {
+                    return Err(format!("{file}: its text is not {p} as committed"));
+                }
+                notes.insert(p.to_string(), annotated::write(s, b3(), &target, &lines).map_err(e)?);
+            }
+            let id = history::commit_with_notes(s, b3(), name, &root, step, a.doc.clone(), notes).map_err(e)?;
             out!("{}", id);
         }
         Some(cmd @ ("status" | "reset" | "clean")) => {
@@ -484,6 +507,23 @@ fn run(a: Args) -> Res<()> {
             let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
             for c in diff(s, &pred.version(), &id.version(), None).map_err(e)? {
                 out!("{:8} -> {:8} {}", node_text(&c.old), node_text(&c.new), c.path);
+            }
+        }
+        Some("notes") => {
+            let Some(v) = history::head(s, name).map_err(e)? else { return Err(format!("no history {name}")) };
+            let st = history::Stored::open(s, Some(&v)).map_err(e)?;
+            let node = st.get(&at()?).map_err(e)?.unwrap_or_default();
+            match a.rest.get(1) {
+                None => {
+                    for (p, n) in &node.notes {
+                        out!("{p}  {n}");
+                    }
+                }
+                Some(p) => {
+                    let n = node.notes.get(p.as_str()).ok_or(format!("no notes on {p} in this node"))?;
+                    let form = annotated::show(s, n.key()).map_err(e)?;
+                    std::io::Write::write_all(&mut std::io::stdout(), &form).map_err(e)?;
+                }
             }
         }
         Some("annotated") => match a.rest.get(1).map(String::as_str) {

@@ -38,7 +38,9 @@ own private histories instead:
    their keys never need to be shown to anyone.
 2. Generate the public history from it: add one node (or a few) holding
    the final version after the public tip, with a changelog for the whole
-   change. The public history does not reveal the private nodes, and the
+   change. The public history is a release history
+   ([release-history.md](release-history.md)): the private history's notes
+   (annotated diffs and files) stay behind. The public history does not reveal the private nodes, and the
    split into nodes is chosen anew.
 3. When the public history moved meanwhile, rebase: replay the private
    steps onto its new tip (three-way at path level, spec/merge.md), then

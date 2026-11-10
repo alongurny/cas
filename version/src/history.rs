@@ -85,6 +85,22 @@ impl Step {
 pub struct HistNode {
     pub after: BTreeMap<NodeId, Step>,
     pub doc: Option<String>,
+    /// Annotated files of this version: path to an `annotated` view of the
+    /// file there (spec/formats/annotated.md), for notes on a file as it
+    /// is rather than on a change.
+    pub notes: BTreeMap<String, View>,
+}
+
+fn annotated_view(s: &str, what: &str) -> std::result::Result<View, String> {
+    let v = View::parse(s).map_err(|e| format!("{what} is not a view: {e}"))?;
+    if v.known_format().is_none_or(|f| f.alias != "annotated") {
+        return Err(format!("{what} is not an annotated view"));
+    }
+    Ok(v)
+}
+
+fn note_path(p: &str) -> std::result::Result<String, String> {
+    crate::Path::new(p).map(|_| p.to_string()).map_err(|e| format!("a node note's path {p:?}: {e}"))
 }
 
 impl HistNode {
@@ -104,6 +120,10 @@ impl HistNode {
                 (Value::str(p.as_str()), Value::Map(sm))
             });
             m.insert(Value::str("after"), Value::Map(after.collect()));
+        }
+        if !self.notes.is_empty() {
+            let notes = self.notes.iter().map(|(p, v)| (Value::str(p.as_str()), Value::str(v.to_string())));
+            m.insert(Value::str("notes"), Value::Map(notes.collect()));
         }
         Value::Map(m)
     }
@@ -151,16 +171,20 @@ impl HistNode {
                                 }
                                 "notes" => {
                                     let n = c.str().map_err(|_| "notes is not a string")?;
-                                    let v = View::parse(n).map_err(|e| format!("notes is not a view: {e}"))?;
-                                    if v.known_format().is_none_or(|f| f.alias != "annotated") {
-                                        return Err("notes is not an annotated view".into());
-                                    }
-                                    step.notes = Some(v);
+                                    step.notes = Some(annotated_view(n, "a step's notes")?);
                                 }
                                 k => return Err(format!("a step has unknown key {k:?}")),
                             }
                         }
                         node.after.insert(p, step);
+                    }
+                }
+                "notes" => {
+                    let mut notes = c.map().map_err(|_| "a node's notes are not a map")?;
+                    while let Some(p) = c.key(&mut notes, "a node's notes")? {
+                        let p = note_path(p)?;
+                        let v = annotated_view(c.str().map_err(|_| "a node note is not a string")?, "a node note")?;
+                        node.notes.insert(p, v);
                     }
                 }
                 k => return Err(format!("a node has unknown key {k:?}")),
@@ -221,8 +245,12 @@ impl History {
         let mut h = History { doc: string(top.get("doc"), "doc")?, ..History::default() };
         for (id, n) in top.get("nodes").map_or(Ok(BTreeMap::new()), |v| map_of(v, "nodes"))? {
             let id = NodeId::parse(&id)?;
-            let f = fields(&n, "a node", &["after", "doc"])?;
-            let mut node = HistNode { doc: string(f.get("doc"), "node doc")?, after: BTreeMap::new() };
+            let f = fields(&n, "a node", &["after", "doc", "notes"])?;
+            let mut node = HistNode { doc: string(f.get("doc"), "node doc")?, ..HistNode::default() };
+            for (p, v) in f.get("notes").map_or(Ok(BTreeMap::new()), |v| map_of(v, "a node's notes"))? {
+                let v = string(Some(&v), "a node note")?.ok_or("a node note is not a string")?;
+                node.notes.insert(note_path(&p)?, annotated_view(&v, "a node note")?);
+            }
             for (p, s) in f.get("after").map_or(Ok(BTreeMap::new()), |v| map_of(v, "after"))? {
                 let sf = fields(&s, "a step", &["changelog", "compatible", "notes"])?;
                 let compatible = match sf.get("compatible") {
@@ -236,7 +264,7 @@ impl History {
                         changelog: string(sf.get("changelog"), "changelog")?,
                         compatible,
                         notes: string(sf.get("notes"), "notes")?
-                            .map(|n| View::parse(&n).map_err(|e| format!("notes is not a view: {e}")))
+                            .map(|n| annotated_view(&n, "a step's notes"))
                             .transpose()?,
                     },
                 );
@@ -429,6 +457,12 @@ impl History {
         old.nodes.iter().all(|(id, n)| self.nodes.get(id).is_some_and(|m| m.after == n.after))
     }
 
+    /// Whether a step or node holds notes: a release history holds none
+    /// (spec/release-history.md).
+    pub fn has_notes(&self) -> bool {
+        self.nodes.values().any(|n| !n.notes.is_empty() || n.after.values().any(|s| s.notes.is_some()))
+    }
+
     /// A fresh id for `version`: the plain view, or `#n` for its n-th
     /// occurrence.
     pub fn new_id(&self, version: &View) -> NodeId {
@@ -445,7 +479,7 @@ impl History {
             return Err(Error::Missing(format!("node {p}")));
         }
         let id = self.new_id(version);
-        self.nodes.insert(id.clone(), HistNode { after, doc });
+        self.nodes.insert(id.clone(), HistNode { after, doc, ..HistNode::default() });
         Ok(id)
     }
 
@@ -612,6 +646,19 @@ pub fn commit(
     step: Step,
     doc: Option<String>,
 ) -> Result<NodeId> {
+    commit_with_notes(store, alg, name, version, step, doc, BTreeMap::new())
+}
+
+/// [`commit`], with annotated files of the version (path to view).
+pub fn commit_with_notes(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    name: &str,
+    version: &View,
+    step: Step,
+    doc: Option<String>,
+    notes: BTreeMap<String, View>,
+) -> Result<NodeId> {
     edit(store, alg, name, |st, root| {
         let after = match (root.nodes.is_none(), root.tips.len()) {
             (true, _) => BTreeMap::new(),
@@ -623,7 +670,8 @@ pub fn commit(
             root.tips.remove(p);
         }
         root.tips.insert(id.clone());
-        Ok((BTreeMap::from([(id.clone(), Some(HistNode { after, doc: doc.clone() }))]), id))
+        let node = HistNode { after, doc: doc.clone(), notes: notes.clone() };
+        Ok((BTreeMap::from([(id.clone(), Some(node))]), id))
     })
     .map(|(_, id)| id)
 }

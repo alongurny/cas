@@ -312,7 +312,26 @@ pub fn rebase(
         if !merged.conflicts.is_empty() {
             return Ok((h, Outcome::Conflicts(merged)));
         }
+        // Notes follow the change: on the replayed step's diff, and on the
+        // files as they are after the merge, where lines are alike.
+        let mut step = step;
+        if let Some(old) = &step.notes {
+            let d = crate::annotated::write_diff(store, alg, Some(&tip.version()), &merged.version)?;
+            step.notes = crate::annotated::carry(store, alg, old, &d)?;
+        }
+        let mut notes = BTreeMap::new();
+        for (p, old) in &n.notes {
+            let at =
+                crate::Path::new(p.as_str()).ok().map(|p| crate::object_at(store, &merged.version, &p)).transpose()?;
+            if let Some(Some(file)) = at
+                && !file.is_dir()
+                && let Some(v) = crate::annotated::carry(store, alg, old, &file)?
+            {
+                notes.insert(p.clone(), v);
+            }
+        }
         tip = h.add(&merged.version, BTreeMap::from([(tip.clone(), step)]), n.doc.clone())?;
+        h.nodes.get_mut(&tip).unwrap().notes = notes;
         prev = id.version();
     }
     Ok((h, Outcome::Done(tip)))
@@ -323,7 +342,16 @@ pub fn rebase(
 /// already contain `public`'s tip (rebase first); its own nodes stay
 /// private.
 pub fn publish(mine: &History, public: &mut History, step: Step, doc: Option<String>) -> Result<Outcome> {
+    // A release history holds no notes (spec/release-history.md).
+    if step.notes.is_some() {
+        return Err(Error::NotRelease("a release step carries release notes (-m), not annotations".into()));
+    }
+    if public.has_notes() {
+        return Err(Error::NotRelease("the target history holds notes".into()));
+    }
     let mtip = mine.tip().ok_or_else(|| Error::Diverged("the private history has several tips".into()))?;
+    // The first release has no step: its notes become the node's doc.
+    let doc = if public.nodes.is_empty() { doc.or_else(|| step.changelog.clone()) } else { doc };
     if let Some(ptip) = public.tip() {
         if !mine.follows(&mtip, &ptip) {
             return Err(Error::Diverged("the public history moved; rebase first".into()));
