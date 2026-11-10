@@ -247,37 +247,55 @@ pub fn checkout_indexed(
 
 /// Write what `root` holds at and under `prefix` into `dest`, recording
 /// written files in `cache`.
+/// A file checkout recorded in the stat cache: path, its stat and view.
+type Written = Option<(String, Stat, View)>;
+
 fn write_walk(
     store: &dyn Store,
     root: &View,
     prefix: Option<&Path>,
     dest: &FsPath,
-    mut cache: Option<&mut Index>,
+    cache: Option<&mut Index>,
 ) -> Result<usize> {
+    // Directories as the walk meets them; the files after, on every thread.
     let mut n = 0;
+    let mut files = Vec::new();
     for item in walk(store, root, prefix) {
         let (path, node) = item?;
         let target = dest.join(path.as_str());
-        let r = match node {
-            Node::Dir => {
-                fs::create_dir_all(&target)?;
-                n += 1;
-                continue;
+        match node {
+            Node::Dir => fs::create_dir_all(&target)?,
+            Node::File(r) => {
+                if let Some(parent) = target.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                files.push((path, r, target));
             }
-            Node::File(r) => r,
-        };
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let format = write_file(store, &r, &target)?;
-        // A git blob is stored with its header, so a commit would hash the
-        // file to another view: record only what a commit would reproduce.
-        if let Some(c) = cache.as_deref_mut()
-            && format != "git-blob"
-        {
-            c.files.insert(path.as_str().to_string(), (Stat::of(&fs::symlink_metadata(&target)?), r.clone()));
         }
         n += 1;
+    }
+    let want_stat = cache.is_some();
+    let one = |(path, r, target): &(Path, View, std::path::PathBuf)| -> Result<Written> {
+        let format = write_file(store, r, target)?;
+        // A git blob is stored with its header, so a commit would hash the
+        // file to another view: record only what a commit would reproduce.
+        Ok((want_stat && format != "git-blob")
+            .then(|| fs::symlink_metadata(target).map(|m| (path.as_str().to_string(), Stat::of(&m), r.clone())))
+            .transpose()?)
+    };
+    let threads = cas_core::threads::get().min(files.len().div_ceil(64)).max(1);
+    let per = files.len().div_ceil(threads).max(1);
+    let written: Vec<Result<Vec<Written>>> = std::thread::scope(|sc| {
+        let hs: Vec<_> = files.chunks(per).map(|part| sc.spawn(move || part.iter().map(one).collect())).collect();
+        hs.into_iter().map(|h| h.join().expect("checkout thread panicked")).collect()
+    });
+    let mut cache = cache;
+    for part in written {
+        for (path, stat, r) in part?.into_iter().flatten() {
+            if let Some(c) = cache.as_deref_mut() {
+                c.files.insert(path, (stat, r));
+            }
+        }
     }
     Ok(n)
 }

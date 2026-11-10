@@ -33,6 +33,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// A whole frame whose data is shorter than its hinted base's key and
 /// this is not tried as a delta again by a repack.
 const SMALL_GAIN: usize = 64;
+/// Up to this many files (or directories) are synced one by one, more with
+/// one file-system sync.
+#[cfg(target_os = "linux")]
+const FEW_SYNCS: usize = 32;
 /// A delta under 1/DELTA_SURE of its value is taken without compressing the
 /// value whole to compare: whole compression rarely gets below that.
 const DELTA_SURE: usize = 16;
@@ -593,8 +597,14 @@ impl DiskBackend {
         self.sync_dirs(dirs)
     }
 
+    /// A few files are synced one by one: a file-system sync would also
+    /// flush whatever else is waiting on the disk (a checkout just written
+    /// next to the store), and wait for it.
     #[cfg(target_os = "linux")]
-    fn sync_all_files(&self, _: &Pending) -> io::Result<()> {
+    fn sync_all_files(&self, pending: &Pending) -> io::Result<()> {
+        if pending.len() <= FEW_SYNCS {
+            return pending.iter().try_for_each(|(tmp, _)| File::open(tmp)?.sync_all());
+        }
         syncfs(&self.root)
     }
 
@@ -604,7 +614,10 @@ impl DiskBackend {
     }
 
     #[cfg(target_os = "linux")]
-    fn sync_dirs(&self, _: std::collections::BTreeSet<&Path>) -> io::Result<()> {
+    fn sync_dirs(&self, dirs: std::collections::BTreeSet<&Path>) -> io::Result<()> {
+        if dirs.len() <= FEW_SYNCS {
+            return dirs.into_iter().try_for_each(sync_dir);
+        }
         syncfs(&self.root)
     }
 
