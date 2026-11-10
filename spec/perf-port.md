@@ -104,7 +104,10 @@ the whole history to find the base of a sparse checkout; with that fixed
 ### git.git
 
 82,725 commits, git 2.43.0, one run each (REPEAT=1), 2026-11-10 at
-3178c9e (bench build, default threads: four). git's clone uses four threads; with
+e4fa8ba (bench build, default threads: four; gc and path-log incremental).
+This machine's timings vary a lot run to run: checkout took 0.36 to 1.1 s
+and a commit of 500 files 0.34 to 0.77 s in back-to-back runs, git's 0.15
+to 0.40 s. git's clone uses four threads; with
 `pack.threads=1` it takes 28.5 s. Earlier runs timed git fast-import on
 a truncated stream: `fast-export --all` stopped at a commit with a
 declared iso-8859-8 encoding (61k of 83k commits). run.sh now passes
@@ -113,27 +116,32 @@ a failing setup step shows as FAIL.
 
 | test (t/perf script) | git | cas | cas/git |
 | --- | --- | --- | --- |
-| rev-list --all (p0001) | 0.868 | 0.428 | 0.5 |
-| rev-list -- PATH, most-changed file (p0001) | 0.872 | 0.457 | 0.5 |
-| count commits (p5600) | 0.895 | 0.468 | 0.5 |
-| ls-tree -r of the tip (p3010 ls-files) | 0.010 | 0.024 | 2.4 |
-| diff of the last step (p4000) | 0.005 | 0.008 | 1.6 |
-| checkout the tip into an empty dir (p0006) | 0.570 | 0.537 | 0.9 |
-| commit, nothing changed (p0005 status) | 0.281 | 0.230 | 0.8 |
-| commit 500 new files (p0008 odb-fsync) | 0.431 | 0.376 | 0.9 |
-| clone over the network (p5601) | 21.819 | 17.736 | 0.8 |
-| clone without blobs (p5600) | 10.011 | - | - |
-| fetch one file, no clone (cas only) | 0.229 | 0.026 | 0.1 |
-| push one new commit | 0.138 | 0.072 | 0.5 |
-| list every object (p1006 cat-file --batch-all-objects) | 0.636 | 0.391 | 0.6 |
-| merge-base of the tip and a node 100 back (p6010) | 0.012 | 0.027 | 2.2 |
-| last-modified of the root's entries (p8020) | - | 3.989 | - |
-| fsck (p1450) | 38.005 | 14.145 | 0.4 |
-| fast-import (p9300) / import-git | 305.401 | 94.193 | 0.3 |
-| gc (p5600) | 13.490 | 11.263 | 0.8 |
+| rev-list --all (p0001) | 0.943 | 0.340 | 0.4 |
+| rev-list -- PATH, most-changed file (p0001) | 0.962 | 0.527 | 0.5 |
+| count commits (p5600) | 0.915 | 0.430 | 0.5 |
+| ls-tree -r of the tip (p3010 ls-files) | 0.010 | 0.030 | 3.0 |
+| diff of the last step (p4000) | 0.007 | 0.012 | 1.7 |
+| checkout the tip into an empty dir (p0006) | 0.474 | 0.631 | 1.3 |
+| commit, nothing changed (p0005 status) | 0.166 | 0.063 | 0.4 |
+| commit 500 new files (p0008 odb-fsync) | 0.401 | 0.766 | 1.9 |
+| clone over the network (p5601) | 23.062 | 20.919 | 0.9 |
+| clone without blobs (p5600) | 9.892 | - | - |
+| fetch one file, no clone (cas only) | 0.204 | 0.026 | 0.1 |
+| push one new commit | 0.143 | 0.109 | 0.8 |
+| list every object (p1006 cat-file --batch-all-objects) | 1.081 | 0.359 | 0.3 |
+| merge-base of the tip and a node 100 back (p6010) | 0.016 | 0.036 | 2.2 |
+| last-modified of the root's entries (p8020) | - | 0.638 | - |
+| fsck (p1450) | 35.451 | 16.290 | 0.5 |
+| fast-import (p9300) / import-git | 287.710 | 108.968 | 0.4 |
+| gc (p5600) | 14.908 | 7.084 | 0.5 |
 
 ## What the numbers say
 
+- **Open items resolved, 2026-11-10:** last-modified reads each directory
+  blob once (4.8 -> 2.4 G instructions); gc walks and repacks only what
+  came since the last full run (a gc after a commit 14 s -> 0.8 s, git
+  13.5 s; spec/gc.md); a history without a graph extends the one of the
+  history it replaced (path-log after commits 1.6 -> 0.4 s; spec/derived.md).
 - **git.git, 2026-11-10, four threads, no watcher:** every command
   but three is faster than git: ls (24 ms, git 10), diff (8 ms, 5) and
   merge-base (27 ms, 12) are slower, most of it the hash check on every
