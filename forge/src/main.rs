@@ -26,8 +26,16 @@ const USAGE: &str = "usage:
       pull a mirror now
   cas-forge export <store> <owner>/<project> <history> <git-repo> [<branch>]
       write a history to a git repository, one commit per node
+  cas-forge password <store> <name>
+      set a user's password (read from standard input), as for accounts a migration made
   cas-forge runner <url> --token-file <file> [--ca <file>] [--once]
-      run checks for a forge: take jobs, run them, post results";
+      run checks for a forge: take jobs, run them, post results
+  cas-forge migrate-gitea <store> <gitea-url> --as <admin> [--repo <owner>/<name>]... [--dry-run]
+          [--token-file <file>] [--proxy <url>] [--git <base>] [--cache <dir>]
+      move Gitea repositories (all it shows, or each --repo) into new projects: code, labels,
+      issues, pull requests, collaborators and accounts. Gitea is only read: API GETs and
+      git fetch. --dry-run reads and reports without writing the store. --git <base> fetches
+      code from <base>/<owner>/<name>.git instead of the Gitea URL";
 
 type Res<T> = Result<T, String>;
 
@@ -44,13 +52,17 @@ impl Args {
         let i = self.flags.iter().position(|f| f == name)?;
         self.flags.get(i + 1).cloned()
     }
+    fn values(&self, name: &str) -> Vec<String> {
+        self.flags.windows(2).filter(|w| w[0] == name).map(|w| w[1].clone()).collect()
+    }
     fn pos(&self, i: usize, what: &str) -> Res<&str> {
         self.pos.get(i).map(String::as_str).ok_or(format!("missing {what}\n{USAGE}"))
     }
 }
 
 fn parse(raw: Vec<String>) -> Args {
-    const VALUED: &[&str] = &["--cert", "--key", "--web", "--cache", "--token-file", "--ca"];
+    const VALUED: &[&str] =
+        &["--cert", "--key", "--web", "--cache", "--token-file", "--ca", "--as", "--repo", "--proxy", "--git"];
     let (mut pos, mut flags) = (Vec::new(), Vec::new());
     let mut it = raw.into_iter();
     while let Some(a) = it.next() {
@@ -170,8 +182,73 @@ fn run(a: Args) -> Res<()> {
             Ok(())
         }
         Some("runner") => runner(&a),
+        Some("password") => {
+            let forge = open(a.pos(1, "<store>")?)?;
+            let name = a.pos(2, "<name>")?;
+            let mut pw = String::new();
+            std::io::stdin().read_to_string(&mut pw).map_err(e)?;
+            forge.set_password(name, pw.trim_end_matches(['\n', '\r'])).map_err(e)?;
+            println!("password set for {name}");
+            Ok(())
+        }
+        Some("migrate-gitea") => migrate(&a),
         _ => Err(USAGE.into()),
     }
+}
+
+/// Move Gitea repositories into the forge; Gitea is only read.
+fn migrate(a: &Args) -> Res<()> {
+    use cas_forge::migrate::{Gitea, Plan};
+    let store = a.pos(1, "<store>")?;
+    let url = a.pos(2, "<gitea-url>")?;
+    let admin = a.value("--as").ok_or("migrate-gitea needs --as <admin>: the forge account that makes the projects")?;
+    let token = a
+        .value("--token-file")
+        .map(|f| std::fs::read_to_string(&f).map(|t| t.trim().to_string()).map_err(|x| format!("{f}: {x}")))
+        .transpose()?;
+    let g = Gitea::new(url, token, a.value("--proxy").as_deref()).map_err(e)?;
+    let forge = open(store)?;
+    let dry = a.flag("--dry-run");
+    if !dry && !forge.is_admin(&admin) {
+        return Err(format!("{admin} is not an administrator of this forge"));
+    }
+    let cache = cache_dir(a, store);
+    let git = a.value("--git");
+    let plan = Plan { admin: &admin, git_base: git.as_deref(), dry_run: dry, cache: &cache };
+    let mut repos = a.values("--repo");
+    if repos.is_empty() {
+        repos = g.repos().map_err(e)?;
+    }
+    let mut failed = 0;
+    for full in &repos {
+        eprintln!("{full} ...");
+        match forge.migrate_repo(&g, full, &plan) {
+            Ok(m) => {
+                println!(
+                    "{full} -> {}{}: {} commits, histories [{}], {} labels, {} issues, {} proposals, {} comments",
+                    m.project,
+                    if dry { " (dry run)" } else { "" },
+                    m.commits,
+                    m.histories.join(" "),
+                    m.labels,
+                    m.issues,
+                    m.proposals,
+                    m.comments
+                );
+                if !m.accounts.is_empty() {
+                    println!("  new accounts, without passwords: {}", m.accounts.join(", "));
+                }
+                for n in &m.notes {
+                    println!("  note: {n}");
+                }
+            }
+            Err(x) => {
+                failed += 1;
+                println!("{full}: not migrated: {x}");
+            }
+        }
+    }
+    if failed > 0 { Err(format!("{failed} of {} repositories not migrated", repos.len())) } else { Ok(()) }
 }
 
 /// An HTTPS agent trusting `ca` (PEM) or the public roots.

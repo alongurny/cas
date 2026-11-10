@@ -70,7 +70,7 @@ impl Forge {
 
     /// Add a revision to `r` from the source's and target's current views,
     /// unless the latest has the same source.
-    fn revise(&self, p: &ProjectId, r: &mut Record) -> Result<bool> {
+    pub(crate) fn revise(&self, p: &ProjectId, r: &mut Record) -> Result<bool> {
         let src = cas_version::history::head(&*self.store, &p.var(r.doc.s("source")))?
             .ok_or_else(|| Error::missing("the proposal's source is gone"))?;
         let k = r.doc.doc("revisions").0.len() as u64;
@@ -204,6 +204,23 @@ impl Forge {
         j["gates"] = self.gates(p, &r)?.json();
         j["diff"] = diff;
         j["merged"] = json!(r.doc.opt("merged"));
+        // What a migration kept from elsewhere (spec/forge/migrate.md).
+        let im = r.doc.doc("imported");
+        if !im.0.is_empty() {
+            let mut x = im.json();
+            x["comments"] = json!(im.list("comments").iter().map(Doc::json).collect::<Vec<_>>());
+            x["reviews"] = json!(
+                im.list("reviews")
+                    .iter()
+                    .map(|rv| {
+                        let mut y = rv.json();
+                        y["comments"] = json!(rv.list("comments").iter().map(Doc::json).collect::<Vec<_>>());
+                        y
+                    })
+                    .collect::<Vec<_>>()
+            );
+            j["imported"] = x;
+        }
         Ok(j)
     }
 

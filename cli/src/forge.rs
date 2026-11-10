@@ -925,6 +925,23 @@ fn print_proposal(j: &J) {
     if !merged.is_empty() {
         out!("merged as {}", short(&merged));
     }
+    let im = &j["imported"];
+    if im.is_object() {
+        out!("from {}", s(im, "from"));
+        let body = s(im, "body");
+        if !body.is_empty() {
+            out!("{body}");
+        }
+        for c in arr(&im["comments"]) {
+            out!("  {} {}: {}", s(&c, "author"), when(&s(&c, "time")), s(&c, "text").replace('\n', "\n    "));
+        }
+        for r in arr(&im["reviews"]) {
+            out!("  review by {} ({}) {}: {}", s(&r, "author"), s(&r, "state"), when(&s(&r, "time")), s(&r, "text"));
+            for c in arr(&r["comments"]) {
+                out!("    {}:{} {}", s(&c, "path"), s(&c, "line"), s(&c, "text"));
+            }
+        }
+    }
     out!("");
     for l in arr(&j["diff"]["lines"]) {
         out!("{}", l.as_str().map(String::from).unwrap_or_else(|| s(&l, "text")));

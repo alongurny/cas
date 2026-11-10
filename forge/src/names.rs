@@ -5,7 +5,7 @@ use crate::{Error, Result};
 use std::fmt;
 
 /// Names that cannot be owners: they are paths of the forge itself.
-const RESERVED: &[&str] = &["forge", "api", "p", "static", "admin", "new", "login", "user"];
+pub const RESERVED: &[&str] = &["forge", "api", "p", "static", "admin", "new", "login", "user"];
 
 /// A lowercase name: letters, digits and `-`, starting with a letter or
 /// digit, at most 64 bytes.

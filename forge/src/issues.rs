@@ -37,7 +37,7 @@ impl Forge {
 
     /// Commit `edits` (made by `f` from the current version) to the issues
     /// history, retried while others commit first.
-    fn commit_issues(
+    pub(crate) fn commit_issues(
         &self,
         user: &str,
         p: &ProjectId,
@@ -73,7 +73,7 @@ impl Forge {
         Ok(())
     }
 
-    fn put_doc(&self, d: &Doc) -> Result<Node> {
+    pub(crate) fn put_doc(&self, d: &Doc) -> Result<Node> {
         Ok(Node::File(put(&*self.store, self.alg, "uni-txt", d.text().as_bytes())?))
     }
 

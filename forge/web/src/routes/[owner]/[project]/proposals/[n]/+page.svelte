@@ -62,6 +62,21 @@
 		{/if}
 	</div>
 
+	{#if p.imported}
+		<div class="panel">
+			<strong>From <a href={p.imported.from}>{p.imported.from}</a></strong>
+			{#if p.imported.body}<pre>{p.imported.body}</pre>{/if}
+			{#each p.imported.comments ?? [] as c, i (i)}
+				<div><strong>{c.author}</strong> <span class="muted">{when(c.time)}</span><pre>{c.text}</pre></div>
+			{/each}
+			{#each p.imported.reviews ?? [] as r, i (i)}
+				<div><strong>{r.author}</strong> <span class="muted">{r.state} {when(r.time)}</span>{#if r.text}<pre>{r.text}</pre>{/if}
+					{#each r.comments ?? [] as c, k (k)}<pre class="mono">{c.path}:{c.line} {c.text}</pre>{/each}
+				</div>
+			{/each}
+		</div>
+	{/if}
+
 	{#if p.diff}
 		<h2>Changes <span class="muted">(tap a line to start a thread)</span></h2>
 		<Diff lines={p.diff.lines.map((t: string) => ({ text: t }))} threads={p.threads} onpick={p.state === 'open' && me ? (x) => (pick = x) : undefined} />
