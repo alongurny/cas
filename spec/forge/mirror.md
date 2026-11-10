@@ -14,7 +14,7 @@ imports each branch whole; since an import gives the same nodes for the
 same commits, the new history extends the old one, and a history the
 remote rewrote (dropping nodes) is refused. Importing only the commits
 added since the last pull is not done yet. Git's own objects are stored
-too (those new since `packed`), and the project's links
+too (those new since `packed`), and each history's links
 ([git](git.md)) say which commit each imported node is, so the project
 served as git has the remote's commit ids.
 

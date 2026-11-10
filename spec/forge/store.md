@@ -20,7 +20,7 @@ collected like any other data.
 | `p/<owner>/<project>/r/<n>` | Proposal `n` ([proposal](proposal.md)) |
 | `p/<owner>/<project>/i` | The issues history ([issues](issues.md)) |
 | `p/<owner>/<project>/m/<name>` | A mirror's state ([mirror](mirror.md)) |
-| `p/<owner>/<project>/git` | Which git commit each node is ([git](git.md)) |
+| `p/<owner>/<project>/git/<history>` | Which git commit each node of a history is ([git](git.md)) |
 | `derived/<F>/<X>` | Derived results: blame, check results ([checks](checks.md)) |
 
 Owner, project and user names are lowercase letters, digits and `-`,
@@ -52,7 +52,7 @@ record, write expecting the old view, retry on conflict.
 The forge serves the cas wire for each project at
 `https://<host>/p/<owner>/<project>`: variable names there are under the
 project's prefix, as if the project were a store of its own. Every
-variable outside a project, and `meta`, `r/`, `i`, `m/` and `git` inside one,
+variable outside a project, and `meta`, `r/`, `i`, `m/` and `git/` inside one,
 change only through the forge's API, which checks the rules of each
 record. On the wire, by role ([project](project.md)):
 
@@ -60,7 +60,7 @@ record. On the wire, by role ([project](project.md)):
 | --- | --- | --- |
 | `h/<name>` | read | maintain, when not protected; never when protected |
 | `u/<user>/...` | read | write, for the user's own |
-| `r/`, `i`, `git` | read | never |
+| `r/`, `i`, `git/` | read | never |
 | `meta`, `m/` | never | never |
 
 Blob reads are scoped by reachability: a caller may read a blob only when a

@@ -252,6 +252,13 @@ fn a_mirrored_repository_keeps_its_commit_ids() {
     s.must(&up, &["checkout", "-q", "main"]);
     std::fs::write(up.join("a"), "1\n1\n").unwrap();
     s.must(&up, &["commit", "-q", "-am", "two"]);
+    // A merge whose tree is its branch's: two commits, one version.
+    s.must(&up, &["checkout", "-q", "-b", "same"]);
+    std::fs::write(up.join("c"), "3\n").unwrap();
+    s.must(&up, &["add", "c"]);
+    s.must(&up, &["commit", "-q", "-m", "same tree"]);
+    s.must(&up, &["checkout", "-q", "main"]);
+    s.must(&up, &["merge", "-q", "--no-ff", "-m", "merge same", "same"]);
     s.ok("POST", "projects/alice/m/mirrors", Some(&alice), Some(json!({ "name": "up", "url": up.to_str().unwrap() })));
     s.ok("POST", "projects/alice/m/mirrors/up/pull", Some(&alice), None);
 
@@ -261,6 +268,7 @@ fn a_mirrored_repository_keeps_its_commit_ids() {
     let c = work.join("c");
     assert_eq!(s.must(&c, &["rev-parse", "HEAD"]), s.must(&up, &["rev-parse", "main"]));
     assert_eq!(s.must(&c, &["rev-parse", "origin/u/alice/side"]), s.must(&up, &["rev-parse", "side"]));
+    assert_eq!(s.must(&c, &["rev-parse", "origin/u/alice/same"]), s.must(&up, &["rev-parse", "same"]));
     assert_eq!(s.must(&c, &["rev-parse", "v1^{commit}"]), s.must(&up, &["rev-parse", "v1^{commit}"]));
     s.must(&c, &["fsck", "--strict", "--no-dangling"]);
 

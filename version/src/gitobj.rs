@@ -632,10 +632,30 @@ impl<'a> TreeWriter<'a> {
 /// always gives the same commits. Nodes already linked keep their commits
 /// (a history that came from git keeps git's ids).
 pub fn to_git(store: &dyn Store, h: &History, links: &mut Links) -> Result<usize> {
+    to_git_from(store, h, links, &[])
+}
+
+/// [`to_git`], where a node of `h` that one of `others` holds with the
+/// same predecessors, themselves the same commits, takes that history's
+/// commit: a node shared by two histories is one commit.
+pub fn to_git_from(store: &dyn Store, h: &History, links: &mut Links, others: &[Other<'_>]) -> Result<usize> {
     let mut tw = TreeWriter::new(store);
     let mut made = 0;
     for (id, n) in predecessors_first(h.nodes.clone()) {
         if links.contains_key(&id) {
+            continue;
+        }
+        let shared = others.iter().find_map(|(oh, ol)| {
+            let c = ol.get(&id)?;
+            let on = oh.nodes.get(&id)?;
+            let same = on.after.len() == n.after.len()
+                && n.after
+                    .keys()
+                    .all(|p| on.after.contains_key(p) && links.get(p).is_some() && links.get(p) == ol.get(p));
+            same.then(|| c.clone())
+        });
+        if let Some(c) = shared {
+            links.insert(id, c);
             continue;
         }
         let tree = tw.tree(&id.version())?;
@@ -831,44 +851,57 @@ pub fn extend(
     extend_from(store, alg, h, links, tip, &[])
 }
 
-/// Copy node `id` and every node before it from `from` into `h`, where
-/// `h` lacks them.
-fn graft(h: &mut History, from: &History, id: &NodeId) {
+/// Copy node `id` and every node before it from `from` into `h`, with
+/// their commits from `from_links` into `links`, where `h` lacks them. A
+/// node `h` holds already must be the same commit.
+fn graft(h: &mut History, links: &mut Links, from: &History, from_links: &Links, id: &NodeId) -> Result<()> {
     let mut stack = vec![id.clone()];
     while let Some(n) = stack.pop() {
+        let c = from_links.get(&n).ok_or_else(|| Error::Missing(format!("commit of node {n}")))?;
         if h.nodes.contains_key(&n) {
+            if links.get(&n) != Some(c) {
+                return Err(Error::Diverged(format!("node {n} is another commit here")));
+            }
             continue;
         }
-        let Some(node) = from.nodes.get(&n) else { continue };
+        let Some(node) = from.nodes.get(&n) else { return Err(Error::Missing(format!("node {n}"))) };
         stack.extend(node.after.keys().cloned());
-        h.nodes.insert(n, node.clone());
+        h.nodes.insert(n.clone(), node.clone());
+        links.insert(n, c.clone());
     }
+    Ok(())
 }
 
-/// [`extend`], where `links` may name nodes of other histories: a commit
-/// already a node of one of `others` (and not of `h`) brings that node and
-/// what precedes it into `h`, so histories that share commits share nodes.
+/// Another history and its links, whose commits a conversion may share.
+pub type Other<'a> = (&'a History, &'a Links);
+
+/// [`extend`], where commits may already be nodes of `others`: such a
+/// commit brings its node, and what precedes it, into `h`, so histories
+/// that share commits share nodes.
 pub fn extend_from(
     store: &dyn Store,
     alg: &'static Algorithm,
     h: &mut History,
     links: &mut Links,
     tip: &str,
-    others: &[&History],
+    others: &[Other<'_>],
 ) -> Result<NodeId> {
-    let node_of: HashMap<String, NodeId> = links.iter().map(|(n, c)| (c.clone(), n.clone())).collect();
-    let bring = |h: &mut History, n: &NodeId| -> Result<()> {
-        if h.nodes.contains_key(n) {
-            return Ok(());
+    // Each known commit: its node, and the history it is in (`None`: `h`).
+    let mut node_of: HashMap<String, (NodeId, Option<usize>)> =
+        links.iter().map(|(n, c)| (c.clone(), (n.clone(), None))).collect();
+    for (i, (_, l)) in others.iter().enumerate() {
+        for (n, c) in l.iter() {
+            node_of.entry(c.clone()).or_insert((n.clone(), Some(i)));
         }
-        let from =
-            others.iter().find(|o| o.nodes.contains_key(n)).ok_or_else(|| Error::Missing(format!("node {n}")))?;
-        graft(h, from, n);
-        Ok(())
+    }
+    let bring = |h: &mut History, links: &mut Links, (n, from): &(NodeId, Option<usize>)| -> Result<NodeId> {
+        if let Some(i) = from {
+            graft(h, links, others[*i].0, others[*i].1, n)?;
+        }
+        Ok(n.clone())
     };
-    if let Some(n) = node_of.get(tip) {
-        bring(h, n)?;
-        return Ok(n.clone());
+    if let Some(k) = node_of.get(tip) {
+        return bring(h, links, k);
     }
     // The new commits, parents before children.
     let mut order: Vec<(String, String, Vec<String>, String)> = Vec::new();
@@ -902,14 +935,13 @@ pub fn extend_from(
         info.insert(c, (tree, parents, msg));
     }
     let mut vw = VersionWriter::new(store, alg);
-    let mut node_of = node_of;
     let mut last = None;
     for (c, tree, parents, msg) in order {
         let version = vw.version(&tree)?;
         let mut after = BTreeMap::new();
         for (i, p) in parents.iter().enumerate() {
-            let pn = node_of.get(p).ok_or_else(|| Error::Missing(format!("node of commit {p}")))?.clone();
-            bring(h, &pn)?;
+            let k = node_of.get(p).ok_or_else(|| Error::Missing(format!("node of commit {p}")))?.clone();
+            let pn = bring(h, links, &k)?;
             let mut step = crate::history::Step::default();
             if i == 0 && !msg.is_empty() {
                 let sn = crate::stepnotes::StepNotes {
@@ -925,7 +957,7 @@ pub fn extend_from(
         let doc = (parents.is_empty() && !msg.is_empty()).then(|| msg.clone());
         let id = h.add(&version, after, doc)?;
         links.insert(id.clone(), c.clone());
-        node_of.insert(c, id.clone());
+        node_of.insert(c, (id.clone(), None));
         last = Some(id);
     }
     last.ok_or_else(|| Error::Missing(format!("commit {tip}")))

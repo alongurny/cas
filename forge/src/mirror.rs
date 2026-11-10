@@ -74,15 +74,10 @@ impl Forge {
                 .into_owned();
         // Git's own objects come too, so the commits keep their ids.
         let packed = self.mirror_objects(&dir, r.doc.s("packed"))?;
-        let (lv, mut links) = self.git_links(p)?;
-        let linked = links.len();
         let mut out = Pulled::default();
         for b in branches.lines().filter(|b| !b.is_empty()) {
             let (h, im) = cas_version::git::import(&*self.store, self.alg, &dir, b)?;
             out.commits = out.commits.max(im.commits);
-            for (c, n) in &im.nodes {
-                links.entry(n.clone()).or_insert_with(|| c.clone());
-            }
             let target = if b == default { DEV.to_string() } else { format!("u/{}/{}", p.owner, b.replace('/', "-")) };
             if crate::names::check_history(&target).is_err() {
                 continue;
@@ -93,12 +88,20 @@ impl Forge {
             }
             let mut h = h;
             h.tags.clear();
+            // Each node is the commit it came from.
+            let (lv, mut links) = self.git_links(p, &target)?;
+            let before = links.len();
+            for (c, n) in &im.nodes {
+                if h.nodes.contains_key(n) {
+                    links.entry(n.clone()).or_insert_with(|| c.clone());
+                }
+            }
+            if links.len() != before {
+                self.save_links(p, &target, lv, &links)?;
+            }
             if self.replace_history(user, p, &target, &h)? {
                 out.moved.push(target);
             }
-        }
-        if links.len() != linked {
-            self.save_links(p, lv, &links)?;
         }
         let tip = String::from_utf8_lossy(&git(&dir, &["rev-parse", &default])?).trim().to_string();
         record::update(&*self.store, self.alg, &var, |cur| {

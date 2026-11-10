@@ -15,10 +15,11 @@ use cas_version::history::{self, History, NodeId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
-/// The project variable that holds the project's links: which git commit
-/// each node of its histories is. One map for the whole project, so a
-/// node shared by two histories is the same commit in both.
-pub const LINKS: &str = "git";
+/// Where a history's links are kept: which git commit each of its nodes
+/// is, in project variable `git/<history>`.
+pub fn links_var(history: &str) -> String {
+    format!("git/{history}")
+}
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 /// The most a request body may grow to once ungzipped.
@@ -247,17 +248,17 @@ impl Forge {
 
     // ---- refs ----
 
-    /// The project's links and the view they were read from.
-    pub fn git_links(&self, p: &ProjectId) -> Result<(Option<View>, Links)> {
-        match history::head(&*self.store, &p.var(LINKS))? {
+    /// History `var`'s links and the view they were read from.
+    pub fn git_links(&self, p: &ProjectId, var: &str) -> Result<(Option<View>, Links)> {
+        match history::head(&*self.store, &p.var(&links_var(var)))? {
             None => Ok((None, Links::new())),
             Some(v) => Ok((Some(v.clone()), gitobj::read_links(&*self.store, &v)?)),
         }
     }
 
-    /// Save `links` over `old`; a concurrent change is merged in (links
-    /// only grow, and a node's commit never changes).
-    pub fn save_links(&self, p: &ProjectId, old: Option<View>, links: &Links) -> Result<()> {
+    /// Save history `var`'s `links` over `old`; a concurrent change is
+    /// merged in (links only grow, and a node's commit never changes).
+    pub fn save_links(&self, p: &ProjectId, var: &str, old: Option<View>, links: &Links) -> Result<()> {
         let (mut old, mut links) = (old, links.clone());
         for _ in 0..8 {
             let v = gitobj::write_links(&*self.store, self.alg, &links)?;
@@ -265,10 +266,10 @@ impl Forge {
                 return Ok(());
             }
             let expect = old.as_ref().map_or(Expect::Absent, |o| Expect::Value(o.to_string().into_bytes()));
-            match self.store.write(&p.var(LINKS), v.to_string().as_bytes(), &expect) {
+            match self.store.write(&p.var(&links_var(var)), v.to_string().as_bytes(), &expect) {
                 Ok(_) => return Ok(()),
                 Err(cas_core::Error::Conflict) => {
-                    let (now, theirs) = self.git_links(p)?;
+                    let (now, theirs) = self.git_links(p, var)?;
                     for (n, c) in theirs {
                         links.entry(n).or_insert(c);
                     }
@@ -277,55 +278,83 @@ impl Forge {
                 Err(e) => return Err(e.into()),
             }
         }
-        Err(Error::conflict("the project's git links kept moving"))
+        Err(Error::conflict(format!("the git links of {var} kept moving")))
     }
 
-    /// Every ref git sees, by name, with its commit (or tag object), made
-    /// from the project's histories; commits are made for nodes that have
-    /// none yet.
-    fn refs(&self, p: &ProjectId) -> Result<BTreeMap<String, String>> {
-        let (old, mut links) = self.git_links(p)?;
-        let before = links.len();
+    /// Every history of `p` git sees, dev first, with its links.
+    fn linked(&self, p: &ProjectId) -> Result<Vec<Linked>> {
         let prefix = p.prefix();
-        let mut out = BTreeMap::new();
-        let mut tags: Vec<(String, NodeId, bool)> = Vec::new();
-        let mut by_version: BTreeMap<View, String> = BTreeMap::new();
-        for var in self.store.list_all(&cas_core::Span::prefix(prefix.as_bytes()))? {
-            let rest = &var[prefix.len()..];
-            let Some(r) = ref_of(rest) else { continue };
-            let Some((_, h)) = self.history(p, rest)? else { continue };
-            gitobj::to_git(&*self.store, &h, &mut links)?;
-            if rest != RELEASE {
-                for (n, c) in &links {
-                    if h.nodes.contains_key(n) {
-                        by_version.entry(n.version()).or_insert_with(|| c.clone());
-                    }
-                }
-            }
-            if let Some(t) = tip_of(&h) {
-                out.insert(r, links[&t].clone());
-            }
-            for (name, n) in &h.tags {
-                tags.push((name.clone(), n.clone(), rest == RELEASE));
-            }
-        }
-        // A release's tag names the commit of a non-release history with
-        // its version when there is one: the commit the work made.
-        tags.sort_by_key(|(_, _, release)| !release);
-        for (name, n, _) in tags {
-            let c = by_version.get(&n.version()).or_else(|| links.get(&n)).cloned();
-            if let Some(c) = c {
-                out.entry(format!("refs/tags/{name}")).or_insert(c);
-            }
-        }
-        if links.len() != before {
-            self.save_links(p, old, &links)?;
+        let mut names: Vec<String> = self
+            .store
+            .list_all(&cas_core::Span::prefix(prefix.as_bytes()))?
+            .into_iter()
+            .map(|v| v[prefix.len()..].to_string())
+            .filter(|r| ref_of(r).is_some())
+            .collect();
+        names.sort_by_key(|r| r != crate::project::DEV);
+        let mut out = Vec::new();
+        for var in names {
+            let Some((view, h)) = self.history(p, &var)? else { continue };
+            let (links_view, links) = self.git_links(p, &var)?;
+            let before = links.len();
+            out.push(Linked { var, view, h, links, links_view, before });
         }
         Ok(out)
     }
 
+    /// Give every node of every history a commit, sharing commits between
+    /// histories where nodes are the same, and save the links that grew.
+    fn link_all(&self, p: &ProjectId) -> Result<Vec<Linked>> {
+        let mut all = self.linked(p)?;
+        for i in 0..all.len() {
+            let mut links = std::mem::take(&mut all[i].links);
+            let others: Vec<gitobj::Other<'_>> =
+                all.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, l)| (&*l.h, &l.links)).collect();
+            gitobj::to_git_from(&*self.store, &all[i].h, &mut links, &others)?;
+            all[i].links = links;
+        }
+        for l in &all {
+            if l.links.len() != l.before {
+                self.save_links(p, &l.var, l.links_view.clone(), &l.links)?;
+            }
+        }
+        Ok(all)
+    }
+
+    /// Every ref git sees, by name, with its commit (or tag object), made
+    /// from the project's histories.
+    fn refs(&self, p: &ProjectId) -> Result<(BTreeMap<String, String>, Vec<Linked>)> {
+        let all = self.link_all(p)?;
+        let mut out = BTreeMap::new();
+        let mut tags: Vec<(String, NodeId, usize)> = Vec::new();
+        let mut by_version: BTreeMap<View, String> = BTreeMap::new();
+        for (i, l) in all.iter().enumerate() {
+            if l.var != RELEASE {
+                for (n, c) in &l.links {
+                    by_version.entry(n.version()).or_insert_with(|| c.clone());
+                }
+            }
+            if let (Some(r), Some(t)) = (ref_of(&l.var), tip_of(&l.h)) {
+                out.insert(r, l.links[&t].clone());
+            }
+            for (name, n) in &l.h.tags {
+                tags.push((name.clone(), n.clone(), i));
+            }
+        }
+        // A release's tag names the commit of a non-release history with
+        // its version when there is one: the commit the work made.
+        tags.sort_by_key(|(_, _, i)| all[*i].var != RELEASE);
+        for (name, n, i) in tags {
+            let c = by_version.get(&n.version()).or_else(|| all[i].links.get(&n)).cloned();
+            if let Some(c) = c {
+                out.entry(format!("refs/tags/{name}")).or_insert(c);
+            }
+        }
+        Ok((out, all))
+    }
+
     fn ls_refs(&self, p: &ProjectId, args: &[&str]) -> Result<Vec<u8>> {
-        let refs = self.refs(p)?;
+        let (refs, _) = self.refs(p)?;
         let prefixes: Vec<&str> = args.iter().filter_map(|a| a.strip_prefix("ref-prefix ")).collect();
         let (symrefs, peel, unborn) = (args.contains(&"symrefs"), args.contains(&"peel"), args.contains(&"unborn"));
         let wanted = |r: &str| prefixes.is_empty() || prefixes.iter().any(|x| r.starts_with(x));
@@ -385,12 +414,14 @@ impl Forge {
         if args.iter().any(|a| a.starts_with("deepen") || a.starts_with("shallow ") || a.starts_with("filter ")) {
             return Err(Error::bad("shallow and partial clones are not served; clone in full"));
         }
-        let refs = self.refs(p)?;
-        let (_, links) = self.git_links(p)?;
+        let (refs, all) = self.refs(p)?;
         // What a caller may ask for: what the refs name and every commit of
         // the project's histories, never another project's objects.
-        let mine: BTreeSet<&str> =
-            refs.values().map(String::as_str).chain(links.values().map(String::as_str)).collect();
+        let mine: BTreeSet<&str> = refs
+            .values()
+            .map(String::as_str)
+            .chain(all.iter().flat_map(|l| l.links.values().map(String::as_str)))
+            .collect();
         let mut wants = Vec::new();
         for a in args.iter().filter_map(|a| a.strip_prefix("want ")) {
             if !mine.contains(a) {
@@ -439,7 +470,7 @@ impl Forge {
     // ---- push ----
 
     fn advertise_receive(&self, _c: Option<&Caller>, p: &ProjectId) -> Result<Response> {
-        let refs = self.refs(p)?;
+        let (refs, _) = self.refs(p)?;
         let mut out = Vec::new();
         pkt_str(&mut out, "# service=git-receive-pack\n");
         out.extend_from_slice(FLUSH);
@@ -527,14 +558,15 @@ impl Forge {
             };
             return Err(Error::denied(why));
         }
-        let (old_view, h) = match self.history(p, &var)? {
-            Some((v, h)) => (Some(v), (*h).clone()),
-            None => (None, History::default()),
+        let mut all = self.link_all(p)?;
+        let at = all.iter().position(|l| l.var == var);
+        let (old_view, h, lv, mut links) = match at {
+            Some(i) => {
+                let l = all.remove(i);
+                (Some(l.view), (*l.h).clone(), l.links_view, l.links)
+            }
+            None => (None, History::default(), self.git_links(p, &var)?.0, Links::new()),
         };
-        let (lv, mut links) = self.git_links(p)?;
-        if !h.nodes.is_empty() {
-            gitobj::to_git(&*self.store, &h, &mut links)?;
-        }
         let current = tip_of(&h).map(|t| links[&t].clone()).unwrap_or_else(|| ZERO.to_string());
         if current != old {
             return Err(Error::conflict("stale info: fetch first"));
@@ -545,11 +577,13 @@ impl Forge {
             }
             let Some(ov) = old_view else { return Ok(()) };
             as_actor(Some(&c.user), || self.store.remove(&p.var(&var), &Expect::Value(ov.to_string().into_bytes())))?;
+            if let Some(lv) = lv {
+                self.store.remove(&p.var(&links_var(&var)), &Expect::Value(lv.to_string().into_bytes()))?;
+            }
             return Ok(());
         }
         let mut h2 = h.clone();
-        let others = self.other_histories(p, &var)?;
-        let others: Vec<&History> = others.iter().map(|h| &**h).collect();
+        let others: Vec<gitobj::Other<'_>> = all.iter().map(|l| (&*l.h, &l.links)).collect();
         let tip = gitobj::extend_from(&*self.store, self.alg, &mut h2, &mut links, new, &others)?;
         if h2.tips() != BTreeSet::from([tip.clone()]) || !h2.extends(&h) {
             return Err(Error::conflict("non-fast-forward: a history only grows"));
@@ -557,32 +591,20 @@ impl Forge {
         if dry || h2 == h {
             return Ok(());
         }
-        self.save_links(p, lv, &links)?;
+        self.save_links(p, &var, lv, &links)?;
         as_actor(Some(&c.user), || history::save(&*self.store, self.alg, &p.var(&var), old_view.as_ref(), &h2))?;
         Ok(())
     }
 }
 
-impl Forge {
-    /// The project's histories but `var`, dev first.
-    fn other_histories(&self, p: &ProjectId, var: &str) -> Result<Vec<std::sync::Arc<History>>> {
-        let prefix = p.prefix();
-        let mut names: Vec<String> = self
-            .store
-            .list_all(&cas_core::Span::prefix(prefix.as_bytes()))?
-            .into_iter()
-            .map(|v| v[prefix.len()..].to_string())
-            .filter(|r| r != var && ref_of(r).is_some())
-            .collect();
-        names.sort_by_key(|r| r != crate::project::DEV);
-        let mut out = Vec::new();
-        for r in names {
-            if let Some((_, h)) = self.history(p, &r)? {
-                out.push(h);
-            }
-        }
-        Ok(out)
-    }
+/// A history git sees, with its links.
+struct Linked {
+    var: String,
+    view: View,
+    h: std::sync::Arc<History>,
+    links: Links,
+    links_view: Option<View>,
+    before: usize,
 }
 
 fn one_line(s: &str) -> String {
