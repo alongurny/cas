@@ -125,7 +125,7 @@ pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
         let versions = h.log().into_iter().rev().map(|id| id.version()).collect();
         return copy_history(src, dst, root, versions, HashSet::new());
     }
-    Copier::new(src, dst, HashSet::new()).copy_root(root)
+    std::thread::scope(|sc| Copier::new(src, dst, HashSet::new(), Writer::start(sc, dst)).copy_root(root))
 }
 
 /// Copy the history at `root` in `src` into `dst`: first `versions`
@@ -142,7 +142,12 @@ fn copy_history(
     versions: Vec<View>,
     known: HashSet<String>,
 ) -> Result<Copied> {
-    let mut c = Copier::new(src, dst, known);
+    std::thread::scope(|sc| {
+        copy_history_with(Copier::new(src, dst, known, Writer::start(sc, dst)), dst, root, versions)
+    })
+}
+
+fn copy_history_with(mut c: Copier, dst: &dyn Store, root: &View, versions: Vec<View>) -> Result<Copied> {
     let mut seen = HashSet::new();
     let versions: Vec<View> = versions.into_iter().filter(|v| seen.insert(v.key().to_string())).collect();
     // One batched check for all of them first: a push of one commit finds
@@ -164,6 +169,46 @@ fn copy_history(
     c.copy_root(root)
 }
 
+/// Write `puts` in order: the closure invariant holds at every point, since
+/// a parent follows its children in the list.
+fn write_puts(dst: &dyn Store, puts: &[Put]) -> Result<()> {
+    dst.write_many(puts).map_err(|(i, e)| match e {
+        // The values come unchecked from the source.
+        CoreError::Invalid(cas_core::Invalid::HashMismatch) => wrong_bytes(&puts[i].key),
+        e => Error::from(e),
+    })
+}
+
+/// A thread that writes a copy's batches to the destination, in the order
+/// sent, while the copy reads and decodes the next.
+struct Writer {
+    to: std::sync::mpsc::Sender<std::sync::Arc<Vec<Put>>>,
+    back: std::sync::mpsc::Receiver<Result<()>>,
+}
+
+impl Writer {
+    /// None on one thread (`cas_core::threads`): the copy writes itself.
+    fn start<'s>(sc: &'s std::thread::Scope<'s, '_>, dst: &'s dyn Store) -> Option<Writer> {
+        if cas_core::threads::get() < 2 {
+            return None;
+        }
+        let (to, rx) = std::sync::mpsc::channel::<std::sync::Arc<Vec<Put>>>();
+        let (tx, back) = std::sync::mpsc::channel();
+        sc.spawn(move || {
+            for puts in rx {
+                if tx.send(write_puts(dst, &puts)).is_err() {
+                    break;
+                }
+            }
+        });
+        Some(Writer { to, back })
+    }
+}
+
+fn writer_gone() -> Error {
+    Error::Io("the copy's writer thread stopped".into())
+}
+
 /// Node versions copied together when a history is copied.
 pub const ROOTS_PER_ROUND: usize = 1024;
 
@@ -182,6 +227,10 @@ struct Copier<'a> {
     pending_stored: usize,
     /// Where each pending write is in `pending`.
     pending_at: KeyMap<usize>,
+    /// The writes sent to the writer thread and not known written yet,
+    /// with where each is: their values still serve as delta bases.
+    sent: Option<(std::sync::Arc<Vec<Put>>, KeyMap<usize>)>,
+    writer: Option<Writer>,
 }
 
 /// Writes are gathered into one `write_many` until they hold this many
@@ -200,7 +249,7 @@ struct Waiting {
 }
 
 impl<'a> Copier<'a> {
-    fn new(src: &'a dyn Store, dst: &'a dyn Store, done: HashSet<String>) -> Copier<'a> {
+    fn new(src: &'a dyn Store, dst: &'a dyn Store, done: HashSet<String>, writer: Option<Writer>) -> Copier<'a> {
         Copier {
             src,
             dst,
@@ -211,12 +260,15 @@ impl<'a> Copier<'a> {
             pending_bytes: 0,
             pending_stored: 0,
             pending_at: KeyMap::default(),
+            sent: None,
+            writer,
         }
     }
 
     fn copy_root(mut self, root: &View) -> Result<Copied> {
         self.copy_many(std::slice::from_ref(root))?;
         self.flush()?;
+        self.wait()?;
         Ok(self.n)
     }
 
@@ -254,7 +306,9 @@ impl<'a> Copier<'a> {
                     None => match (self.pending_at.get(base), waiting.get(base)) {
                         (Some(&j), _) => Some(&self.pending[j].value),
                         (None, Some(w)) => Some(&w.bytes),
-                        (None, None) => None,
+                        (None, None) => {
+                            self.sent.as_ref().and_then(|(puts, at)| at.get(base).map(|&j| puts[j].value.as_slice()))
+                        }
                     },
                 };
                 let decoded = match near {
@@ -291,16 +345,31 @@ impl<'a> Copier<'a> {
     /// Send the gathered writes, in order: the closure invariant holds at
     /// every point, since a parent follows its children in the list.
     fn flush(&mut self) -> Result<()> {
-        if !self.pending.is_empty() {
-            self.dst.write_many(&self.pending).map_err(|(i, e)| match e {
-                // The values come unchecked from the source.
-                CoreError::Invalid(cas_core::Invalid::HashMismatch) => wrong_bytes(&self.pending[i].key),
-                e => Error::from(e),
-            })?;
-            self.pending.clear();
-            self.pending_at.clear();
-            self.pending_bytes = 0;
-            self.pending_stored = 0;
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let puts = std::mem::take(&mut self.pending);
+        let at = std::mem::take(&mut self.pending_at);
+        self.pending_bytes = 0;
+        self.pending_stored = 0;
+        match &self.writer {
+            // One batch writes while the next is gathered: wait for the one
+            // before, then hand this one over.
+            Some(_) => {
+                self.wait()?;
+                let puts = std::sync::Arc::new(puts);
+                self.writer.as_ref().unwrap().to.send(puts.clone()).map_err(|_| writer_gone())?;
+                self.sent = Some((puts, at));
+                Ok(())
+            }
+            None => write_puts(self.dst, &puts),
+        }
+    }
+
+    /// Wait until what was sent to the writer thread is written.
+    fn wait(&mut self) -> Result<()> {
+        if self.sent.take().is_some() {
+            self.writer.as_ref().unwrap().back.recv().map_err(|_| writer_gone())??;
         }
         Ok(())
     }
