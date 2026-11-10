@@ -198,7 +198,9 @@ a failing setup step shows as FAIL.
   A copy (clone, push) hands each batch of writes to a writer thread and
   reads the next while it is written; a delta whose base is in the batch
   being written still finds it. Clone on four threads 20.4 -> 15.3 s (git
-  20 s).
+  20 s). import-git splits each request to git among up to four
+  `git cat-file` processes, so git inflates in parallel: 115 -> 98 s back
+  to back on four threads.
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
   (git's 423k objects); import (101 s) is slower than fast-import (82-93 s)
   but not than fast-export plus fast-import (~100-110 s).

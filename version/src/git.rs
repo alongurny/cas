@@ -145,6 +145,37 @@ impl CatFile {
     }
 }
 
+/// One `git cat-file` per thread (`cas_core::threads`, at most four): a
+/// big request is split among them, so git inflates in parallel.
+struct Cats(Vec<CatFile>);
+
+impl Cats {
+    fn start(repo: &FsPath) -> Result<Cats> {
+        let n = cas_core::threads::get().min(4);
+        Ok(Cats((0..n).map(|_| CatFile::start(repo)).collect::<Result<_>>()?))
+    }
+
+    /// The contents of each of `ids`, in order.
+    fn get_many(&mut self, ids: &[Oid]) -> Result<Vec<Vec<u8>>> {
+        // Small requests are not worth a thread each.
+        let n = self.0.len().min(ids.len().div_ceil(256)).max(1);
+        if n == 1 {
+            return self.0[0].get_many(ids);
+        }
+        let per = ids.len().div_ceil(n);
+        let parts: Vec<Result<Vec<Vec<u8>>>> = std::thread::scope(|sc| {
+            let hs: Vec<_> =
+                self.0.iter_mut().zip(ids.chunks(per)).map(|(c, part)| sc.spawn(move || c.get_many(part))).collect();
+            hs.into_iter().map(|h| h.join().map_err(|_| Error::Io("git cat-file reader panicked".into()))?).collect()
+        });
+        let mut out = Vec::with_capacity(ids.len());
+        for p in parts {
+            out.extend(p?);
+        }
+        Ok(out)
+    }
+}
+
 impl Drop for CatFile {
     fn drop(&mut self) {
         drop(self.input.take());
@@ -271,7 +302,7 @@ fn entries<'a>(id: &Oid, raw: &'a [u8]) -> Result<Vec<Entry<'a>>> {
 struct Importer<'a> {
     store: &'a dyn Store,
     alg: &'static Algorithm,
-    cat: CatFile,
+    cat: Cats,
     /// Blobs not written yet, children before parents; written in batches.
     pending: Vec<Put>,
     pending_bytes: usize,
@@ -686,7 +717,7 @@ pub fn import_with_filters(
     let mut im = Importer {
         store,
         alg,
-        cat: CatFile::start(repo)?,
+        cat: Cats::start(repo)?,
         trees: OidMap::default(),
         chunks: Default::default(),
         written: Default::default(),
