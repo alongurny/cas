@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 cas-core = { path = ".." }
+libc = "0.2"
 
 [dev-dependencies]
 cas-core = { path = "..", features = ["test-tls"] }

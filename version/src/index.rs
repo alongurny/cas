@@ -10,7 +10,8 @@
 //! tick, so it is rehashed.
 
 use crate::View;
-use std::collections::BTreeMap;
+use crate::watch::Token;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path as FsPath;
@@ -18,7 +19,7 @@ use std::time::SystemTime;
 
 /// The cache's name inside the working directory.
 pub const FILE: &str = ".cas-index";
-const MAGIC: &[u8; 10] = b"CASINDEX1\n";
+const MAGIC: &[u8; 10] = b"CASINDEX2\n";
 
 /// The stat data that must match for a file to count as unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,6 +51,14 @@ pub struct Index {
     /// When the cache was written, as (seconds, nanoseconds).
     pub written: (i64, i64),
     pub files: BTreeMap<String, (Stat, View)>,
+    /// Every directory, so that a watched directory can be rebuilt from the
+    /// cache without looking at it.
+    pub dirs: BTreeSet<String>,
+    /// The watcher token taken before the directory was looked at, when a
+    /// watcher ran ([`crate::watch`]): what changed since is in its log.
+    pub watch: Option<Token>,
+    /// The view the directory was imported as when the cache was written.
+    pub root: Option<View>,
 }
 
 fn now() -> (i64, i64) {
@@ -110,6 +119,26 @@ impl Index {
             s(&mut out, v.format());
             s(&mut out, v.key());
         }
+        out.extend_from_slice(&(self.dirs.len() as u64).to_be_bytes());
+        for d in &self.dirs {
+            s(&mut out, d);
+        }
+        match &self.watch {
+            None => out.push(0),
+            Some(t) => {
+                out.push(1);
+                s(&mut out, &t.run);
+                out.extend_from_slice(&t.at.to_be_bytes());
+            }
+        }
+        match &self.root {
+            None => out.push(0),
+            Some(v) => {
+                out.push(1);
+                s(&mut out, v.format());
+                s(&mut out, v.key());
+            }
+        }
         out
     }
 
@@ -134,7 +163,22 @@ impl Index {
             let v = View::new(c.str()?, c.str()?).ok()?;
             files.insert(path, (st, v));
         }
-        (c.at == b.len()).then_some(Index { scope, written, files })
+        let nd = c.u64()?;
+        let mut dirs = BTreeSet::new();
+        for _ in 0..nd {
+            dirs.insert(c.str()?);
+        }
+        let watch = match c.take(1)?[0] {
+            0 => None,
+            1 => Some(Token { run: c.str()?, at: c.u64()? }),
+            _ => return None,
+        };
+        let root = match c.take(1)?[0] {
+            0 => None,
+            1 => Some(View::new(c.str()?, c.str()?).ok()?),
+            _ => return None,
+        };
+        (c.at == b.len()).then_some(Index { scope, written, files, dirs, watch, root })
     }
 }
 

@@ -24,6 +24,7 @@ pub mod merge;
 pub mod sync;
 mod tree;
 pub mod uni;
+pub mod watch;
 
 pub use formats::{Format, Kind, by_alias, by_id, publish};
 pub use tree::{Walk, build, diff, lookup, merge_diff, object_at, update, walk};
@@ -128,8 +129,16 @@ impl Path {
 }
 
 impl Ord for Path {
+    /// Name by name. Names hold no `/` and no control byte, so comparing
+    /// the bytes with `/` ranked below every other byte gives the same order
+    /// without splitting the paths.
     fn cmp(&self, other: &Path) -> Ordering {
-        self.names().cmp(other.names())
+        let (a, b) = (self.as_str().as_bytes(), other.as_str().as_bytes());
+        let rank = |c: u8| if c == b'/' { 0 } else { c };
+        match a.iter().zip(b).position(|(x, y)| x != y) {
+            Some(i) => rank(a[i]).cmp(&rank(b[i])),
+            None => a.len().cmp(&b.len()),
+        }
     }
 }
 
@@ -269,4 +278,28 @@ pub fn put(store: &dyn Store, alg: &'static Algorithm, alias: &str, bytes: &[u8]
 
 pub(crate) fn malformed(key: &str, reason: impl Into<String>) -> Error {
     Error::Malformed { key: key.to_string(), reason: reason.into() }
+}
+
+#[cfg(test)]
+mod path_order {
+    use super::Path;
+
+    #[test]
+    fn byte_order_with_slash_lowest_is_name_order() {
+        let names = ["a", "a-b", "a.b", "a b", "ab", "b", "\u{e9}", "a~", "A", "0"];
+        let mut paths = Vec::new();
+        for x in names {
+            paths.push(x.to_string());
+            for y in names {
+                paths.push(format!("{x}/{y}"));
+                paths.push(format!("{x}/{y}/{x}"));
+            }
+        }
+        for a in &paths {
+            for b in &paths {
+                let (p, q) = (Path::new(a.clone()).unwrap(), Path::new(b.clone()).unwrap());
+                assert_eq!(p.cmp(&q), p.names().cmp(q.names()), "{a} vs {b}");
+            }
+        }
+    }
 }

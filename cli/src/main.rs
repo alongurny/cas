@@ -59,6 +59,8 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   commit DIR                    add DIR as a new node after the tip (DIR/.cas-index
                                 caches stat data, so unchanged files are not rehashed)
   status DIR                    how DIR differs from the node (nothing is stored)
+  watch DIR                     follow DIR's changes (inotify) until stopped, so
+                                commit and status look only at what changed
   reset DIR                     make DIR the node's version again (discards changes)
   clean DIR                     remove from DIR the paths the node does not have
   stash DIR | stash pop DIR     keep DIR in history stash/HISTORY and reset it, or
@@ -519,6 +521,12 @@ fn run(a: Args) -> Res<()> {
                     out!("{k}");
                 }
             }
+        }
+        Some("watch") => {
+            let dir = arg(1, "DIR")?;
+            let w = cas_version::watch::Watcher::start(dir.as_ref()).map_err(e)?;
+            eprintln!("watching {dir}");
+            w.run().map_err(e)?;
         }
         Some("fsck") => {
             let r = cas_version::fsck::fsck(s).map_err(e)?;
