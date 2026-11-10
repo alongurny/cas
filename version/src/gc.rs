@@ -20,6 +20,9 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// The variable holding the blobs the previous run found unreachable.
 pub const PENDING: &str = "gc/pending";
+/// The variable holding the blobs the last full run found reachable, with
+/// everything under them: a later run need not walk them again.
+pub const MARKED: &str = "gc/marked";
 
 fn blake3() -> &'static Algorithm {
     algo::lookup("blake3").unwrap()
@@ -31,6 +34,9 @@ pub struct Report {
     pub reachable: usize,
     pub unreachable: usize,
     pub removed: Vec<String>,
+    /// Whether the run walked everything (else only what came since the
+    /// last full run).
+    pub full: bool,
 }
 
 /// The `spec <key>` of a format object, or the `'spec'` of a function
@@ -65,6 +71,48 @@ fn variables(store: &dyn Store) -> Result<Vec<String>> {
     Ok(keys)
 }
 
+/// The nodes the history at `r` holds that one it replaced (within
+/// [`NEAR`] saves, and `old` by the caller's test) does not hold as they
+/// are, oldest first (a node after its predecessors among them): what a
+/// walk that has seen the older history still needs. Reads only the
+/// leaves that differ. `None` when no such history is found.
+fn added_since(store: &dyn Store, r: &View, old: &dyn Fn(&str) -> bool) -> Option<Vec<(NodeId, history::HistNode)>> {
+    let mut at = r.clone();
+    for _ in 0..NEAR {
+        at = crate::graph::replaced(store, &at)?;
+        if old(at.key()) {
+            let new = history::Stored::open(store, Some(r)).ok()?;
+            let added = history::Stored::open(store, Some(&at)).ok()?.changed(&new).ok()?.added;
+            // Predecessors first.
+            let mut out = Vec::with_capacity(added.len());
+            let mut done = HashSet::new();
+            for id in added.keys() {
+                let mut stack = vec![(id.clone(), false)];
+                while let Some((n, expanded)) = stack.pop() {
+                    if done.contains(&n) {
+                        continue;
+                    }
+                    if expanded {
+                        done.insert(n.clone());
+                        out.push((n.clone(), added[&n].clone()));
+                        continue;
+                    }
+                    stack.push((n.clone(), true));
+                    for p in added[&n].after.keys().filter(|p| added.contains_key(*p) && !done.contains(*p)) {
+                        stack.push((p.clone(), false));
+                    }
+                }
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// How many saves back a cached ancestry still serves a history (its newer
+/// nodes are looked up in the history): gc rebuilds one only past that.
+const NEAR: usize = 64;
+
 pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()> {
     for k in variables(store)? {
         if !matches!(classify(&k), Some(Parsed::Var)) || k.starts_with("derived") {
@@ -73,7 +121,7 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
         if let Some(v) = store.read(&k)?
             && let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok())
             && r.known_format().is_some_and(|f| f.alias == "history")
-            && matches!(crate::derived::readable_cache(store, &crate::ancestry::ANCESTRY, &r), Ok(None))
+            && !crate::ancestry::near(store, &r, NEAR)
             && let Ok(h) = history::read(store, &r)
         {
             crate::ancestry::record(store, alg, &r, &h);
@@ -87,6 +135,16 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
 /// consecutive run per thread (oldest first: blobs are deltas on the
 /// version before's), then the histories' own parts.
 pub fn mark(store: &dyn Store) -> Result<DigestSet> {
+    Ok(mark_with(store, None)?.0)
+}
+
+/// [`mark`], not walking into `known` (blobs reachable before, with all
+/// under them): what is reachable now outside `known`, and whether a blob
+/// was missing (the walk ended there).
+fn mark_with(store: &dyn Store, known: Option<&DigestSet>) -> Result<(DigestSet, bool)> {
+    let missed = std::sync::atomic::AtomicBool::new(false);
+    let marker =
+        |seen| Marker { store, seen, local: DigestSet::default(), formats: BTreeSet::new(), known, missed: &missed };
     let keys = variables(store)?;
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
     let mut todo: Vec<View> = Vec::new();
@@ -106,7 +164,7 @@ pub fn mark(store: &dyn Store) -> Result<DigestSet> {
     }
     let seen = SharedDigestSet::default();
     let (mut versions, mut later) = (Vec::new(), Vec::new());
-    let mut first = Marker { store, seen: &seen, local: DigestSet::default(), formats: BTreeSet::new() };
+    let mut first = marker(&seen);
     first.walk(todo, Some((&mut versions, &mut later)))?;
     let mut formats = std::mem::take(&mut first.formats);
     let threads = cas_core::threads::get().min(versions.len()).max(1);
@@ -115,9 +173,9 @@ pub fn mark(store: &dyn Store) -> Result<DigestSet> {
         let handles: Vec<_> = versions
             .chunks(per)
             .map(|run| {
-                let seen = &seen;
+                let (seen, marker) = (&seen, &marker);
                 sc.spawn(move || {
-                    let mut m = Marker { store, seen, local: DigestSet::default(), formats: BTreeSet::new() };
+                    let mut m = marker(seen);
                     // Popped last first: reversed, the oldest goes first.
                     m.walk(run.iter().rev().cloned().collect(), None).map(|()| m.formats)
                 })
@@ -128,7 +186,7 @@ pub fn mark(store: &dyn Store) -> Result<DigestSet> {
     for f in found {
         formats.extend(f?);
     }
-    let mut last = Marker { store, seen: &seen, local: DigestSet::default(), formats: BTreeSet::new() };
+    let mut last = marker(&seen);
     last.walk(later, None)?;
     formats.extend(last.formats);
     let mut marked = seen.into_set();
@@ -143,11 +201,11 @@ pub fn mark(store: &dyn Store) -> Result<DigestSet> {
     }
     // Specs of the formats this crate knows, which it may have published.
     for f in formats::all() {
-        if marked.contains(f.id()) {
+        if marked.contains(f.id()) || known.is_some_and(|k| k.contains(f.id())) {
             marked.insert(&blake3().key(f.spec.as_bytes()));
         }
     }
-    Ok(marked)
+    Ok((marked, missed.into_inner()))
 }
 
 /// One thread's part of [`mark`].
@@ -158,6 +216,10 @@ struct Marker<'a> {
     local: DigestSet,
     /// The formats of the views met.
     formats: BTreeSet<String>,
+    /// Reachable before with all under them: not walked again.
+    known: Option<&'a DigestSet>,
+    /// Set when a blob was missing.
+    missed: &'a std::sync::atomic::AtomicBool,
 }
 
 impl Marker<'_> {
@@ -170,16 +232,25 @@ impl Marker<'_> {
             if !self.formats.contains(r.format()) {
                 self.formats.insert(r.format().to_string());
             }
+            if self.known.is_some_and(|k| k.contains(r.key())) {
+                continue;
+            }
             if !self.local.insert(r.key()) || !self.seen.insert(r.key()) {
                 continue;
             }
             match children_light(self.store, &r, &self.local) {
                 Ok(c) => {
                     let mut vs = Vec::new();
-                    if r.known_format().is_some_and(|f| f.alias == "history")
-                        && let Ok(h) = history::read(self.store, &r)
-                    {
-                        vs = h.log().into_iter().map(|id| id.version()).collect();
+                    if r.known_format().is_some_and(|f| f.alias == "history") {
+                        // After a history the last full run marked, only the
+                        // nodes added since: the rest it marked with all
+                        // under them.
+                        let since = self.known.and_then(|k| added_since(self.store, &r, &|x| k.contains(x)));
+                        if let Some(added) = since {
+                            vs = added.into_iter().rev().map(|(id, _)| id.version()).collect();
+                        } else if let Ok(h) = history::read(self.store, &r) {
+                            vs = h.log().into_iter().map(|id| id.version()).collect();
+                        }
                     }
                     // The log is newest first: popped from the end, oldest first.
                     match defer.as_mut() {
@@ -194,7 +265,7 @@ impl Marker<'_> {
                     }
                 }
                 // A missing blob ends the walk there.
-                Err(crate::Error::Missing(_)) => {}
+                Err(crate::Error::Missing(_)) => self.missed.store(true, std::sync::atomic::Ordering::Relaxed),
                 Err(e) => return Err(e),
             }
         }
@@ -219,14 +290,42 @@ fn pending(store: &dyn Store) -> Result<(Option<Vec<u8>>, BTreeSet<String>)> {
 /// One collection run: mark, remove what was unreachable this run and the
 /// previous one, and record the rest as pending for the next.
 pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
+    collect_with(store, alg, false)
+}
+
+/// The blobs the last full run marked, if it recorded them.
+fn known(store: &dyn Store) -> Result<(Option<Vec<u8>>, Option<DigestSet>)> {
+    let Some(v) = store.read(MARKED)? else { return Ok((None, None)) };
+    let set = std::str::from_utf8(&v)
+        .ok()
+        .and_then(|s| View::parse(s).ok())
+        .and_then(|r| crate::read_blob(store, r.key()).ok())
+        .and_then(|b| DigestSet::decode(&b));
+    Ok((Some(v), set))
+}
+
+/// [`collect`]; with `full` false, a run after a full one walks only what
+/// is not in the full run's marked set ([`MARKED`]), which it keeps: a blob
+/// it holds was reachable then with everything under it (a blob's children
+/// are older than it, and a full run that met a missing blob records no
+/// set), so whatever became reachable since is new, and reached through new
+/// blobs. Garbage among the old ones waits for the next full run, which
+/// comes when the blobs outside the set grow past a quarter of it.
+pub fn collect_with(store: &dyn Store, alg: &'static Algorithm, full: bool) -> Result<Report> {
     index_histories(store, alg)?;
     let (old_var, old) = pending(store)?;
-    let marked = mark(store)?;
     let blobs: Vec<String> = list_all(store, &Span::all())?
         .into_iter()
         .filter(|k| matches!(classify(k), Some(Parsed::Blob { .. })))
         .collect();
-    let unreachable: BTreeSet<String> = blobs.iter().filter(|k| !marked.contains(k)).cloned().collect();
+    let (marked_var, known) = if full { (store.read(MARKED)?, None) } else { known(store)? };
+    let known = known.filter(|k| {
+        let outside = blobs.iter().filter(|b| !k.contains(b)).count();
+        outside * 4 <= k.len()
+    });
+    let (marked, missed) = mark_with(store, known.as_ref())?;
+    let is_marked = |k: &String| marked.contains(k) || known.as_ref().is_some_and(|s| s.contains(k));
+    let unreachable: BTreeSet<String> = blobs.iter().filter(|k| !is_marked(k)).cloned().collect();
     let mut removed = Vec::new();
     for k in unreachable.intersection(&old) {
         store.remove(k, &Expect::Absent)?;
@@ -238,7 +337,19 @@ pub fn collect(store: &dyn Store, alg: &'static Algorithm) -> Result<Report> {
     let r = View { format: by_alias("uni-bin").unwrap().id().to_string(), key };
     let expect = old_var.map_or(Expect::Absent, Expect::Value);
     store.write(PENDING, r.to_string().as_bytes(), &expect)?;
-    Ok(Report { reachable: marked.len(), unreachable: unreachable.len(), removed })
+    let full = known.is_none();
+    let reachable = marked.len() + known.as_ref().map_or(0, DigestSet::len);
+    if full {
+        // Best effort: without the set, the next run is full again.
+        let expect = marked_var.map_or(Expect::Absent, Expect::Value);
+        if missed {
+            let _ = store.remove(MARKED, &expect);
+        } else if let Ok(key) = write_blob(store, alg, &marked.encode()) {
+            let r = View { format: by_alias("raw").unwrap().id().to_string(), key };
+            let _ = store.write(MARKED, r.to_string().as_bytes(), &expect);
+        }
+    }
+    Ok(Report { reachable, unreachable: unreachable.len(), removed, full })
 }
 
 /// Delta hints for a repack (spec/performance.md, step 2): for every
@@ -257,13 +368,23 @@ pub fn delta_hints(store: &dyn Store, placed: &dyn Fn(&str) -> bool) -> Result<(
         }
         let Some(v) = store.read(&k)? else { continue };
         let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok()) else { continue };
-        if r.known_format().is_none_or(|f| f.alias != "history") {
+        // A history the last repack placed was walked then, with all its
+        // versions: their frames are reused.
+        if r.known_format().is_none_or(|f| f.alias != "history") || placed(r.key()) {
             continue;
         }
-        let Ok(h) = history::read(store, &r) else { continue };
-        for id in h.log().into_iter().rev() {
+        // After a history the last repack placed, only the nodes added
+        // since.
+        let nodes = match added_since(store, &r, placed) {
+            Some(added) => added,
+            None => {
+                let Ok(h) = history::read(store, &r) else { continue };
+                h.log().into_iter().rev().map(|id| (id.clone(), h.nodes[&id].clone())).collect()
+            }
+        };
+        for (id, node) in nodes {
             let new = id.version();
-            let old = h.nodes[&id].after.keys().next().map(NodeId::version);
+            let old = node.after.keys().next().map(NodeId::version);
             pair(store, old.as_ref(), &new, &mut order, &mut hints, &mut walked, placed)?;
         }
     }

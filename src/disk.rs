@@ -181,6 +181,16 @@ impl DiskBackend {
         }
     }
 
+    /// Whether any chunk file is loose (not in a pack).
+    pub fn loose_chunks(&self) -> io::Result<bool> {
+        for fan in fs::read_dir(self.root.join("chunks"))? {
+            if fs::read_dir(fan?.path())?.next().is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Remove chunks no blob file names any more. Removing a blob leaves its
     /// chunks, which other blobs may share; this sweeps them. Not safe to
     /// run while another process writes to the store.
@@ -237,9 +247,35 @@ impl DiskBackend {
     }
 
     pub fn repack(&self, order: &[String], hints: &std::collections::HashMap<String, String>) -> io::Result<Repacked> {
+        self.repack_with(order, hints, true)
+    }
+
+    /// [`DiskBackend::repack`], or with `full` false and little garbage in
+    /// the sealed packs (an eighth of their entries removed at most), an
+    /// incremental repack: the sealed packs stay as they are, and what is
+    /// not in them (loose files, other packs) is placed in a new sealed pack
+    /// beside them, its deltas on bases anywhere sealed. The sealed packs are
+    /// then kept logarithmic in number ([`crate::pack::Packs::seal_more`]).
+    /// A full repack is what reclaims the bytes of removed names.
+    pub fn repack_with(
+        &self,
+        order: &[String],
+        hints: &std::collections::HashMap<String, String>,
+        full: bool,
+    ) -> io::Result<Repacked> {
         use crate::pack::{Entry, plain_value};
         let Some(packs) = &self.packs else { return Err(io::Error::other("only encoded stores have packs")) };
-        let old_packs = packs.ids()?;
+        let incremental = !full && {
+            let (total, dead) = packs.sealed_counts()?;
+            total > 0 && dead * 8 <= total
+        };
+        let old_packs = match incremental {
+            true => {
+                let sealed = packs.sealed_ids()?;
+                packs.ids()?.into_iter().filter(|i| !sealed.contains(i)).collect()
+            }
+            false => packs.ids()?,
+        };
         let mut loose_blobs = Vec::new();
         for k in self.loose_keys()? {
             if matches!(classify(&k), Some(Parsed::Blob { .. })) {
@@ -254,9 +290,11 @@ impl DiskBackend {
         }
         let mut names: Vec<String> = Vec::new();
         let mut placed = std::collections::HashSet::new();
+        let packed = if incremental { packs.unsealed_names()? } else { packs.all()? };
         let everything: Vec<String> =
-            packs.all()?.into_iter().chain(loose_blobs.iter().cloned()).chain(loose_chunks.iter().cloned()).collect();
-        let present: Present = everything.iter().map(String::as_str).collect();
+            packed.into_iter().chain(loose_blobs.iter().cloned()).chain(loose_chunks.iter().cloned()).collect();
+        let present =
+            Present { set: everything.iter().map(String::as_str).collect(), sealed: incremental.then_some(packs) };
         // A chunked blob brings its chunks just before it, and each chunk it
         // does not share with its hinted base is hinted to the base's chunk
         // at the same relative position: an edit's chunks delta against the
@@ -266,7 +304,9 @@ impl DiskBackend {
             Ok(self.chunk_ids_of(key)?.map(|ids| ids.chunks(32).map(|c| format!("#{}", hex::encode(c))).collect()))
         };
         for n in order.iter().chain(everything.iter()) {
-            if !present.contains(n.as_str()) || placed.contains(n) {
+            // Only what is to be placed: in an incremental repack, a sealed
+            // name stays where it is.
+            if !present.set.contains(n.as_str()) || placed.contains(n) {
                 continue;
             }
             if !n.starts_with('#')
@@ -282,7 +322,7 @@ impl DiskBackend {
                         let j = i * base_ids.len() / ids.len();
                         hints.entry(c.clone()).or_insert_with(|| base_ids[j].clone());
                     }
-                    if present.contains(c.as_str()) && placed.insert(c.clone()) {
+                    if present.set.contains(c.as_str()) && placed.insert(c.clone()) {
                         names.push(c.clone());
                     }
                 }
@@ -308,6 +348,11 @@ impl DiskBackend {
             };
             Ok(Tried::New(file, delta))
         };
+        if incremental && names.is_empty() {
+            // Nothing came since: the other packs held only removed names.
+            packs.drop_packs(&old_packs)?;
+            return Ok(Repacked::default());
+        }
         let mut w = packs.writer(&self.root.join("tmp"))?;
         let mut depth: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut out = Repacked::default();
@@ -412,9 +457,13 @@ impl DiskBackend {
                 }
             }
         }
+        let tmp = self.root.join("tmp");
         let id = w.finish()?;
         packs.drop_packs(&old_packs)?;
-        packs.seal(&id, &self.root.join("tmp"))?;
+        match incremental {
+            true => packs.seal_more(&id, &tmp)?,
+            false => packs.seal(&id, &tmp)?,
+        }
         for k in &loose_blobs {
             let _ = fs::remove_file(self.path(k));
         }
@@ -731,8 +780,18 @@ fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> +
 
 /// The chain depth of `n`'s frame in the sealed pack, if every base in the
 /// chain is still present and it is within [`crate::pack::MAX_DEPTH`].
-/// The names a repack keeps.
-type Present<'a> = std::collections::HashSet<&'a str, crate::keyhash::KeyState>;
+/// The names a repack keeps: those it places, and in an incremental repack
+/// also those the sealed packs hold.
+struct Present<'a> {
+    set: std::collections::HashSet<&'a str, crate::keyhash::KeyState>,
+    sealed: Option<&'a crate::pack::Packs>,
+}
+
+impl Present<'_> {
+    fn contains(&self, n: &str) -> bool {
+        self.set.contains(n) || self.sealed.is_some_and(|p| p.is_sealed(n).unwrap_or(false))
+    }
+}
 
 fn sealed_depth(
     packs: &crate::pack::Packs,
@@ -1283,6 +1342,59 @@ mod tests {
         }
         let r = b.repack(&[], &Default::default()).unwrap();
         assert_eq!(r.whole, keys.len());
+    }
+
+    /// An incremental repack leaves the sealed packs as they are and seals
+    /// what came since beside them, with deltas on sealed bases; the sealed
+    /// packs stay few, and too much garbage in them makes the repack full.
+    #[test]
+    fn incremental_repacks_seal_what_came_since() {
+        let dir = tempfile::tempdir().unwrap();
+        let b = DiskBackend::open(dir.path()).unwrap();
+        let key = |v: &[u8]| crate::algo::lookup("blake3").unwrap().key(v);
+        let text = |n: u32| -> Vec<u8> { (0..3000u32).flat_map(|i| format!("{n} line {i}\n").into_bytes()).collect() };
+        let first = text(0);
+        let k0 = key(&first);
+        b.put_blobs(&[(&k0, &first)]).unwrap();
+        b.repack(&[], &Default::default()).unwrap();
+        let sealed = |b: &DiskBackend| b.packs.as_ref().unwrap().sealed_ids().unwrap();
+        assert_eq!(sealed(&b).len(), 1);
+        let mut all = vec![(k0.clone(), first.clone())];
+        let mut prev = k0.clone();
+        for n in 1..=6u32 {
+            let mut v = first.clone();
+            v.extend_from_slice(format!("edit {n}\n").as_bytes());
+            let k = key(&v);
+            b.put_blobs(&[(&k, &v)]).unwrap();
+            let hints = [(k.clone(), prev.clone())].into_iter().collect();
+            let r = b.repack_with(std::slice::from_ref(&k), &hints, false).unwrap();
+            assert_eq!((r.deltas, r.whole), (1, 0), "only the new blob, as a delta");
+            assert!(b.sealed(&k).unwrap() && b.sealed(&k0).unwrap());
+            all.push((k.clone(), v));
+            prev = k;
+            // A binary counter: never more sealed packs than bits.
+            assert!(sealed(&b).len() <= 1 + (n + 1).ilog2() as usize, "{:?}", sealed(&b));
+        }
+        let other = DiskBackend::open(dir.path()).unwrap();
+        for (k, v) in &all {
+            assert_eq!(b.get(k).unwrap().as_ref(), Some(v));
+            assert_eq!(other.get(k).unwrap().as_ref(), Some(v));
+        }
+        // Remove more than an eighth: the next repack is full, one pack.
+        for (k, _) in &all[1..4] {
+            b.remove_blob(k).unwrap();
+        }
+        let extra = text(9);
+        let kx = key(&extra);
+        b.put_blobs(&[(&kx, &extra)]).unwrap();
+        b.repack_with(&[], &Default::default(), false).unwrap();
+        assert_eq!(sealed(&b).len(), 1);
+        for (k, v) in all.iter().take(1).chain(&all[4..]).chain([(kx.clone(), extra.clone())].iter()) {
+            assert_eq!(b.get(k).unwrap().as_ref(), Some(v));
+        }
+        for (k, _) in &all[1..4] {
+            assert_eq!(b.get(k).unwrap(), None);
+        }
     }
 
     #[test]

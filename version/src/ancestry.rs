@@ -390,6 +390,25 @@ pub fn cached(store: &dyn Store, st: &Stored, input: &View, limit: usize) -> Opt
     None
 }
 
+/// Whether an ancestry is cached for the history at `input` or for one it
+/// replaced within `limit` saves ([`cached`] would find it), without
+/// reading it.
+pub fn near(store: &dyn Store, input: &View, limit: usize) -> bool {
+    let mut at = input.clone();
+    for i in 0..=limit {
+        if i > 0 {
+            match crate::graph::replaced(store, &at) {
+                Some(r) => at = r,
+                None => return false,
+            }
+        }
+        if matches!(derived::readable_cache(store, &ANCESTRY, &at), Ok(Some(_))) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Record the ancestry of `h`, saved at `input`. Best effort.
 pub fn record(store: &dyn Store, alg: &'static Algorithm, input: &View, h: &History) {
     if let Ok(b) = encode(h) {

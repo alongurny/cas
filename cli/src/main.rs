@@ -87,7 +87,9 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   merge [OTHER]                 merge history OTHER in (or the two tips) as one node
   import-git REPO [REV]         import a git repository's commits (default HEAD)
                                 as history -H (refused if it exists)
-  gc                            one collection run (two-phase)
+  gc [--full]                   one collection run (two-phase); without --full,
+                                walks and repacks only what came since the last
+                                full run while that is small
   serve ADDR --cert FILE --key FILE [--open] [--max-body BYTES]
                                 serve the store over HTTPS (the only protocol)
                                 with the PEM certificate chain and key, under
@@ -146,6 +148,7 @@ struct Args {
     message: Option<String>,
     doc: Option<String>,
     compatible: bool,
+    full: bool,
     remote: Option<String>,
     token_file: Option<String>,
     ca: Option<String>,
@@ -161,6 +164,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         message: None,
         doc: None,
         compatible: false,
+        full: false,
         remote: None,
         token_file: None,
         ca: None,
@@ -177,6 +181,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "-m" => a.message = Some(value("-m")?),
             "--doc" => a.doc = Some(value("--doc")?),
             "--compatible" => a.compatible = true,
+            "--full" => a.full = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
             "--ca" => a.ca = Some(value("--ca")?),
@@ -640,18 +645,29 @@ fn run(a: Args) -> Res<()> {
             );
         }
         Some("gc") => {
-            let r = gc::collect(s, b3()).map_err(e)?;
-            out!("{} reachable, {} unreachable, {} removed", r.reachable, r.unreachable, r.removed.len());
+            let r = gc::collect_with(s, b3(), a.full).map_err(e)?;
+            out!(
+                "{} reachable, {} unreachable, {} removed ({})",
+                r.reachable,
+                r.unreachable,
+                r.removed.len(),
+                if r.full { "full" } else { "since the last full run" }
+            );
             // A local store also drops the chunks no remaining blob uses.
             if !a.store.starts_with("http://") && !a.store.starts_with("https://") {
                 let disk = DiskBackend::open(&a.store).map_err(e)?;
-                let n = disk.sweep_chunks().map_err(e)?;
-                out!("{n} chunks swept");
+                // Chunks die with the blobs that name them, or are left loose
+                // by a writer that stopped. A packed chunk of a blob removed
+                // by a run since the last full one waits for the next.
+                if r.full || disk.loose_chunks().map_err(e)? {
+                    let n = disk.sweep_chunks().map_err(e)?;
+                    out!("{n} chunks swept");
+                }
                 // Like git gc: rewrite into one pack, with deltas against each
                 // path's previous version.
                 if disk.chunked() {
                     let (order, hints) = gc::delta_hints(s, &|k| disk.sealed(k).unwrap_or(false)).map_err(e)?;
-                    let r = disk.repack(&order, &hints).map_err(e)?;
+                    let r = disk.repack_with(&order, &hints, a.full).map_err(e)?;
                     out!("repacked: {} deltas, {} whole", r.deltas, r.whole);
                 }
             }

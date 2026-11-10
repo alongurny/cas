@@ -125,6 +125,46 @@ impl DigestSet {
 }
 
 impl DigestSet {
+    /// The set as bytes: `CASMARK1`, a count `n u32`, `n` blake3 digests
+    /// sorted, then the other keys, each ended by a newline.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut d: Vec<&[u8; 32]> = self.b3.iter().map(|d| &d.0).collect();
+        d.sort_unstable();
+        let mut out = Vec::with_capacity(12 + 32 * d.len());
+        out.extend_from_slice(b"CASMARK1");
+        out.extend_from_slice(&(d.len() as u32).to_be_bytes());
+        for x in d {
+            out.extend_from_slice(x);
+        }
+        let mut o: Vec<&String> = self.other.iter().collect();
+        o.sort_unstable();
+        for k in o {
+            out.extend_from_slice(k.as_bytes());
+            out.push(b'\n');
+        }
+        out
+    }
+
+    /// [`DigestSet::encode`] read back.
+    pub fn decode(b: &[u8]) -> Option<DigestSet> {
+        let rest = b.strip_prefix(b"CASMARK1")?;
+        let n = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?) as usize;
+        let digests = rest.get(4..4 + 32 * n)?;
+        let mut s = DigestSet::default();
+        s.b3.reserve(n);
+        for c in digests.chunks_exact(32) {
+            s.b3.insert(Digest(c.try_into().ok()?));
+        }
+        let tail = std::str::from_utf8(&rest[4 + 32 * n..]).ok()?;
+        if !tail.is_empty() && !tail.ends_with('\n') {
+            return None;
+        }
+        for k in tail.lines() {
+            s.other.insert(k.to_string());
+        }
+        Some(s)
+    }
+
     /// Moves every key of `other` into this set.
     pub fn absorb(&mut self, other: DigestSet) {
         self.b3.extend(other.b3);
@@ -178,6 +218,16 @@ impl<S: AsRef<str>> FromIterator<S> for DigestSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn digest_sets_round_trip() {
+        let keys = [format!("blake3:{}", "ab".repeat(32)), format!("blake3:{}", "01".repeat(32)), "sha256:00".into()];
+        let s: DigestSet = keys.iter().collect();
+        let t = DigestSet::decode(&s.encode()).unwrap();
+        assert_eq!(t.len(), 3);
+        assert!(keys.iter().all(|k| t.contains(k)));
+        assert!(DigestSet::decode(&s.encode()[..20]).is_none());
+    }
 
     #[test]
     fn digest_sets_answer_by_key_and_by_digest() {

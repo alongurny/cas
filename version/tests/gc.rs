@@ -57,9 +57,9 @@ fn reachable_blobs_survive_and_garbage_goes_after_two_runs() {
     let v = history::load(&*s, "main").unwrap().1.tip().unwrap().version();
     assert_eq!(files(&*s, &v).len(), 2);
     // The garbage went; both pending sets are still there (the first is
-    // unreachable now and goes two runs later), and the history's ancestry
-    // blob the first run recorded.
-    assert_eq!(blobs(&*s), before - 1 + 2 + 1);
+    // unreachable now and goes two runs later), the history's ancestry blob
+    // the first run recorded, and the marked set of the last full run.
+    assert_eq!(blobs(&*s), before - 1 + 2 + 1 + 1);
 }
 
 #[test]
@@ -130,4 +130,44 @@ fn hints_pair_changed_files_of_big_directories_by_name() {
     }
     // Unchanged files are hinted to nothing.
     assert!(!hints.contains_key(&key(&m2, 8)));
+}
+
+/// After a full run, a run walks only what came since, and still finds the
+/// new garbage and keeps what new nodes reach.
+#[test]
+fn runs_after_a_full_one_walk_only_what_came_since() {
+    let s = store();
+    let many: Vec<(String, String)> = (0..60).map(|i| (format!("f{i}"), format!("{i}\n"))).collect();
+    let files_of = |extra: &str| -> Vec<(String, String)> {
+        let mut v = many.clone();
+        v.push(("extra".into(), extra.into()));
+        v
+    };
+    commit(&*s, &refs(&files_of("1\n")));
+    assert!(gc::collect(&*s, b3()).unwrap().full);
+    // New work: a node with a new file, and garbage.
+    commit(&*s, &refs(&files_of("2\n")));
+    let garbage = put(&*s, b3(), "raw", b"nobody links me either").unwrap();
+    let first = gc::collect(&*s, b3()).unwrap();
+    assert!(!first.full, "{first:?}");
+    let second = gc::collect(&*s, b3()).unwrap();
+    assert!(!second.full);
+    assert!(second.removed.contains(&garbage.key().to_string()), "{second:?}");
+    assert!(!sync::has(&*s, garbage.key()).unwrap());
+    // Both nodes' files are all there.
+    let (_, h) = history::load(&*s, "main").unwrap();
+    for id in h.log() {
+        assert_eq!(files(&*s, &id.version()).len(), 61);
+    }
+    // A full run removes no more than garbage.
+    let full = gc::collect_with(&*s, b3(), true).unwrap();
+    assert!(full.full);
+    let (_, h) = history::load(&*s, "main").unwrap();
+    for id in h.log() {
+        assert_eq!(files(&*s, &id.version()).len(), 61);
+    }
+}
+
+fn refs(v: &[(String, String)]) -> Vec<(&str, &str)> {
+    v.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect()
 }

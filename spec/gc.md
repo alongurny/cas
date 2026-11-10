@@ -42,6 +42,39 @@ So a writer has from one run to the next to link what it wrote. The
 pending sets are themselves blobs: the current one is rooted by its variable;
 older ones become garbage and follow the same two runs.
 
+### Runs since the last full one
+
+A full run (`cas gc --full`, or whenever the next paragraph does not apply)
+writes the set it marked as a blob (`CASMARK1`, a count, the sorted blake3
+digests, then any other keys one per line) and points variable `gc/marked`
+at it. A blob in that set was reachable with everything under it: a blob's
+children are written before it, and a run that met a missing blob records
+no set (and removes `gc/marked`).
+
+A later run reads the set and does not walk into it. Whatever became
+reachable since is a new blob, reached from a root through new blobs only,
+so walking the roots without entering the set finds all of it. A history
+whose save noted the history it replaced (the `derived-hint/` note) is
+walked from that one when the set holds it: only the nodes added since are
+looked at. Unreachable is then what is in neither set; the two phases work
+as above. A blob of the set that became garbage waits for the next full
+run, which comes when the blobs outside the set are more than a quarter of
+it.
+
+On a local store, `gc` then repacks (spec/performance.md). The packs a
+repack writes are sealed: their deltas are on bases in sealed packs. When
+at most an eighth of the sealed packs' entries were removed, the repack is
+incremental: the sealed packs stay, and everything else (loose files and
+the packs commits and pulls wrote) goes into a new sealed pack, with delta
+hints only for the histories' nodes added since the last repack. The sealed
+packs are merged as a binary counter, so there are O(log n) of them. Past
+an eighth, or with `--full`, everything is rewritten into one pack and the
+removed names' bytes go. Chunks no blob names are swept on a full run, or
+when loose chunk files exist.
+
+On git.git, a gc after one commit takes 0.8 s this way (14 s rewriting
+everything; git's gc 13.5 s).
+
 ### Limits
 
 - A blob referenced only from inside an opaque format is not protected.

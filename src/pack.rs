@@ -35,9 +35,11 @@
 //!   renamed into place.
 //! - `removed`: names removed from packs, one per line, replaced atomically.
 //!   A removed name stays readable as a delta base until its pack is gone.
-//! - `sealed`: the id of the pack the last repack wrote. Its frames were
-//!   placed with their deltas, so the next repack copies them as they are
-//!   and only places what came after.
+//! - `sealed`: the ids of the packs repacks wrote, one per line, oldest
+//!   first. Their frames were placed with their deltas (a delta's base is in
+//!   a sealed pack too), so the next repack leaves them as they are and only
+//!   places what came after: a full repack copies them into one new pack, an
+//!   incremental one writes a new sealed pack of the rest beside them.
 //!
 //! Every process sharing the root sees new packs and removals: a lookup
 //! re-reads the indexes when the directory's modification time changed,
@@ -693,8 +695,8 @@ struct State {
     idx: Vec<std::sync::Arc<Idx>>,
     maps: Vec<std::sync::OnceLock<std::sync::Arc<Map>>>,
     removed: BTreeSet<String>,
-    /// The index in `packs` of the sealed pack.
-    sealed: Option<usize>,
+    /// The indexes in `packs` of the sealed packs, oldest first.
+    sealed: Vec<usize>,
     seen_mtime: Option<SystemTime>,
 }
 
@@ -1121,9 +1123,8 @@ impl Packs {
             Ok(text) => text.lines().map(String::from).collect(),
             Err(_) => BTreeSet::new(),
         };
-        st.sealed = fs::read_to_string(self.dir.join("sealed"))
-            .ok()
-            .and_then(|id| st.packs.iter().position(|p| *p == id.trim()));
+        let sealed = fs::read_to_string(self.dir.join("sealed")).unwrap_or_default();
+        st.sealed = sealed.lines().filter_map(|id| st.packs.iter().position(|p| p == id.trim())).collect();
         st.seen_mtime = now;
         Ok(())
     }
@@ -1304,7 +1305,9 @@ impl Packs {
         if st.removed.contains(name) {
             return Ok(None);
         }
-        let find = |st: &State| st.sealed.and_then(|p| st.idx[p].get(name).map(|offset| Loc { pack: p, offset }));
+        let find = |st: &State| {
+            st.sealed.iter().rev().find_map(|&p| st.idx[p].get(name).map(|offset| Loc { pack: p, offset }))
+        };
         let Some(m) = self.mapped(st, find)? else { return Ok(None) };
         m.frame().map(Some)
     }
@@ -1330,11 +1333,87 @@ impl Packs {
         Ok(None)
     }
 
-    /// Record `id` as the sealed pack.
+    /// Whether `name` is in a sealed pack and not removed.
+    pub fn is_sealed(&self, name: &str) -> io::Result<bool> {
+        self.look(false)?;
+        let st = self.state.read().unwrap();
+        Ok(!st.removed.contains(name) && st.sealed.iter().any(|&p| st.idx[p].get(name).is_some()))
+    }
+
+    /// The sealed packs' ids, oldest first.
+    pub fn sealed_ids(&self) -> io::Result<Vec<String>> {
+        self.refresh()?;
+        let st = self.state.read().unwrap();
+        Ok(st.sealed.iter().map(|&p| st.packs[p].clone()).collect())
+    }
+
+    /// Entries in sealed packs, and how many of them are removed: what an
+    /// incremental repack would leave in place, and the garbage among it.
+    pub fn sealed_counts(&self) -> io::Result<(usize, usize)> {
+        self.refresh()?;
+        let st = self.state.read().unwrap();
+        let total = st.sealed.iter().map(|&p| st.idx[p].len()).sum();
+        let dead = st.removed.iter().filter(|n| st.sealed.iter().any(|&p| st.idx[p].get(n).is_some())).count();
+        Ok((total, dead))
+    }
+
+    /// The names (not removed) held in the packs that are not sealed.
+    pub fn unsealed_names(&self) -> io::Result<Vec<String>> {
+        self.refresh()?;
+        let st = self.state.read().unwrap();
+        let mut out = BTreeSet::new();
+        for (i, idx) in st.idx.iter().enumerate() {
+            if st.sealed.contains(&i) {
+                continue;
+            }
+            for e in idx.entries_from("") {
+                let (k, _) = e?;
+                if !st.removed.contains(&k) {
+                    out.insert(k);
+                }
+            }
+        }
+        Ok(out.into_iter().collect())
+    }
+
+    /// Record `id` as the only sealed pack.
     pub fn seal(&self, id: &str, tmp: &Path) -> io::Result<()> {
+        self.write_sealed(&[id.to_string()], tmp)
+    }
+
+    /// Add `id` to the sealed packs, then keep their number logarithmic as
+    /// [`Packs::compact`] does (merged frames stay where a base precedes
+    /// them, so a merge of sealed packs is sealed).
+    pub fn seal_more(&self, id: &str, tmp: &Path) -> io::Result<()> {
+        let mut ids = self.sealed_ids()?;
+        ids.push(id.to_string());
+        self.write_sealed(&ids, tmp)?;
+        let sizes: Vec<usize> = {
+            let st = self.state.read().unwrap();
+            st.sealed.iter().map(|&p| st.idx[p].len()).collect()
+        };
+        if sizes.len() != ids.len() {
+            return Ok(());
+        }
+        let last = ids.len() - 1;
+        let (mut first, mut acc) = (last, sizes[last]);
+        while first > 0 && sizes[first - 1] <= acc {
+            first -= 1;
+            acc += sizes[first];
+        }
+        if first < last {
+            let merged = self.merge(&ids[first..], tmp)?;
+            let mut keep = ids[..first].to_vec();
+            keep.push(merged);
+            self.write_sealed(&keep, tmp)?;
+        }
+        Ok(())
+    }
+
+    fn write_sealed(&self, ids: &[String], tmp: &Path) -> io::Result<()> {
         let t = tmp.join(format!("sealed-{}", std::process::id()));
         let mut f = File::create(&t)?;
-        f.write_all(id.as_bytes())?;
+        f.write_all(ids.join("\n").as_bytes())?;
         f.sync_all()?;
         fs::rename(&t, self.dir.join("sealed"))?;
         File::open(&self.dir)?.sync_all()?;
@@ -1391,9 +1470,13 @@ impl Packs {
             return Ok(());
         }
         self.refresh()?;
+        // Sealed packs are merged by [`Packs::seal_more`] only.
         let (ids, sizes): (Vec<String>, Vec<usize>) = {
             let st = self.state.read().unwrap();
-            st.packs.iter().cloned().zip(st.idx.iter().map(|i| i.len())).unzip()
+            (0..st.packs.len())
+                .filter(|i| !st.sealed.contains(i))
+                .map(|i| (st.packs[i].clone(), st.idx[i].len()))
+                .unzip()
         };
         let Some(last) = ids.len().checked_sub(1) else { return Ok(()) };
         let big = |id: &str| fs::metadata(self.dir.join(format!("{id}.pack"))).is_ok_and(|m| m.len() >= BIG_PACK);
@@ -1540,8 +1623,26 @@ impl Packs {
             let _ = fs::remove_file(self.dir.join(format!("{id}.idx")));
             let _ = fs::remove_file(self.dir.join(format!("{id}.pack")));
         }
-        let _ = fs::remove_file(self.dir.join("removed"));
+        self.state.write().unwrap().seen_mtime = None;
+        self.refresh()?;
+        // Removals that a remaining pack still holds stay removed.
+        let keep: Vec<String> = {
+            let st = self.state.read().unwrap();
+            st.removed.iter().filter(|n| st.get(n).is_some()).cloned().collect()
+        };
+        if keep.is_empty() {
+            let _ = fs::remove_file(self.dir.join("removed"));
+        } else {
+            let t = self.dir.join(format!("removed-{}", std::process::id()));
+            let mut f = File::create(&t)?;
+            for n in &keep {
+                writeln!(f, "{n}")?;
+            }
+            f.sync_all()?;
+            fs::rename(&t, self.dir.join("removed"))?;
+        }
         File::open(&self.dir)?.sync_all()?;
+        self.state.write().unwrap().seen_mtime = None;
         self.refresh()
     }
 }
