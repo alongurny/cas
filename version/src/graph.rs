@@ -26,9 +26,20 @@ pub enum Filter {
     Full,
 }
 
-fn bits(path: &str, m: usize) -> [usize; 7] {
-    let h = cas_core::algo::lookup("blake3").unwrap().hash(path.as_bytes());
-    std::array::from_fn(|i| u32::from_le_bytes(h[4 * i..4 * i + 4].try_into().unwrap()) as usize % (m * 8))
+/// A path's seven filter hashes, before they are reduced to a filter's
+/// size: hashed once, tested against every step's filter.
+#[derive(Clone, Copy, Debug)]
+pub struct Probe([u32; 7]);
+
+impl Probe {
+    pub fn new(path: &str) -> Probe {
+        let h = cas_core::algo::lookup("blake3").unwrap().hash(path.as_bytes());
+        Probe(std::array::from_fn(|i| u32::from_le_bytes(h[4 * i..4 * i + 4].try_into().unwrap())))
+    }
+
+    fn bits(&self, m: usize) -> impl Iterator<Item = usize> + '_ {
+        self.0.iter().map(move |&x| x as usize % (m * 8))
+    }
 }
 
 impl Filter {
@@ -53,7 +64,7 @@ impl Filter {
         let m = (10 * all.len()).div_ceil(8).max(8);
         let mut f = vec![0u8; m];
         for p in all {
-            for b in bits(p, m) {
+            for b in Probe::new(p).bits(m) {
                 f[b / 8] |= 1 << (b % 8);
             }
         }
@@ -62,9 +73,14 @@ impl Filter {
 
     /// False only when `path` certainly did not change in the step.
     pub fn may_contain(&self, path: &Path) -> bool {
+        self.may_hold(&Probe::new(path.as_str()))
+    }
+
+    /// [`Filter::may_contain`] of a path hashed once.
+    pub fn may_hold(&self, probe: &Probe) -> bool {
         match self {
             Filter::Root | Filter::Full => true,
-            Filter::Bloom(f) => bits(path.as_str(), f.len()).iter().all(|&b| f[b / 8] & (1 << (b % 8)) != 0),
+            Filter::Bloom(f) => probe.bits(f.len()).all(|b| f[b / 8] & (1 << (b % 8)) != 0),
         }
     }
 }
@@ -242,22 +258,35 @@ impl Graph {
 
     /// The newest node whose step changed `path`: git's `last-modified`.
     pub fn last_change(&self, store: &dyn Store, path: &Path) -> Result<Option<usize>> {
-        self.changes(store, path, true).map(|v| v.first().copied())
+        self.changes(store, path, true, &mut crate::dir::FindMemo::new()).map(|v| v.first().copied())
+    }
+
+    /// [`Graph::last_change`] of each of `paths`, reading each directory
+    /// blob once for all of them.
+    pub fn last_changes(&self, store: &dyn Store, paths: &[Path]) -> Result<Vec<Option<usize>>> {
+        let mut memo = crate::dir::FindMemo::new();
+        paths.iter().map(|p| Ok(self.changes(store, p, true, &mut memo)?.first().copied())).collect()
     }
 
     /// The nodes whose step changed `path` (or anything under it), newest
     /// first: the same answer as [`derived::path_log`], reading the trees
     /// only of nodes whose filter may contain `path`.
     pub fn path_log(&self, store: &dyn Store, path: &Path) -> Result<Vec<usize>> {
-        self.changes(store, path, false)
+        self.changes(store, path, false, &mut crate::dir::FindMemo::new())
     }
 
-    fn changes(&self, store: &dyn Store, path: &Path, first_only: bool) -> Result<Vec<usize>> {
+    fn changes(
+        &self,
+        store: &dyn Store,
+        path: &Path,
+        first_only: bool,
+        blobs: &mut crate::dir::FindMemo,
+    ) -> Result<Vec<usize>> {
         // Each version is looked at as a node and again as its successor's
         // predecessor; remember the answers by version key.
         // Directory blobs shared between versions are read once.
         let memo = std::cell::RefCell::new(cas_core::keyhash::KeyMap::default());
-        let blobs = std::cell::RefCell::new(crate::dir::FindMemo::new());
+        let blobs = std::cell::RefCell::new(blobs);
         let at = |i: usize| -> Result<std::rc::Rc<Option<View>>> {
             let v = self.nodes[i].id.version();
             if let Some(n) = memo.borrow().get(v.key()) {
@@ -267,9 +296,10 @@ impl Graph {
             memo.borrow_mut().insert(v.key().to_string(), n.clone());
             Ok(n)
         };
+        let probe = Probe::new(path.as_str());
         let mut out = Vec::new();
         for (i, r) in self.nodes.iter().enumerate() {
-            if !r.filter.may_contain(path) {
+            if !r.filter.may_hold(&probe) {
                 continue;
             }
             let here = at(i)?;

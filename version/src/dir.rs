@@ -133,25 +133,48 @@ impl Dir {
 /// greatest name (to check it against any parent naming it), and the entry.
 /// By name, then blob key (looked up without allocating either; blob keys
 /// hash by their digest's last digits).
+///
+/// It also keeps the blobs it read, up to [`FindMemo::KEEP`] bytes, so that
+/// looking up another name reads and verifies each blob once.
 #[derive(Default)]
-pub struct FindMemo(std::collections::HashMap<String, cas_core::keyhash::KeyMap<std::rc::Rc<Found>>>);
+pub struct FindMemo {
+    found: std::collections::HashMap<String, cas_core::keyhash::KeyMap<std::rc::Rc<Found>>>,
+    blobs: cas_core::keyhash::KeyMap<std::rc::Rc<[u8]>>,
+    kept: usize,
+}
 
 type Found = (u64, Option<String>, Option<View>);
 
 impl FindMemo {
+    /// How many bytes of blobs a memo keeps.
+    pub const KEEP: usize = 256 << 20;
+
     pub fn new() -> FindMemo {
         FindMemo::default()
     }
 
     fn get(&self, name: &str, key: &str) -> Option<std::rc::Rc<Found>> {
-        self.0.get(name)?.get(key).cloned()
+        self.found.get(name)?.get(key).cloned()
     }
 
     fn insert(&mut self, name: &str, key: &str, f: std::rc::Rc<Found>) {
-        match self.0.get_mut(name) {
+        match self.found.get_mut(name) {
             Some(m) => m.insert(key.to_string(), f),
-            None => self.0.entry(name.to_string()).or_default().insert(key.to_string(), f),
+            None => self.found.entry(name.to_string()).or_default().insert(key.to_string(), f),
         };
+    }
+
+    /// The blob `key`, verified: kept from an earlier read, or read now.
+    fn read(&mut self, store: &dyn Store, key: &str) -> Result<std::rc::Rc<[u8]>> {
+        if let Some(b) = self.blobs.get(key) {
+            return Ok(b.clone());
+        }
+        let b: std::rc::Rc<[u8]> = crate::read_blob(store, key)?.into();
+        if self.kept + b.len() <= FindMemo::KEEP {
+            self.kept += b.len();
+            self.blobs.insert(key.to_string(), b.clone());
+        }
+        Ok(b)
     }
 }
 
@@ -164,7 +187,7 @@ impl Dir {
                 if let Some(f) = memo.get(name, key) {
                     return Ok(f.2.clone());
                 }
-                let v = Dir::text_find(key, &crate::read_blob(store, key)?, name)?;
+                let v = Dir::text_find(key, &memo.read(store, key)?, name)?;
                 memo.insert(name, key, std::rc::Rc::new((0, None, v.clone())));
                 Ok(v)
             }
@@ -177,7 +200,7 @@ fn tree_find_memo(store: &dyn Store, key: &str, name: &str, memo: &mut FindMemo)
     if let Some(a) = memo.get(name, key) {
         return Ok(a);
     }
-    let bytes = crate::read_blob(store, key)?;
+    let bytes = memo.read(store, key)?;
     let (level, last, hit) = scan(&bytes, name).map_err(|e| malformed(key, e))?;
     let a = if level == 0 {
         (0, last, hit)

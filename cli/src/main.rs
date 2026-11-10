@@ -508,8 +508,8 @@ fn run(a: Args) -> Res<()> {
                 })
                 .collect::<Result<_, _>>()
                 .map_err(e)?;
-            for p in entries {
-                match g.last_change(s, &p).map_err(e)? {
+            for (p, last) in entries.iter().zip(g.last_changes(s, &entries).map_err(e)?) {
+                match last {
                     Some(i) => out!("{}  {p}", short(g.nodes[i].id.version().key())),
                     None => out!("-  {p}"),
                 }
