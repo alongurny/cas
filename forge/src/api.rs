@@ -156,6 +156,16 @@ fn signed_in(c: &Option<Caller>) -> Result<&Caller> {
     c.as_ref().ok_or_else(Error::unauthorized)
 }
 
+/// Signed in with a token for everything: what the account itself does
+/// (password, tokens, organizations, new projects) a narrower token may not.
+fn full(c: &Option<Caller>) -> Result<&Caller> {
+    let c = signed_in(c)?;
+    match c.scope {
+        crate::accounts::Scope::All => Ok(c),
+        _ => Err(Error::denied("this token is limited; the account's own settings need a token for everything")),
+    }
+}
+
 fn num(s: &str) -> Result<u64> {
     s.parse().map_err(|_| Error::bad(format!("{s:?} is not a number")))
 }
@@ -255,7 +265,7 @@ fn route(
         // Accounts.
         ("POST", ["users"]) => {
             let first = f.accounts()?.values().all(|a| a.s("kind") != "user");
-            let admin = c.as_ref().is_some_and(|c| f.is_admin(&c.user));
+            let admin = full(c).is_ok_and(|c| f.is_admin(&c.user));
             if !(first || admin || opts.open_registration) {
                 return Err(Error::denied("sign-up is closed: an administrator makes accounts"));
             }
@@ -277,13 +287,13 @@ fn route(
             ok(account_json(name, &a, false))
         }
         ("POST", ["user", "password"]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             f.sign_in(&c.user, b.need("old")?)?;
             f.set_password(&c.user, b.need("new")?)?;
             done()
         }
         ("PATCH", ["user"]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             f.edit_account(&c.user, |d| {
                 if let Some(x) = b.opt("display") {
                     d.set_opt("display", Some(x));
@@ -296,7 +306,7 @@ fn route(
             done()
         }
         ("GET", ["user", "tokens"]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             let a = f.account(&c.user)?.ok_or_else(|| Error::missing("no account"))?;
             let list: Vec<J> = a
                 .entries("tokens")
@@ -310,25 +320,25 @@ fn route(
             ok(json!(list))
         }
         ("POST", ["user", "tokens"]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             let scope = Scope::parse(b.s("scope"))?;
             let expires = b.num("days").map(|d| crate::now() + d * 86400);
             let token = f.make_token(&c.user, b.opt("label").unwrap_or("token"), &scope, expires)?;
             Ok((201, json!({ "token": token, "key": crate::accounts::token_key(&token) })))
         }
         ("DELETE", ["user", "tokens", key]) => {
-            f.revoke_token(&signed_in(c)?.user, key)?;
+            f.revoke_token(&full(c)?.user, key)?;
             done()
         }
         ("POST", ["logout"]) => done(),
         ("POST", ["orgs"]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             let name = b.need("name")?;
             f.create_org(name, &c.user)?;
             Ok((201, json!({ "name": name })))
         }
         ("PUT", ["orgs", org, "members", user]) | ("DELETE", ["orgs", org, "members", user]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             let a = f
                 .account(org)?
                 .filter(|a| a.s("kind") == "org")
@@ -372,7 +382,7 @@ fn route(
             ok(json!(list))
         }
         ("POST", ["projects"]) => {
-            let c = signed_in(c)?;
+            let c = full(c)?;
             let p = ProjectId::new(b.opt("owner").unwrap_or(&c.user), b.need("name")?)?;
             f.create_project(&c.user, &p, b.s("description"), b.flag("public"))?;
             Ok((201, json!({ "project": p.to_string() })))

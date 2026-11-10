@@ -11,6 +11,8 @@ path = "src/main.rs"
 cas-core = { path = ".." }
 cas-version = { path = "../version" }
 mimalloc = "0.1.52"
+serde_json = "1"
+ureq = "3.5.0"
 
 [features]
 # Plain HTTP for benchmarks against git (bench/); never in a normal build.
@@ -19,4 +21,5 @@ bench-insecure = ["cas-core/bench-insecure"]
 [dev-dependencies]
 cas-core = { path = "..", features = ["test-tls"] }
 tempfile = "3.27.0"
+cas-forge = { path = "../forge" }
 blake3 = "1.8.7"

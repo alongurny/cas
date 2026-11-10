@@ -193,9 +193,12 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "cas-core",
+ "cas-forge",
  "cas-version",
  "mimalloc",
+ "serde_json",
  "tempfile",
+ "ureq",
 ]
 
 [[package]]

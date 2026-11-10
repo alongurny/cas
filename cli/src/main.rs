@@ -38,11 +38,13 @@ thread_local! {
 macro_rules! out {
     ($($t:tt)*) => {{
         use std::io::Write;
-        if OUT.with(|o| writeln!(o.borrow_mut(), $($t)*)).is_err() {
+        if crate::OUT.with(|o| writeln!(o.borrow_mut(), $($t)*)).is_err() {
             std::process::exit(0);
         }
     }};
 }
+
+mod forge;
 
 fn flush_out() {
     use std::io::Write;
@@ -351,6 +353,28 @@ fn report(outcome: MergeOutcome) -> Res<()> {
 }
 
 fn run(a: Args) -> Res<()> {
+    // Forge options may come before the command: keep them for it.
+    let mut words = a.rest.clone();
+    let mut lead = Vec::new();
+    while words.first().is_some_and(|w| w == "--json" || w == "--project") {
+        let w = words.remove(0);
+        if w == "--project" && !words.is_empty() {
+            lead.push(w);
+            lead.push(words.remove(0));
+        } else {
+            lead.push(w);
+        }
+    }
+    if let Some(cmd) = words.first()
+        && forge::COMMANDS.contains(&cmd.as_str())
+    {
+        words.extend(lead);
+        let ca = match &a.ca {
+            Some(f) => Some(std::fs::read(f).map_err(|x| format!("{f}: {x}"))?),
+            None => None,
+        };
+        return forge::run(&a, &words, ca.as_deref());
+    }
     let token = match &a.token_file {
         Some(f) => Some(std::fs::read_to_string(f).map_err(|x| format!("{f}: {x}"))?.trim().to_string()),
         None => None,
@@ -904,7 +928,7 @@ fn run(a: Args) -> Res<()> {
                 std::thread::park();
             }
         }
-        _ => return Err(USAGE.into()),
+        _ => return Err(format!("{USAGE}\n{}", forge::USAGE)),
     }
     Ok(())
 }

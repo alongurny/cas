@@ -16,6 +16,8 @@ Variable `forge/a/<name>`, a [record](store.md) whose `record.uni` has:
 
 A token's fields: `label` (what it is for), `created` (time), `expires`
 (time, optional), and `scope`: `all`, `read`, or `project <owner>/<name>`.
+Only an `all` token changes the account itself: its password, display
+name, tokens and organizations, and making projects.
 A token is 32 random bytes written as 64 hex digits; only its key is
 kept, so it is shown once, when made. Signing in with a password makes a
 token with label `session` that expires after 30 days.
