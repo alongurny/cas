@@ -359,3 +359,23 @@ proptest! {
         prop_assert_eq!(History::decode(cut).ok(), slow(cut));
     }
 }
+
+/// A history saved before steps had notes names the format's first
+/// version: it is read as a history still.
+#[test]
+fn histories_of_the_first_format_version_still_read() {
+    let s = store();
+    let v = version(&s, "a");
+    history::commit(&s, b3(), "main", &v, Step::default(), None).unwrap();
+    let head = history::head(&s, "main").unwrap().unwrap();
+    let hf = formats::by_alias("history").unwrap();
+    let (_, _, old_id) = &hf.older_versions()[0];
+    let old = View::parse(&format!("{old_id} {}", head.key())).unwrap();
+    assert!(old.known_format().is_some_and(|f| f.alias == "history"));
+    assert_eq!(history::read(&s, &old).unwrap(), history::read(&s, &head).unwrap());
+    // Its spec and format object are published with the current ones.
+    formats::publish(&s).unwrap();
+    let (spec, object) = hf.described_by(old_id);
+    assert_eq!(algo::lookup("blake3").unwrap().key(object.as_bytes()), *old_id);
+    assert!(s.read(&algo::lookup("blake3").unwrap().key(spec.as_bytes())).unwrap().is_some());
+}

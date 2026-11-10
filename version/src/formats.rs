@@ -26,6 +26,10 @@ pub struct Format {
     pub kind: Kind,
     object: String,
     id: String,
+    /// Earlier versions of the format, each a subset of this one, as (spec,
+    /// format object, id): a view with one of their ids is read as this
+    /// format. Writers use [`Format::id`].
+    older: Vec<(&'static str, String, String)>,
 }
 
 impl Format {
@@ -37,6 +41,25 @@ impl Format {
     /// The format object, in the metaformat.
     pub fn object(&self) -> &str {
         &self.object
+    }
+
+    /// The earlier versions: (spec, format object, id).
+    pub fn older_versions(&self) -> &[(&'static str, String, String)] {
+        &self.older
+    }
+
+    /// Whether `id` names this format or an earlier version of it.
+    pub fn is(&self, id: &str) -> bool {
+        self.id == id || self.older.iter().any(|o| o.2 == id)
+    }
+
+    /// The spec and format object that `id` names (this version's or an
+    /// earlier one's).
+    pub fn described_by(&self, id: &str) -> (&'static str, &str) {
+        match self.older.iter().find(|o| o.2 == id) {
+            Some((spec, object, _)) => (spec, object),
+            None => (self.spec, &self.object),
+        }
     }
 
     /// Whether `bytes`, stored at `key`, are valid in this format.
@@ -52,10 +75,22 @@ fn blake3() -> &'static Algorithm {
     algo::lookup("blake3").unwrap()
 }
 
-fn format(alias: &'static str, spec: &'static str, kind: Kind) -> Format {
+fn object_of(alias: &str, spec: &str) -> (String, String) {
     let object = format!("name {alias}\nmedia text/markdown\nspec {}\n", blake3().key(spec.as_bytes()));
     let id = blake3().key(object.as_bytes());
-    Format { alias, spec, kind, object, id }
+    (object, id)
+}
+
+fn format(alias: &'static str, spec: &'static str, kind: Kind) -> Format {
+    let (object, id) = object_of(alias, spec);
+    Format { alias, spec, kind, object, id, older: Vec::new() }
+}
+
+/// A format that also reads the views of its earlier versions `older`.
+fn format_since(alias: &'static str, spec: &'static str, kind: Kind, older: &[&'static str]) -> Format {
+    let mut f = format(alias, spec, kind);
+    f.older = older.iter().map(|s| (*s, object_of(alias, s))).map(|(s, (o, i))| (s, o, i)).collect();
+    f
 }
 
 fn any(_: &[u8]) -> std::result::Result<(), String> {
@@ -106,7 +141,13 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("git-blob", include_str!("../../spec/formats/git-blob.md"), Kind::Leaf(git)),
         format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
         format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),
-        format("history", include_str!("../../spec/formats/history.md"), Kind::Leaf(crate::htree::check_root)),
+        // Version 1 had no step notes.
+        format_since(
+            "history",
+            include_str!("../../spec/formats/history.md"),
+            Kind::Leaf(crate::htree::check_root),
+            &[include_str!("../../spec/formats/history-v1.md")],
+        ),
         format("annotated", include_str!("../../spec/formats/annotated.md"), Kind::Leaf(crate::annotated::check)),
         format("diff", include_str!("../../spec/formats/diff.md"), Kind::Leaf(crate::annotated::check_diff)),
         format(
@@ -126,7 +167,7 @@ pub fn by_alias(alias: &str) -> Option<&'static Format> {
 }
 
 pub fn by_id(id: &str) -> Option<&'static Format> {
-    FORMATS.iter().find(|f| f.id == id)
+    FORMATS.iter().find(|f| f.is(id))
 }
 
 pub fn metaformat_id() -> String {
@@ -140,6 +181,10 @@ pub fn publish(store: &dyn Store) -> Result<()> {
     for f in all() {
         blobs.push(f.spec.as_bytes());
         blobs.push(f.object.as_bytes());
+        for (spec, object, _) in &f.older {
+            blobs.push(spec.as_bytes());
+            blobs.push(object.as_bytes());
+        }
     }
     for b in blobs {
         store.write(&blake3().key(b), b, &Expect::Absent).map_err(Error::Store)?;

@@ -69,7 +69,8 @@ fn copy_blob(src: &dyn Store, dst: &dyn Store, key: &str, n: &mut Copied) -> Res
 /// describe what it holds. Formats this crate does not know are skipped.
 fn copy_format(src: &dyn Store, dst: &dyn Store, format: &str, n: &mut Copied) -> Result<()> {
     if let Some(f) = formats::by_id(format) {
-        for bytes in [f.spec.as_bytes(), f.object().as_bytes()] {
+        let (spec, object) = f.described_by(format);
+        for bytes in [spec.as_bytes(), object.as_bytes()] {
             let key = cas_core::algo::lookup("blake3").unwrap().key(bytes);
             if has(dst, &key)? {
                 n.present += 1;

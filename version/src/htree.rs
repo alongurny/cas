@@ -476,7 +476,7 @@ impl<'s> Stored<'s> {
     pub fn open(store: &'s dyn Store, r: Option<&View>) -> Result<Stored<'s>> {
         let mut s = Stored { store, root: Root::default(), leaf_list: Default::default(), cache: Default::default() };
         let Some(r) = r else { return Ok(s) };
-        if r.format() != root_format() {
+        if !by_alias("history").unwrap().is(r.format()) {
             return Err(Error::UnknownFormat(format!("{} is not the history format", r.format())));
         }
         s.root = Root::decode(&read_blob(store, r.key())?).map_err(|e| malformed(r.key(), e))?;

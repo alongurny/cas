@@ -209,6 +209,11 @@ fn mark_with(store: &dyn Store, known: Option<&DigestSet>) -> Result<(DigestSet,
         if marked.contains(f.id()) || known.is_some_and(|k| k.contains(f.id())) {
             marked.insert(&blake3().key(f.spec.as_bytes()));
         }
+        for (spec, _, id) in f.older_versions() {
+            if marked.contains(id) || known.is_some_and(|k| k.contains(id)) {
+                marked.insert(&blake3().key(spec.as_bytes()));
+            }
+        }
     }
     Ok((marked, missed.into_inner()))
 }

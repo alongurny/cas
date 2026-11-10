@@ -49,6 +49,21 @@ side, so it needs no cache: its cost follows the depth of `path`.
 
 ## Conformance
 
+## Graphs between saves
+
+A history saved after another notes it (variable `derived-hint/<graph>/<key>`).
+Readers that find no graph for a history follow these notes back up to 64
+saves: the graph found there, with the nodes added since put first (newest
+first, a node before its predecessors) and their steps diffed, is the new
+history's graph. It is not recorded, so a commit never rewrites the whole
+graph; `gc` records a fresh one once the nearest is more than 64 saves back.
+If a node of the older graph changed (not only added to), the graph is built
+again instead.
+
+(This is about caching, not the function: `spec/functions/graph.md` is the
+function's spec, and its key is the function's id, so editing it would drop
+every cached graph.)
+
 `version/tests/derived.rs` checks function ids and objects, cache hits (no writes on a second
 derive), incremental recomputation after one edit (at most six writes in a 111-directory tree),
 that a result recorded first wins, input-format checks, and `path_log` across a linear history

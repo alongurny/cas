@@ -40,12 +40,3 @@ trees need not be read: this is what git's changed-path filters do for
 
 A graph of a history that extends another can reuse the other's records by
 node id; only new nodes need a diff.
-
-A history saved after another notes it (variable `derived-hint/<graph>/<key>`).
-Readers that find no graph for a history follow these notes back up to 64
-saves: the graph found there, with the nodes added since put first (newest
-first, a node before its predecessors) and their steps diffed, is the new
-history's graph. It is not recorded, so a commit never rewrites the whole
-graph; `gc` records a fresh one once the nearest is more than 64 saves back.
-If a node of the older graph changed (not only added to), the graph is built
-again instead.
