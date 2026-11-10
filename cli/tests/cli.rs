@@ -20,14 +20,13 @@ fn commit_log_diff_checkout_and_sync() {
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
 
-    cas(&store, &["commit", w, "-m", "first"]);
+    cas(&store, &["commit", w]);
     std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
-    cas(&store, &["commit", w, "-m", "second"]);
+    cas(&store, &["commit", w]);
 
     let log = cas(&store, &["log"]);
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 2);
-    assert!(lines[0].contains("second") && !lines[1].contains("first"), "{log}");
 
     assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      src/lib.rs");
     assert_eq!(cas(&store, &["summary"]).trim(), "{'dirs': '2', 'files': '2'}");
@@ -105,7 +104,7 @@ fn commit_log_diff_checkout_and_sync() {
     assert!(pushed.unwrap().starts_with("Created"));
     // Without the token the same push is denied.
     std::fs::write(work.join("README"), "changed\n").unwrap();
-    cas(&store, &["commit", w, "-m", "third"]);
+    cas(&store, &["commit", w]);
     let anon = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
         .arg(&store)
@@ -134,16 +133,16 @@ fn private_history_rebase_publish_merge_and_gc() {
     // A private history starts as a copy of main.
     assert!(cas(&store, &["push", s, "--as", "alon"]).starts_with("Created"));
     std::fs::write(work.join("notes"), "ONE\ntwo\nthree\n").unwrap();
-    cas(&store, &["commit", w, "-H", "alon", "-m", "wip 1"]);
+    cas(&store, &["commit", w, "-H", "alon"]);
     std::fs::write(work.join("notes"), "ONE\nTWO\nthree\n").unwrap();
-    cas(&store, &["commit", w, "-H", "alon", "-m", "wip 2"]);
+    cas(&store, &["commit", w, "-H", "alon"]);
     assert_eq!(cas(&store, &["log", "-H", "alon"]).lines().count(), 3);
 
     // Main moves meanwhile: publishing needs a rebase first.
     let main_work = tmp.path().join("main-work");
     cas(&store, &["checkout", main_work.to_str().unwrap()]);
     std::fs::write(main_work.join("other"), "2\n").unwrap();
-    cas(&store, &["commit", main_work.to_str().unwrap(), "-m", "other: 2", "--compatible"]);
+    cas(&store, &["commit", main_work.to_str().unwrap(), "--compatible"]);
     let no = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
         .arg(&store)
@@ -152,7 +151,10 @@ fn private_history_rebase_publish_merge_and_gc() {
         .unwrap();
     assert!(!no.status.success());
     assert!(cas(&store, &["rebase", "main", "-H", "alon"]).starts_with("Done"));
-    assert!(cas(&store, &["publish", "--as", "main", "-H", "alon", "-m", "notes: upper case"]).starts_with("Done"));
+    let changelog = tmp.path().join("changelog");
+    std::fs::write(&changelog, "notes: upper case\n").unwrap();
+    let c = changelog.to_str().unwrap();
+    assert!(cas(&store, &["publish", "--as", "main", "-H", "alon", "--changelog", c]).starts_with("Done"));
     let log = cas(&store, &["log"]);
     assert_eq!(log.lines().count(), 3, "{log}");
     assert!(log.lines().next().unwrap().contains("notes: upper case") && log.contains("(v1)"), "{log}");
@@ -169,7 +171,7 @@ fn private_history_rebase_publish_merge_and_gc() {
     cas(&store, &["commit", out.to_str().unwrap(), "-H", "side"]);
     std::fs::write(out.join("notes"), "one\nTWO\nthree\n").unwrap();
     cas(&store, &["commit", out.to_str().unwrap()]);
-    assert!(cas(&store, &["merge", "side", "-m", "merge side"]).starts_with("Done"));
+    assert!(cas(&store, &["merge", "side"]).starts_with("Done"));
     std::fs::remove_dir_all(&out).unwrap();
     cas(&store, &["checkout", out.to_str().unwrap()]);
     assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
@@ -191,9 +193,9 @@ fn last_modified_merge_base_objects_and_fsck() {
     std::fs::write(work.join("README"), "hi\n").unwrap();
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
-    let first = cas(&store, &["commit", w, "-m", "first"]);
+    let first = cas(&store, &["commit", w]);
     std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
-    let second = cas(&store, &["commit", w, "-m", "second"]);
+    let second = cas(&store, &["commit", w]);
     let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
     let (a, b) = (short(&first), short(&second));
 
@@ -221,7 +223,7 @@ fn status_reset_clean_and_stash() {
     std::fs::write(work.join("README"), "hi\n").unwrap();
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
-    cas(&store, &["commit", w, "-m", "first"]);
+    cas(&store, &["commit", w]);
     assert_eq!(cas(&store, &["status", w]), "");
 
     std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
@@ -250,13 +252,13 @@ fn a_sparse_checkout_commits_only_its_paths() {
     std::fs::create_dir_all(work.join("src")).unwrap();
     std::fs::write(work.join("README"), "hi\n").unwrap();
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
-    cas(&store, &["commit", work.to_str().unwrap(), "-m", "first"]);
+    cas(&store, &["commit", work.to_str().unwrap()]);
     let p = part.to_str().unwrap();
     cas(&store, &["sparse", p, "src"]);
     assert!(!part.join("README").exists());
     std::fs::write(part.join("src/lib.rs"), "fn b() {}\n").unwrap();
     assert_eq!(cas(&store, &["status", p]), "changed  src/lib.rs\n");
-    cas(&store, &["commit", p, "-m", "second"]);
+    cas(&store, &["commit", p]);
     assert!(cas(&store, &["ls"]).contains("README"));
     assert_eq!(cas(&store, &["status", p]), "");
 }
@@ -268,9 +270,9 @@ fn diff_and_merge_base_with_the_ancestry_gc_records() {
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("a"), "1\n").unwrap();
     let w = work.to_str().unwrap();
-    let first = cas(&store, &["commit", w, "-m", "first"]);
+    let first = cas(&store, &["commit", w]);
     std::fs::write(work.join("a"), "2\n").unwrap();
-    let second = cas(&store, &["commit", w, "-m", "second"]);
+    let second = cas(&store, &["commit", w]);
     let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
     cas(&store, &["gc"]);
     assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      a");

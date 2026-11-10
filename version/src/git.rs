@@ -697,17 +697,21 @@ impl Importer<'_> {
 
 /// Import every commit reachable from `rev` in `repo` as a new history.
 pub fn import(store: &dyn Store, alg: &'static Algorithm, repo: &FsPath, rev: &str) -> Result<(History, Imported)> {
-    import_with_filters(store, alg, repo, rev).map(|(h, n, _)| (h, n))
+    import_with_filters(store, alg, repo, rev, true).map(|(h, n, _)| (h, n))
 }
 
 /// [`import`], with each node's changed-path filter against its first git
 /// parent (the history graph's, spec/functions/graph.md), from the trees
-/// the import reads anyway.
+/// the import reads anyway. With `notes`, each step's annotated diff holds
+/// its commit's subject on the lines it changed, and the tip has annotated
+/// files naming the commit that last changed each line (module
+/// `git_notes`).
 pub fn import_with_filters(
     store: &dyn Store,
     alg: &'static Algorithm,
     repo: &FsPath,
     rev: &str,
+    notes: bool,
 ) -> Result<(History, Imported, HashMap<NodeId, crate::graph::Filter>)> {
     // git re-encodes messages that declare an encoding; a message that is
     // not UTF-8 and says nothing (old latin-1 commits) is kept lossily.
@@ -741,6 +745,7 @@ pub fn import_with_filters(
     // together, a level of directories per round trip.
     let mut root_of: HashMap<String, Oid> = HashMap::new();
     let mut filters: HashMap<NodeId, crate::graph::Filter> = HashMap::new();
+    let (mut order, mut subjects, mut first) = (Vec::new(), HashMap::new(), HashMap::new());
     for chunk in recs.chunks(256) {
         let mut parsed = Vec::with_capacity(chunk.len());
         for rec in chunk {
@@ -761,8 +766,13 @@ pub fn import_with_filters(
         for (commit, parents, tree, message) in parsed {
             let version = im.tree(&tree, &raw, &mut bodies, "")?;
             let message = message.trim_end();
-            let step =
-                Step { changelog: (!message.is_empty()).then(|| message.to_string()), compatible: false, notes: None };
+            // cas has no commit messages: with `notes`, the message
+            // becomes the step's notes.
+            let step = Step {
+                changelog: (!notes && !message.is_empty()).then(|| message.to_string()),
+                compatible: false,
+                notes: None,
+            };
             let mut after = BTreeMap::new();
             for p in parents.split_whitespace() {
                 let pred = nodes.get(p).ok_or_else(|| Error::Io(format!("parent {p} of {commit} not imported")))?;
@@ -781,6 +791,13 @@ pub fn import_with_filters(
                 },
             };
             filters.insert(id.clone(), filter);
+            if notes {
+                order.push(id.clone());
+                subjects.insert(id.clone(), message.to_string());
+                if let Some(p) = parents.split_whitespace().next() {
+                    first.insert(id.clone(), nodes[p].clone());
+                }
+            }
             nodes.insert(commit.to_string(), id);
             im.n.commits += 1;
         }
@@ -803,5 +820,8 @@ pub fn import_with_filters(
         }
     }
     im.flush()?;
+    if notes {
+        crate::git_notes::annotate(store, alg, &mut h, &order, &subjects, &first)?;
+    }
     Ok((h, im.n, filters))
 }

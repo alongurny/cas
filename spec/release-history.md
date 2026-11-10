@@ -17,14 +17,14 @@ Two kinds of history serve two audiences ([history.md](history.md)).
   work went.
 
 Both are `history` blobs; a release history is one that holds no notes.
-`cas publish -m <notes>` makes the next release, in the release history `public` (`--as <name>` names another): one node with the
+`cas publish --changelog <file>` makes the next release, in the release history `releases` (`--as <name>` names another): one node with the
 internal tip's version after the release history's tip (which the internal
 history must follow; rebase first otherwise), with the release notes as its
 changelog (the first release, which has no step, keeps them as its node's
 `'doc'`). It refuses a target history that holds notes, so annotations
 never reach a release history through it, and the version it adds carries
 no history of its own: the internal nodes, their diffs and their notes stay
-behind. `cas log -H public` is then the release log.
+behind. `cas log -H releases` is then the release log.
 
 Anything can still be pushed anywhere: keeping internal histories off the
 clients' store is a matter of which histories are pushed there, and

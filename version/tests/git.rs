@@ -3,7 +3,7 @@
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Policy, Session, Who};
-use cas_version::{Node, Path, fs, git, lookup, read_blob};
+use cas_version::{Node, Path, annotated, fs, git, lookup, read_blob};
 use std::process::Command;
 
 fn b3() -> &'static Algorithm {
@@ -26,7 +26,7 @@ fn run(dir: &std::path::Path, args: &[&str]) {
 }
 
 #[test]
-fn a_git_history_imports_with_its_shape_tags_and_messages() {
+fn a_git_history_imports_with_its_shape_tags_and_notes() {
     let tmp = tempfile::tempdir().unwrap();
     let r = tmp.path();
     run(r, &["init", "-q", "-b", "main"]);
@@ -45,7 +45,7 @@ fn a_git_history_imports_with_its_shape_tags_and_messages() {
     run(r, &["commit", "-q", "-m", "side"]);
     run(r, &["checkout", "-q", "main"]);
     std::fs::write(r.join("README"), "hello\n").unwrap();
-    run(r, &["commit", "-q", "-am", "main edit"]);
+    run(r, &["commit", "-q", "-am", "main edit\n\nwhy: a greeting"]);
     run(r, &["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
     run(r, &["commit", "-q", "--allow-empty", "-m", "empty"]);
     run(r, &["tag", "light"]);
@@ -59,9 +59,25 @@ fn a_git_history_imports_with_its_shape_tags_and_messages() {
     assert!(tip.as_str().ends_with("#2"), "{tip}");
     let merge = h.nodes[&tip].after.keys().next().unwrap().clone();
     assert_eq!(h.nodes[&merge].after.len(), 2);
-    assert!(h.nodes[&merge].after.values().all(|s| s.changelog.as_deref() == Some("merge side")));
+    // No commit messages: the message is the notes of the step from the
+    // first parent (the subject on each changed line), and the other
+    // parent's step has none.
+    assert!(h.nodes.values().all(|n| n.doc.is_none() && n.after.values().all(|s| s.changelog.is_none())));
+    let noted: Vec<_> = h.nodes[&merge].after.values().filter_map(|s| s.notes.clone()).collect();
+    assert_eq!(noted.len(), 1);
+    let shown = String::from_utf8(annotated::show(&s, noted[0].key()).unwrap()).unwrap();
+    assert!(shown.contains("# merge side\n| path link\n") && shown.contains("| +s\n"), "{shown}");
     let root = h.log().pop().unwrap();
-    assert_eq!(h.nodes[&root].doc.as_deref(), Some("first\n\nwith a body"));
+    let edit = h.nodes.values().flat_map(|n| n.after.values()).filter_map(|s| s.notes.as_ref());
+    let edit: Vec<String> = edit.map(|v| String::from_utf8(annotated::show(&s, v.key()).unwrap()).unwrap()).collect();
+    assert!(edit.iter().any(|e| e.starts_with("# main edit / why: a greeting\n| diff ")), "{edit:?}");
+    let run_sh = String::from_utf8(annotated::show(&s, h.nodes[&tip].notes["src/run.sh"].key()).unwrap()).unwrap();
+    assert!(run_sh.ends_with(" first\n| #!/bin/sh\n"), "{run_sh}");
+    // The tip's files say per line which commit last changed it.
+    let readme = String::from_utf8(annotated::show(&s, h.nodes[&tip].notes["README"].key()).unwrap()).unwrap();
+    assert!(readme.ends_with(" main edit\n| hello\n"), "{readme}");
+    let side = String::from_utf8(annotated::show(&s, h.nodes[&tip].notes["side.txt"].key()).unwrap()).unwrap();
+    assert!(side.ends_with(" side\n| s\n"), "{side}");
     assert_eq!(h.tags["v1"], root);
     assert_eq!(h.tags["light"], tip);
 
@@ -120,7 +136,7 @@ fn import_filters_agree_with_diffs() {
     run(r, &["commit", "-q", "-m", "drop a dir"]);
 
     let s = store();
-    let (h, _, filters) = git::import_with_filters(&s, b3(), r, "HEAD").unwrap();
+    let (h, _, filters) = git::import_with_filters(&s, b3(), r, "HEAD", true).unwrap();
     assert_eq!(filters.len(), h.nodes.len());
     let ours = Graph::build(
         &s,

@@ -57,7 +57,9 @@ A URL is https:// (the only protocol); --ca trusts the CA certificates in <file>
 instead of the public ones. -j <threads> caps the threads a command uses
 (default: one per core).
 History options: -H <history> (default main), -n <node> (a tag, `latest`, or a key
-prefix; default latest), -m <changelog>, --doc <text>, --compatible.
+prefix; default latest), --doc <text>, --compatible. There is no commit
+message: a step says why through its notes (commit --notes), and a release
+through its changelog (publish --changelog).
   commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
                                   caches stat data, so unchanged files are not rehashed)
   commit <dir> --notes <file>     ... with a note on each line of the step's diff
@@ -74,7 +76,7 @@ prefix; default latest), -m <changelog>, --doc <text>, --compatible.
   clean <dir>                     remove from <dir> the paths the node does not have
   stash <dir> | stash pop <dir>   keep <dir> in history stash/<history> and reset it, or
                                   put the newest stash back into <dir> and drop it
-  log                             nodes, newest first, with tags and changelogs
+  log                             nodes, newest first, with tags and what each step says
   ls [<prefix>]                   paths of a node's version
   diff [--annotated]              changes from a node's predecessor (--annotated:
                                   the line diff with the step's notes)
@@ -96,12 +98,17 @@ prefix; default latest), -m <changelog>, --doc <text>, --compatible.
   push <store> [--as <name>]      send the history (fast-forward only)
   pull <store> [--as <name>]      fetch history <name> (fast-forward only)
   rebase <onto>                   replay this history's own nodes onto history <onto>
-  publish [--as <name>]           add this history's tip to the release history
-                                  (default public) as one node, -m its release
-                                  notes (no annotations reach it; spec/release-history.md)
+  publish --changelog <file> [--as <name>]
+                                  add this history's tip to the release history
+                                  (default releases) as one node whose changelog,
+                                  the file's text, says what changed since the
+                                  last release (no notes reach it;
+                                  spec/release-history.md)
   merge [<other>]                 merge history <other> in (or the two tips) as one node
   import-git <repo> [<rev>]       import a git repository's commits (default HEAD)
-                                  as history -H (refused if it exists)
+                                  as history -H (refused if it exists); a commit's
+                                  message becomes its step's notes, and the tip's
+                                  files note per line the commit that last changed it
   gc [--full]                     one collection run (two-phase); without --full,
                                   walks and repacks only what came since the last
                                   full run while that is small
@@ -160,7 +167,7 @@ struct Args {
     store: String,
     history: String,
     node: String,
-    message: Option<String>,
+    changelog: Option<String>,
     doc: Option<String>,
     compatible: bool,
     full: bool,
@@ -180,7 +187,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         store: std::env::var("CAS_STORE").unwrap_or_else(|_| ".cas".into()),
         history: "main".into(),
         node: "latest".into(),
-        message: None,
+        changelog: None,
         doc: None,
         compatible: false,
         full: false,
@@ -201,7 +208,12 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--store" => a.store = value("--store")?,
             "-H" => a.history = value("-H")?,
             "-n" => a.node = value("-n")?,
-            "-m" => a.message = Some(value("-m")?),
+            "-m" => {
+                return Err("cas has no commit messages: a step says why through its notes \
+                            (commit --notes <file>), a release through publish --changelog <file>"
+                    .into());
+            }
+            "--changelog" => a.changelog = Some(value("--changelog")?),
             "--doc" => a.doc = Some(value("--doc")?),
             "--compatible" => a.compatible = true,
             "--full" => a.full = true,
@@ -355,7 +367,7 @@ fn run(a: Args) -> Res<()> {
     let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}\n{USAGE}"));
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     let name = a.history.as_str();
-    let step = Step { changelog: a.message.clone(), compatible: a.compatible, notes: None };
+    let step = Step { changelog: None, compatible: a.compatible, notes: None };
     // The node -n names: a tag, `latest` or a node id is found from the
     // history's root and one leaf; only a key prefix needs every node.
     let at = || -> Res<NodeId> {
@@ -699,9 +711,13 @@ fn run(a: Args) -> Res<()> {
         }
         Some("publish") => {
             if let Some(x) = a.rest.get(1) {
-                return Err(format!("publish takes no {x:?}: the release history is `public`, or --as <name>"));
+                return Err(format!("publish takes no {x:?}: the release history is `releases`, or --as <name>"));
             }
-            let public = a.remote.clone().unwrap_or_else(|| "public".into());
+            let public = a.remote.clone().unwrap_or_else(|| "releases".into());
+            // A release says what is different from the release before it.
+            let file = a.changelog.as_ref().ok_or("publish needs --changelog <file>: what this release changes")?;
+            let text = std::fs::read_to_string(file).map_err(|x| format!("{file}: {x}"))?;
+            let step = Step { changelog: Some(text.trim_end().to_string()), ..step.clone() };
             let mine = load(s, name)?.1;
             let (_, outcome) =
                 history::record(s, b3(), &public, |p| merge::publish(&mine, p, step.clone(), a.doc.clone()))
@@ -733,7 +749,8 @@ fn run(a: Args) -> Res<()> {
             let repo = arg(1, "<repo>")?;
             let rev = a.rest.get(2).cloned().unwrap_or_else(|| "HEAD".into());
             let start = std::time::Instant::now();
-            let (h, n, filters) = cas_version::git::import_with_filters(s, b3(), repo.as_ref(), &rev).map_err(e)?;
+            let (h, n, filters) =
+                cas_version::git::import_with_filters(s, b3(), repo.as_ref(), &rev, true).map_err(e)?;
             formats::publish(s).map_err(e)?;
             let v = history::save(s, b3(), name, None, &h).map_err(|x| format!("{name}: {x}"))?;
             cas_version::ancestry::record(s, b3(), &v, &h);

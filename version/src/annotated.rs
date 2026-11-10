@@ -244,6 +244,26 @@ pub fn diff(store: &dyn Store, a: Option<&View>, b: &View) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The hunks between two files (none: absent), as a diff of `new` lists
+/// them; `None` when either is not text.
+pub(crate) fn file_diff(store: &dyn Store, path: &str, old: Option<&View>, new: &View) -> Result<Option<FileDiff>> {
+    let text = |v: Option<&View>| -> Result<Option<Vec<u8>>> {
+        match v {
+            Some(v) if is_text_format(v) => {
+                let b = read_blob(store, v.key())?;
+                Ok((!b.contains(&0)).then_some(b))
+            }
+            Some(_) => Ok(None),
+            None => Ok(Some(Vec::new())),
+        }
+    };
+    let (Some(x), Some(y)) = (text(old)?, text(Some(new))?) else { return Ok(None) };
+    let mut d = format!("{DIFF}{new} {new}\npath {path}\nold {}\nnew {new}\n", view_text(old)).into_bytes();
+    hunks(&mut d, &x, &y);
+    let (_, _, mut f) = parse_diff(&d).map_err(|e| malformed(new.key(), e))?;
+    Ok(f.pop())
+}
+
 /// Formats whose files a diff shows by lines.
 fn is_text_format(v: &View) -> bool {
     v.known_format().is_some_and(|f| matches!(f.alias, "raw" | "exec"))
@@ -252,10 +272,26 @@ fn is_text_format(v: &View) -> bool {
 fn hunks(out: &mut Vec<u8>, a: &[u8], b: &[u8]) {
     use similar::{Algorithm, DiffTag, capture_diff_slices, group_diff_ops};
     let (x, y) = (lines(a), lines(b));
-    let ops = capture_diff_slices(Algorithm::Myers, &x, &y);
+    // Myers compares lines many times: compare numbers, one per distinct line.
+    let mut ids: std::collections::HashMap<&[u8], u32> = std::collections::HashMap::new();
+    let mut id = |l| {
+        let n = ids.len() as u32;
+        *ids.entry(l).or_insert(n)
+    };
+    let xi: Vec<u32> = x.iter().map(|&l| id(l)).collect();
+    let yi: Vec<u32> = y.iter().map(|&l| id(l)).collect();
+    let ops = capture_diff_slices(Algorithm::Myers, &xi, &yi);
+    let mut shift: isize = 0;
     for group in group_diff_ops(ops, CONTEXT) {
-        let (Some(first), Some(last)) = (group.first(), group.last()) else { continue };
-        let (o, n) = (first.old_range().start..last.old_range().end, first.new_range().start..last.new_range().end);
+        let Some(first) = group.first() else { continue };
+        // New positions from old ones and the lengths, not the ops' new
+        // indices: similar 2.7 can give a `Delete` after a `Replace` a stale
+        // one. Every change is in some group, so `shift` counts them all.
+        let os = first.old_range().start;
+        let ns = os.checked_add_signed(shift).unwrap_or(0);
+        let (ol, nl) = group.iter().fold((0, 0), |(a, b), op| (a + op.old_range().len(), b + op.new_range().len()));
+        shift += nl as isize - ol as isize;
+        let (o, n) = (os..os + ol, ns..ns + nl);
         let start = |r: &std::ops::Range<usize>| if r.is_empty() { r.start } else { r.start + 1 };
         out.extend_from_slice(format!("@@ -{},{} +{},{} @@\n", start(&o), o.len(), start(&n), n.len()).as_bytes());
         let mut put = |c: u8, l: &[u8]| {
@@ -265,15 +301,18 @@ fn hunks(out: &mut Vec<u8>, a: &[u8], b: &[u8]) {
                 out.extend_from_slice(b"\n\\\n");
             }
         };
+        let mut j = ns;
         for op in group {
             let (tag, or, nr) = op.as_tag_tuple();
+            let added = j..j + nr.len();
+            j = added.end;
             match tag {
                 DiffTag::Equal => or.clone().for_each(|i| put(b' ', x[i])),
                 DiffTag::Delete => or.clone().for_each(|i| put(b'-', x[i])),
-                DiffTag::Insert => nr.clone().for_each(|i| put(b'+', y[i])),
+                DiffTag::Insert => added.for_each(|i| put(b'+', y[i])),
                 DiffTag::Replace => {
                     or.clone().for_each(|i| put(b'-', x[i]));
-                    nr.clone().for_each(|i| put(b'+', y[i]));
+                    added.for_each(|i| put(b'+', y[i]));
                 }
             }
         }
