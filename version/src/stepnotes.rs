@@ -365,8 +365,8 @@ pub fn from_lines<N: AsRef<str>>(
 /// A path's notes with its runs spelled out, a note per line.
 type Expanded<'a> = (&'a PathNotes, Vec<&'a str>, Vec<&'a str>);
 
-/// A note for each line of the diff from `sn`'s notes.
-fn line_notes<'a>(sn: &'a StepNotes, d: &[u8]) -> Vec<&'a str> {
+/// A note for each line of the diff `d` from `sn`'s notes.
+pub fn line_notes<'a>(sn: &'a StepNotes, d: &[u8]) -> Vec<&'a str> {
     let (paths, places) = places(d);
     let expanded: Vec<Option<Expanded>> = paths
         .iter()

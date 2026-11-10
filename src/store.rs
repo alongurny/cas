@@ -354,11 +354,12 @@ impl CoreStore {
     fn list(&self, who: &Who, span: &Span) -> Result<ListPage> {
         self.gate(who, Op::List { span })?;
         let limit = self.policy.list_page.max(1);
-        let keys = self.backend.list(span, limit)?;
+        let mut keys = self.backend.list(span, limit)?;
         let rest = match keys.last() {
             Some(last) if keys.len() == limit => Some(span.after(last.as_bytes())),
             _ => None,
         };
+        keys.retain(|k| !self.gate.hides(who, k));
         Ok(ListPage { keys, rest })
     }
 
@@ -387,13 +388,19 @@ impl CoreStore {
         }
         let asked: Vec<&str> = keys.iter().zip(&valid).filter(|(_, v)| **v).map(|(k, _)| k.as_str()).collect();
         let mut held = self.backend.has_many(&asked)?.into_iter();
-        Ok(valid.into_iter().map(|v| v && held.next().unwrap_or(false)).collect())
+        Ok(valid
+            .into_iter()
+            .zip(keys)
+            .map(|(v, k)| v && held.next().unwrap_or(false) && !self.gate.hides(who, k))
+            .collect())
     }
 
     /// All of `span` in one backend pass, gated as one `list` of it.
     fn list_all(&self, who: &Who, span: &Span) -> Result<Vec<String>> {
         self.gate(who, Op::List { span })?;
-        Ok(self.backend.list(span, usize::MAX)?)
+        let mut keys = self.backend.list(span, usize::MAX)?;
+        keys.retain(|k| !self.gate.hides(who, k));
+        Ok(keys)
     }
 }
 

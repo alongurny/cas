@@ -36,4 +36,4 @@ name = "conformance"
 required-features = ["conformance"]
 
 [workspace]
-members = [".", "version", "cli"]
+members = [".", "version", "cli", "forge"]

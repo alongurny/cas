@@ -29,6 +29,14 @@ pub enum Op<'a> {
 
 pub trait Gate: Send + Sync {
     fn allow(&self, who: &Who, op: &Op<'_>) -> bool;
+
+    /// Whether a `has` of `key` (an allowed one-key list) answers "absent"
+    /// to `who` whether or not the store holds it: a gate that scopes blob
+    /// reads hides the blobs a caller may not read, so asking reveals
+    /// nothing a read would not.
+    fn hides(&self, _who: &Who, _key: &str) -> bool {
+        false
+    }
 }
 
 /// The Stage 2 default.

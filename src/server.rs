@@ -141,6 +141,20 @@ impl Server {
         tls: Tls,
         max_body: usize,
     ) -> io::Result<Server> {
+        Server::start_routed(store, addr, workers, auth, tls, max_body, None)
+    }
+
+    /// [`Server::start_with_max_body`], with `router` deciding each request
+    /// first (see [`Route`]).
+    pub fn start_routed(
+        store: Arc<CoreStore>,
+        addr: &str,
+        workers: usize,
+        auth: Arc<Authenticate>,
+        tls: Tls,
+        max_body: usize,
+        router: Option<Arc<Router>>,
+    ) -> io::Result<Server> {
         let listener = TcpListener::bind(addr)?;
         let addr = listener.local_addr()?;
         let closed = Arc::new(AtomicBool::new(false));
@@ -148,11 +162,12 @@ impl Server {
         let recv = Arc::new(Mutex::new(recv));
         for _ in 0..workers.max(1) {
             let (recv, store, auth, tls) = (Arc::clone(&recv), Arc::clone(&store), Arc::clone(&auth), tls.clone());
+            let router = router.clone();
             thread::spawn(move || {
                 loop {
                     let next = recv.lock().unwrap().recv();
                     let Ok(tcp) = next else { return };
-                    let _ = serve_connection(&store, &auth, &tls, tcp, max_body);
+                    let _ = serve_connection(&store, &auth, &router, &tls, tcp, max_body);
                 }
             });
         }
@@ -226,42 +241,72 @@ impl Write for Conn {
     }
 }
 
+/// Writes a streamed body (see [`Response::stream`]).
+pub type Streamer = Box<dyn FnOnce(&mut dyn Write) -> io::Result<()> + Send>;
+
 /// One answer: status, headers and body.
-pub(crate) struct Response {
+pub struct Response {
     status: u16,
     headers: Vec<(&'static str, String)>,
     body: Vec<u8>,
+    stream: Option<Streamer>,
 }
 
 impl Response {
-    fn new(status: u16) -> Response {
-        Response { status, headers: Vec::new(), body: Vec::new() }
+    pub fn new(status: u16) -> Response {
+        Response { status, headers: Vec::new(), body: Vec::new(), stream: None }
     }
 
-    fn data(body: impl Into<Vec<u8>>) -> Response {
+    pub fn data(body: impl Into<Vec<u8>>) -> Response {
         Response { body: body.into(), ..Response::new(200) }
     }
 
-    fn with(mut self, name: &'static str, value: &str) -> Response {
+    pub fn with(mut self, name: &'static str, value: &str) -> Response {
         self.headers.push((name, value.to_string()));
         self
     }
 
-    fn status(mut self, status: u16) -> Response {
+    pub fn status(mut self, status: u16) -> Response {
         self.status = status;
         self
     }
+
+    /// A 200 whose body `f` writes as it goes (server-sent events): sent
+    /// without a length, and the connection closes after it.
+    pub fn stream(f: Streamer) -> Response {
+        Response { stream: Some(f), ..Response::new(200) }
+    }
 }
+
+/// Where a [`Router`] sends a request.
+pub enum Route {
+    /// The wire protocol, with `url` in place of the request's, and every
+    /// variable name in it under `prefix` (blob keys unchanged): a store
+    /// mounted at a path, whose callers see only the variables under
+    /// `prefix`, without it.
+    Wire { prefix: String, url: String },
+    /// This answer.
+    Reply(Response),
+}
+
+/// Decides each request before the wire protocol sees it; `None` leaves it
+/// to the wire, unchanged.
+pub type Router = dyn Fn(&Request) -> Option<Route> + Send + Sync;
 
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        201 => "Created",
+        302 => "Found",
+        304 => "Not Modified",
+        401 => "Unauthorized",
         204 => "No Content",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
         409 => "Conflict",
+        411 => "Length Required",
         413 => "Content Too Large",
         422 => "Unprocessable Content",
         431 => "Request Header Fields Too Large",
@@ -270,19 +315,30 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
-fn write_response(w: &mut Conn, r: &Response, close: bool) -> io::Result<()> {
-    let mut out = format!("HTTP/1.1 {} {}\r\nContent-Length: {}\r\n", r.status, reason(r.status), r.body.len());
+fn write_response(w: &mut Conn, r: Response, close: bool) -> io::Result<()> {
+    let mut out = format!("HTTP/1.1 {} {}\r\n", r.status, reason(r.status));
+    if r.stream.is_none() {
+        out.push_str(&format!("Content-Length: {}\r\n", r.body.len()));
+    }
     for (k, v) in &r.headers {
         out.push_str(&format!("{k}: {v}\r\n"));
     }
-    if close {
+    if close || r.stream.is_some() {
         out.push_str("Connection: close\r\n");
     }
     out.push_str("\r\n");
     let mut bytes = out.into_bytes();
     bytes.extend_from_slice(&r.body);
     w.write_all(&bytes)?;
-    w.flush()
+    w.flush()?;
+    match r.stream {
+        Some(f) => {
+            let r = f(w);
+            let _ = w.flush();
+            r
+        }
+        None => Ok(()),
+    }
 }
 
 /// What reading the next request found.
@@ -390,6 +446,7 @@ fn read_request(r: &mut BufReader<Conn>, max_body: usize) -> io::Result<Next> {
 fn serve_connection(
     store: &Arc<CoreStore>,
     auth: &Arc<Authenticate>,
+    router: &Option<Arc<Router>>,
     tls: &Tls,
     tcp: TcpStream,
     max_body: usize,
@@ -410,14 +467,18 @@ fn serve_connection(
         match read_request(&mut r, max_body)? {
             Next::End => return Ok(()),
             Next::Refuse(resp) => {
-                write_response(r.get_mut(), &resp, true)?;
+                write_response(r.get_mut(), resp, true)?;
                 return Ok(());
             }
             Next::Request(req) => {
-                let close = req.header("Connection").is_some_and(|v| v.eq_ignore_ascii_case("close"));
-                let session = store.session(auth(&req));
-                let resp = handle(&session, &req);
-                write_response(r.get_mut(), &resp, close)?;
+                let mut close = req.header("Connection").is_some_and(|v| v.eq_ignore_ascii_case("close"));
+                let resp = match router.as_ref().and_then(|route| route(&req)) {
+                    Some(Route::Reply(resp)) => resp,
+                    Some(Route::Wire { prefix, url }) => handle(&store.session(auth(&req)), &req, &url, &prefix),
+                    None => handle(&store.session(auth(&req)), &req, &req.url, ""),
+                };
+                close |= resp.stream.is_some();
+                write_response(r.get_mut(), resp, close)?;
                 if close {
                     r.get_mut().close();
                     return Ok(());
@@ -447,12 +508,32 @@ fn chunk_ids(body: &[u8]) -> Option<Vec<chunk::Id>> {
     Some(body.chunks(32).map(|c| c.try_into().unwrap()).collect())
 }
 
-fn handle(store: &Session, req: &Request) -> Response {
-    let (path, query) = req.url.split_once('?').unwrap_or((&req.url, ""));
+/// `key` with variable names under `prefix`.
+fn mount(prefix: &str, key: String) -> String {
+    if prefix.is_empty() || !matches!(classify(&key), Some(Parsed::Var)) { key } else { format!("{prefix}{key}") }
+}
+
+/// The smallest byte string after every string that starts with `p`.
+fn after_prefix(p: &[u8]) -> Option<Vec<u8>> {
+    let mut v = p.to_vec();
+    while let Some(last) = v.pop() {
+        if last < 0xff {
+            v.push(last + 1);
+            return Some(v);
+        }
+    }
+    None
+}
+
+fn handle(store: &Session, req: &Request, url: &str, prefix: &str) -> Response {
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let method = req.method.as_str();
+    let decode_key = |seg: &str| wire::decode_key(seg).map(|k| mount(prefix, k));
+    let decode_keys =
+        |b: &[u8]| wire::decode_keys(b).map(|ks| ks.into_iter().map(|k| mount(prefix, k)).collect::<Vec<_>>());
 
     if let Some(seg) = path.strip_prefix("/k/") {
-        let key = match wire::decode_key(seg) {
+        let key = match decode_key(seg) {
             Ok(k) => k,
             Err(e) => return respond_error(e),
         };
@@ -493,7 +574,7 @@ fn handle(store: &Session, req: &Request) -> Response {
         if method != "POST" {
             return Response::new(405);
         }
-        let key = match wire::decode_key(seg) {
+        let key = match decode_key(seg) {
             Ok(k) => k,
             Err(e) => return respond_error(e),
         };
@@ -533,22 +614,25 @@ fn handle(store: &Session, req: &Request) -> Response {
         }
         match op {
             "has" => {
-                let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
+                let Some(keys) = decode_keys(&req.body) else { return bad_request() };
                 match store.has_many(&keys) {
                     Ok(has) => Response::data(has.into_iter().map(u8::from).collect::<Vec<u8>>()),
                     Err(e) => respond_error(e),
                 }
             }
             "read" => {
-                let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
+                let Some(keys) = decode_keys(&req.body) else { return bad_request() };
                 Response::data(wire::encode_reads(&store.read_many(&keys))).with("Cache-Control", "no-store")
             }
             "stored" => {
-                let Some(keys) = wire::decode_keys(&req.body) else { return bad_request() };
+                let Some(keys) = decode_keys(&req.body) else { return bad_request() };
                 Response::data(wire::encode_stored(&store.read_stored_many(&keys))).with("Cache-Control", "no-store")
             }
             "write" => {
-                let Some(puts) = wire::decode_puts(&req.body) else { return bad_request() };
+                let Some(mut puts) = wire::decode_puts(&req.body) else { return bad_request() };
+                for p in &mut puts {
+                    p.key = mount(prefix, std::mem::take(&mut p.key));
+                }
                 match store.write_many(&puts) {
                     Ok(()) => Response::new(204),
                     Err((i, e)) => respond_error(e).with("CAS-Batch-Index", &i.to_string()),
@@ -571,16 +655,29 @@ fn handle(store: &Session, req: &Request) -> Response {
                 Err(_) => return bad_request(),
             }
         }
+        if !prefix.is_empty() {
+            // Under a mount the caller lists its own variables only.
+            let p = prefix.as_bytes();
+            span.from = Some([p, span.from.as_deref().unwrap_or_default()].concat());
+            span.to = match span.to.take() {
+                Some(t) => Some([p, &t].concat()),
+                None => after_prefix(p),
+            };
+        }
         match store.list(&span) {
             Ok(page) => {
                 let mut body = Vec::new();
                 for k in &page.keys {
-                    body.extend_from_slice(k.as_bytes());
+                    body.extend_from_slice(k.strip_prefix(prefix).unwrap_or(k).as_bytes());
                     body.push(b'\n');
                 }
                 let r = Response::data(body).with("Cache-Control", "no-store");
                 match page.rest {
-                    Some(rest) => r.with("CAS-Rest-From", &hex::encode(rest.from.unwrap_or_default())),
+                    Some(rest) => {
+                        let from = rest.from.unwrap_or_default();
+                        let from = from.strip_prefix(prefix.as_bytes()).unwrap_or(&from);
+                        r.with("CAS-Rest-From", &hex::encode(from))
+                    }
                     None => r,
                 }
             }

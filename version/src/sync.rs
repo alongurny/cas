@@ -36,7 +36,7 @@ pub struct Copied {
 
 /// The views inside a blob, by its format. Unknown formats are
 /// opaque, so their blobs are copied without following anything.
-pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
+pub fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(d), _)) => d.blob_children(r.key(), &read_blob(store, r.key())?),
         Some((_, "history" | "history-part")) => Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default()),
