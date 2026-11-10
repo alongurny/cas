@@ -124,6 +124,47 @@ impl DigestSet {
     }
 }
 
+impl DigestSet {
+    /// Moves every key of `other` into this set.
+    pub fn absorb(&mut self, other: DigestSet) {
+        self.b3.extend(other.b3);
+        self.other.extend(other.other);
+    }
+}
+
+/// A [`DigestSet`] that threads share, in shards so they seldom wait.
+pub struct SharedDigestSet([std::sync::Mutex<DigestSet>; 64]);
+
+impl Default for SharedDigestSet {
+    fn default() -> Self {
+        SharedDigestSet(std::array::from_fn(|_| Default::default()))
+    }
+}
+
+impl SharedDigestSet {
+    fn shard(&self, k: &str) -> &std::sync::Mutex<DigestSet> {
+        let h = k.as_bytes().iter().rev().take(2).fold(0usize, |h, &c| h * 31 + usize::from(c));
+        &self.0[h % 64]
+    }
+
+    /// Adds `k`; false if it was already there.
+    pub fn insert(&self, k: &str) -> bool {
+        self.shard(k).lock().unwrap().insert(k)
+    }
+
+    pub fn contains(&self, k: &str) -> bool {
+        self.shard(k).lock().unwrap().contains(k)
+    }
+
+    pub fn into_set(self) -> DigestSet {
+        let mut out = DigestSet::default();
+        for m in self.0 {
+            out.absorb(m.into_inner().unwrap());
+        }
+        out
+    }
+}
+
 impl<S: AsRef<str>> FromIterator<S> for DigestSet {
     fn from_iter<I: IntoIterator<Item = S>>(it: I) -> Self {
         let mut s = DigestSet::default();

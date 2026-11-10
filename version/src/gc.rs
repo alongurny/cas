@@ -14,7 +14,7 @@ use crate::uni::Value;
 use crate::{Result, View, by_alias, is_blob_key, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::key::{Parsed, classify};
-use cas_core::keyhash::DigestSet;
+use cas_core::keyhash::{DigestSet, SharedDigestSet};
 use cas_core::{Expect, Span, Store, list_all};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -82,10 +82,12 @@ pub fn index_histories(store: &dyn Store, alg: &'static Algorithm) -> Result<()>
     Ok(())
 }
 
-/// Every blob reachable from the variables in `store`.
+/// Every blob reachable from the variables in `store`. Walked as fsck
+/// walks: the variables on this thread, then the histories' versions in one
+/// consecutive run per thread (oldest first: blobs are deltas on the
+/// version before's), then the histories' own parts.
 pub fn mark(store: &dyn Store) -> Result<DigestSet> {
     let keys = variables(store)?;
-    let mut marked = DigestSet::default();
     let mut raw: Vec<String> = vec![blake3().key(METAFORMAT.as_bytes())];
     let mut todo: Vec<View> = Vec::new();
     for k in &keys {
@@ -102,30 +104,35 @@ pub fn mark(store: &dyn Store) -> Result<DigestSet> {
             todo.push(r);
         }
     }
-    let mut formats_seen = BTreeSet::new();
-    while let Some(r) = todo.pop() {
-        if formats_seen.insert(r.format().to_string()) {
-            raw.push(r.format().to_string());
-        }
-        if !marked.insert(r.key()) {
-            continue;
-        }
-        match children_light(store, &r, &marked) {
-            Ok(c) => {
-                todo.extend(c);
-                // Versions oldest first, each walked before the next, as
-                // fsck does: blobs are deltas on the version before's.
-                if r.known_format().is_some_and(|f| f.alias == "history")
-                    && let Ok(h) = history::read(store, &r)
-                {
-                    todo.extend(h.log().into_iter().map(|id| id.version()));
-                }
-            }
-            // A missing blob ends the walk there.
-            Err(crate::Error::Missing(_)) => {}
-            Err(e) => return Err(e),
-        }
+    let seen = SharedDigestSet::default();
+    let (mut versions, mut later) = (Vec::new(), Vec::new());
+    let mut first = Marker { store, seen: &seen, local: DigestSet::default(), formats: BTreeSet::new() };
+    first.walk(todo, Some((&mut versions, &mut later)))?;
+    let mut formats = std::mem::take(&mut first.formats);
+    let threads = cas_core::threads::get().min(versions.len()).max(1);
+    let per = versions.len().div_ceil(threads).max(1);
+    let found: Vec<Result<BTreeSet<String>>> = std::thread::scope(|sc| {
+        let handles: Vec<_> = versions
+            .chunks(per)
+            .map(|run| {
+                let seen = &seen;
+                sc.spawn(move || {
+                    let mut m = Marker { store, seen, local: DigestSet::default(), formats: BTreeSet::new() };
+                    // Popped last first: reversed, the oldest goes first.
+                    m.walk(run.iter().rev().cloned().collect(), None).map(|()| m.formats)
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("mark thread panicked")).collect()
+    });
+    for f in found {
+        formats.extend(f?);
     }
+    let mut last = Marker { store, seen: &seen, local: DigestSet::default(), formats: BTreeSet::new() };
+    last.walk(later, None)?;
+    formats.extend(last.formats);
+    let mut marked = seen.into_set();
+    raw.extend(formats);
     while let Some(k) = raw.pop() {
         if is_blob_key(&k)
             && marked.insert(&k)
@@ -141,6 +148,58 @@ pub fn mark(store: &dyn Store) -> Result<DigestSet> {
         }
     }
     Ok(marked)
+}
+
+/// One thread's part of [`mark`].
+struct Marker<'a> {
+    store: &'a dyn Store,
+    seen: &'a SharedDigestSet,
+    /// What this thread has met, asked before the shared set.
+    local: DigestSet,
+    /// The formats of the views met.
+    formats: BTreeSet<String>,
+}
+
+impl Marker<'_> {
+    /// Mark what `todo` reaches (popped from the end). With `defer`, a
+    /// history's versions go to its first list (oldest first) and its parts
+    /// to the second, instead of being walked.
+    #[allow(clippy::type_complexity)]
+    fn walk(&mut self, mut todo: Vec<View>, mut defer: Option<(&mut Vec<View>, &mut Vec<View>)>) -> Result<()> {
+        while let Some(r) = todo.pop() {
+            if !self.formats.contains(r.format()) {
+                self.formats.insert(r.format().to_string());
+            }
+            if !self.local.insert(r.key()) || !self.seen.insert(r.key()) {
+                continue;
+            }
+            match children_light(self.store, &r, &self.local) {
+                Ok(c) => {
+                    let mut vs = Vec::new();
+                    if r.known_format().is_some_and(|f| f.alias == "history")
+                        && let Ok(h) = history::read(self.store, &r)
+                    {
+                        vs = h.log().into_iter().map(|id| id.version()).collect();
+                    }
+                    // The log is newest first: popped from the end, oldest first.
+                    match defer.as_mut() {
+                        Some((out, later)) if !vs.is_empty() => {
+                            out.extend(vs.into_iter().rev());
+                            later.extend(c);
+                        }
+                        _ => {
+                            todo.extend(c);
+                            todo.extend(vs);
+                        }
+                    }
+                }
+                // A missing blob ends the walk there.
+                Err(crate::Error::Missing(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
 }
 
 fn pending(store: &dyn Store) -> Result<(Option<Vec<u8>>, BTreeSet<String>)> {

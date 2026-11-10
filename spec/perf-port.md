@@ -192,7 +192,9 @@ a failing setup step shows as FAIL.
   histories' versions in consecutive runs, one per thread, oldest first
   within each, sharing a sharded set of what is reached; a history's own
   parts (which name every version in id order) are walked last. git.git,
-  4 cores: fsck 21.4 s on one thread, 13.9 s on four (git 30 s).
+  4 cores: fsck 21.4 s on one thread, 13.9 s on four (git 30 s). gc's
+  mark walks the same way: 3.6 -> 1.9 s on four threads; a second gc
+  takes 8.4 s on four threads (git's second gc 8.4 s), 9.6 s on one.
 - **Left:** the index is 40 bytes an entry (git's 28) for 506k entries
   (git's 423k objects); import (101 s) is slower than fast-import (82-93 s)
   but not than fast-export plus fast-import (~100-110 s).

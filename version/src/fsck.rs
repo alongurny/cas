@@ -8,7 +8,7 @@ use crate::formats::Kind;
 use crate::sync::children_of;
 use crate::{Error, Result, View, by_id, is_blob_key};
 use cas_core::key::{Parsed, classify};
-use cas_core::keyhash::DigestSet;
+use cas_core::keyhash::{DigestSet, SharedDigestSet};
 use cas_core::{Span, Store, list_all};
 use std::collections::BTreeSet;
 
@@ -46,7 +46,7 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
             todo.push((k.clone(), view));
         }
     }
-    let seen = Seen::default();
+    let seen = SharedDigestSet::default();
     // The variables' views first, on this thread; the versions of the
     // histories they hold are set aside and walked on every thread, and
     // the histories' own parts (which name every version, in id order)
@@ -89,36 +89,10 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
     Ok(r)
 }
 
-/// The keys every thread has reached, in shards so threads seldom wait.
-struct Seen([std::sync::Mutex<DigestSet>; 64]);
-
-impl Default for Seen {
-    fn default() -> Self {
-        Seen(std::array::from_fn(|_| Default::default()))
-    }
-}
-
-impl Seen {
-    fn shard(&self, k: &str) -> &std::sync::Mutex<DigestSet> {
-        let b = k.as_bytes();
-        let h = b.iter().rev().take(2).fold(0usize, |h, &c| h * 31 + usize::from(c));
-        &self.0[h % 64]
-    }
-
-    /// Adds `k`; false if a thread had already reached it.
-    fn insert(&self, k: &str) -> bool {
-        self.shard(k).lock().unwrap().insert(k)
-    }
-
-    fn contains(&self, k: &str) -> bool {
-        self.shard(k).lock().unwrap().contains(k)
-    }
-}
-
 struct Walker<'a> {
     store: &'a dyn Store,
     blobs: &'a BTreeSet<&'a str>,
-    seen: &'a Seen,
+    seen: &'a SharedDigestSet,
     /// What this thread has met, asked before the shared set.
     local: DigestSet,
     r: Report,

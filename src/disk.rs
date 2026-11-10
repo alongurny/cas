@@ -252,7 +252,7 @@ impl DiskBackend {
         let mut placed = std::collections::HashSet::new();
         let everything: Vec<String> =
             packs.all()?.into_iter().chain(loose_blobs.iter().cloned()).chain(loose_chunks.iter().cloned()).collect();
-        let present: std::collections::HashSet<&String> = everything.iter().collect();
+        let present: Present = everything.iter().map(String::as_str).collect();
         // A chunked blob brings its chunks just before it, and each chunk it
         // does not share with its hinted base is hinted to the base's chunk
         // at the same relative position: an edit's chunks delta against the
@@ -262,7 +262,7 @@ impl DiskBackend {
             Ok(self.chunk_ids_of(key)?.map(|ids| ids.chunks(32).map(|c| format!("#{}", hex::encode(c))).collect()))
         };
         for n in order.iter().chain(everything.iter()) {
-            if !present.contains(n) || placed.contains(n) {
+            if !present.contains(n.as_str()) || placed.contains(n) {
                 continue;
             }
             if !n.starts_with('#')
@@ -278,7 +278,7 @@ impl DiskBackend {
                         let j = i * base_ids.len() / ids.len();
                         hints.entry(c.clone()).or_insert_with(|| base_ids[j].clone());
                     }
-                    if present.contains(c) && placed.insert(c.clone()) {
+                    if present.contains(c.as_str()) && placed.insert(c.clone()) {
                         names.push(c.clone());
                     }
                 }
@@ -295,7 +295,7 @@ impl DiskBackend {
         };
         let new_entry = |n: &String| -> io::Result<Tried> {
             let file = file_of(n)?;
-            let delta = match hints.get(n).filter(|b| present.contains(*b)) {
+            let delta = match hints.get(n).filter(|b| present.contains(b.as_str())) {
                 Some(base) => match (plain_value(&file), file_of(base).and_then(|b| plain_value(&b))) {
                     (Ok(v), Ok(bv)) => Entry::delta(base, &bv, &v, &file)?,
                     _ => None,
@@ -308,7 +308,7 @@ impl DiskBackend {
         let mut depth: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         let mut out = Repacked::default();
         let loose: std::collections::HashSet<&String> = loose_blobs.iter().chain(loose_chunks.iter()).collect();
-        let mut sealed = std::collections::HashMap::new();
+        let mut sealed = crate::keyhash::KeyMap::default();
         for group in names.chunks(512) {
             // A frame of the sealed pack (the last repack's) is copied as it
             // is, and so is a packed delta whose base is already placed or a
@@ -326,7 +326,7 @@ impl DiskBackend {
                 // A packed delta is kept when it is on the base the hints
                 // pick, or there is no hint; a whole frame when there is no
                 // base to try.
-                let hint = hints.get(n).filter(|b| present.contains(*b));
+                let hint = hints.get(n).filter(|b| present.contains(b.as_str()));
                 // So is a small whole frame: a delta names its base (a key),
                 // so it cannot save much there, and each gc would try it again.
                 match packs.frame(n)? {
@@ -718,10 +718,13 @@ fn parallel_map<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> io::Result<U> +
 
 /// The chain depth of `n`'s frame in the sealed pack, if every base in the
 /// chain is still present and it is within [`crate::pack::MAX_DEPTH`].
+/// The names a repack keeps.
+type Present<'a> = std::collections::HashSet<&'a str, crate::keyhash::KeyState>;
+
 fn sealed_depth(
     packs: &crate::pack::Packs,
-    present: &std::collections::HashSet<&String>,
-    memo: &mut std::collections::HashMap<String, Option<usize>>,
+    present: &Present,
+    memo: &mut crate::keyhash::KeyMap<Option<usize>>,
     n: &str,
 ) -> io::Result<Option<usize>> {
     if let Some(d) = memo.get(n) {
@@ -731,7 +734,7 @@ fn sealed_depth(
         None => None,
         Some(f) => match f.base {
             None => Some(0),
-            Some(b) if present.contains(&b) => {
+            Some(b) if present.contains(b.as_str()) => {
                 sealed_depth(packs, present, memo, &b)?.map(|d| d + 1).filter(|d| *d <= crate::pack::MAX_DEPTH)
             }
             Some(_) => None,
@@ -746,14 +749,14 @@ fn sealed_depth(
 /// a chain too long or it cannot be a base.
 fn base_depth(
     packs: &crate::pack::Packs,
-    present: &std::collections::HashSet<&String>,
-    memo: &mut std::collections::HashMap<String, Option<usize>>,
+    present: &Present,
+    memo: &mut crate::keyhash::KeyMap<Option<usize>>,
     placed: &std::collections::HashMap<String, usize>,
     base: &str,
 ) -> io::Result<Option<usize>> {
     let d = match placed.get(base) {
         Some(d) => Some(*d),
-        None if present.contains(&base.to_string()) => match packs.sealed_frame(base)? {
+        None if present.contains(base) => match packs.sealed_frame(base)? {
             Some(f) if f.plain => sealed_depth(packs, present, memo, base)?,
             _ => None,
         },
