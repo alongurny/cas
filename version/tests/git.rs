@@ -3,7 +3,7 @@
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Policy, Session, Who};
-use cas_version::{Node, Path, annotated, fs, git, lookup, read_blob};
+use cas_version::{Node, Path, annotated, fs, git, lookup, read_blob, stepnotes};
 use std::process::Command;
 
 fn b3() -> &'static Algorithm {
@@ -65,11 +65,14 @@ fn a_git_history_imports_with_its_shape_tags_and_notes() {
     assert!(h.nodes.values().all(|n| n.doc.is_none() && n.after.values().all(|s| s.changelog.is_none())));
     let noted: Vec<_> = h.nodes[&merge].after.values().filter_map(|s| s.notes.clone()).collect();
     assert_eq!(noted.len(), 1);
-    let shown = String::from_utf8(annotated::show(&s, noted[0].key()).unwrap()).unwrap();
-    assert!(shown.contains("# merge side\n| path link\n") && shown.contains("| +s\n"), "{shown}");
+    let shown = String::from_utf8(stepnotes::show(&s, noted[0].key()).unwrap()).unwrap();
+    assert!(
+        shown.starts_with("# merge side\n| diff ") && shown.contains("| path link\n") && shown.contains("| +s\n"),
+        "{shown}"
+    );
     let root = h.log().pop().unwrap();
     let edit = h.nodes.values().flat_map(|n| n.after.values()).filter_map(|s| s.notes.as_ref());
-    let edit: Vec<String> = edit.map(|v| String::from_utf8(annotated::show(&s, v.key()).unwrap()).unwrap()).collect();
+    let edit: Vec<String> = edit.map(|v| String::from_utf8(stepnotes::show(&s, v.key()).unwrap()).unwrap()).collect();
     assert!(edit.iter().any(|e| e.starts_with("# main edit / why: a greeting\n| diff ")), "{edit:?}");
     let run_sh = String::from_utf8(annotated::show(&s, h.nodes[&tip].notes["src/run.sh"].key()).unwrap()).unwrap();
     assert!(run_sh.ends_with(" first\n| #!/bin/sh\n"), "{run_sh}");

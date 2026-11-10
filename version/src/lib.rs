@@ -23,6 +23,7 @@ pub mod history;
 mod htree;
 pub mod index;
 pub mod merge;
+pub mod stepnotes;
 pub mod sync;
 mod tree;
 pub mod uni;

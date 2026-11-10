@@ -312,12 +312,17 @@ pub fn rebase(
         if !merged.conflicts.is_empty() {
             return Ok((h, Outcome::Conflicts(merged)));
         }
-        // Notes follow the change: on the replayed step's diff, and on the
+        // Notes follow the change: on the replayed step's lines, and on the
         // files as they are after the merge, where lines are alike.
         let mut step = step;
         if let Some(old) = &step.notes {
-            let d = crate::annotated::write_diff(store, alg, Some(&tip.version()), &merged.version)?;
-            step.notes = crate::annotated::carry(store, alg, old, &d)?;
+            step.notes = if old.known_format().is_some_and(|f| f.alias == "step-notes") {
+                crate::stepnotes::carry(store, alg, old, Some(&tip.version()), &merged.version)?
+            } else {
+                // Notes of history format 3, on a stored diff.
+                let d = crate::annotated::write_diff(store, alg, Some(&tip.version()), &merged.version)?;
+                crate::annotated::carry(store, alg, old, &d)?
+            };
         }
         let mut notes = BTreeMap::new();
         for (p, old) in &n.notes {
@@ -344,7 +349,7 @@ pub fn rebase(
 pub fn publish(mine: &History, public: &mut History, step: Step, doc: Option<String>) -> Result<Outcome> {
     // A release history holds no notes (spec/release-history.md).
     if step.notes.is_some() {
-        return Err(Error::NotRelease("a release step carries release notes (-m), not annotations".into()));
+        return Err(Error::NotRelease("a release step carries a changelog, not notes".into()));
     }
     if public.has_notes() {
         return Err(Error::NotRelease("the target history holds notes".into()));

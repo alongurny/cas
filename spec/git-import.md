@@ -25,11 +25,11 @@ Empty directories do not exist in git, so none are created.
 A commit message is what cas keeps as notes ([release-history.md](release-history.md)), from the
 same diffs (module `git_notes`):
 
-- **Steps.** The step from a commit's first parent gets an [annotated](formats/annotated.md)
-  [diff](formats/diff.md): the subject (the message's first line) on every line the step changed
-  (`path` lines, `+` and `-` lines, `binary`), nothing on context and hunk headers, and the whole
-  message, its non-blank lines joined by ` / `, on the header line when it says more than the
-  subject. A merge's other steps get no notes: they would repeat everything the first parent's
+- **Steps.** The step from a commit's first parent gets [step notes](formats/step-notes.md): the
+  whole message, its non-blank lines joined by ` / `, as the step's note; the subject (the
+  message's first line) on every line the step removed or added; and the subject as the note of
+  a path that has no such lines (binary, a directory, an empty file). Context lines have no note.
+  A merge's other steps get no notes: they would repeat everything the first parent's
   line did, which git's own `log -p` does not show either. A root commit has no step.
 - **Tips.** Each tip gets an annotated file for every text file: per line, the node that last
   changed it and its subject (`<12 hex digits of its version> <subject>`). This is a forward
@@ -38,10 +38,12 @@ same diffs (module `git_notes`):
   about one line in twenty can name a different commit than `git blame` (Thesis: 182 of 191 lines
   of `src/01-intro.tex` agree).
 
-On git.git (82,725 commits, 4 cores): the import takes about 300 s instead of 110 s, and the store
-holds 1.1 GB after it and 556 MB after a full gc, instead of 177 MB. The diffs are most of it: a
-diff's text is new bytes, which deltas against versions do not shrink. Diffs are computed a window of
-4,096 nodes at a time, a node per free thread (a few translation merges take seconds each).
+On git.git (82,725 commits, 4 cores): the import takes about 275 s instead of 110 s, and the store
+holds 515 MB after it and 243 MB after a full gc, instead of 177 MB. Notes kept on a stored diff
+(history format 3) held 556 MB after a gc: a diff's text is new bytes, which deltas against
+versions do not shrink, so step notes keep runs over the files' lines instead. Diffs are computed
+a window of 4,096 nodes at a time, a node per free thread (a few translation merges take seconds
+each).
 
 Into a local disk store, each file is written as a delta against its version at the same path in
 a parent commit, and each directory blob against the parent's blob that covered the same names. A

@@ -22,15 +22,15 @@ pub fn lines(b: &[u8]) -> Vec<&[u8]> {
     b.split_inclusive(|&c| c == b'\n').collect()
 }
 
-fn is_note(s: &str) -> bool {
+pub(crate) fn is_note(s: &str) -> bool {
     !s.chars().any(char::is_control)
 }
 
-fn view_text(v: Option<&View>) -> String {
+pub(crate) fn view_text(v: Option<&View>) -> String {
     v.map_or_else(|| "-".to_string(), View::to_string)
 }
 
-fn parse_view(s: &str) -> std::result::Result<Option<View>, String> {
+pub(crate) fn parse_view(s: &str) -> std::result::Result<Option<View>, String> {
     if s == "-" {
         return Ok(None);
     }
@@ -142,8 +142,11 @@ pub fn render(text: &[u8], notes: &[&str]) -> Vec<u8> {
     for (i, l) in lines(text).into_iter().enumerate() {
         let note = notes.get(i).copied().unwrap_or("");
         if last != Some(note) && (last.is_some() || !note.is_empty()) {
-            out.extend_from_slice(b"# ");
-            out.extend_from_slice(note.as_bytes());
+            out.push(b'#');
+            if !note.is_empty() {
+                out.push(b' ');
+                out.extend_from_slice(note.as_bytes());
+            }
             out.push(b'\n');
         }
         last = Some(note);
@@ -199,6 +202,16 @@ pub fn show(store: &dyn Store, key: &str) -> Result<Vec<u8>> {
 
 /// The line diff from version `a` (none: from nothing) to version `b`.
 pub fn diff(store: &dyn Store, a: Option<&View>, b: &View) -> Result<Vec<u8>> {
+    diff_with_lens(store, a, b).map(|(d, _)| d)
+}
+
+/// The lines of a text file on each side of a diff, by path (none: no text
+/// file there).
+pub type Lens = std::collections::HashMap<String, (Option<usize>, Option<usize>)>;
+
+/// [`diff`], with the line counts of the text files it compared.
+pub fn diff_with_lens(store: &dyn Store, a: Option<&View>, b: &View) -> Result<(Vec<u8>, Lens)> {
+    let mut lens = Lens::new();
     let changes: Vec<Change> = match a {
         Some(a) => crate::diff(store, a, b, None)?,
         None => crate::walk(store, b, None)
@@ -237,11 +250,15 @@ pub fn diff(store: &dyn Store, a: Option<&View>, b: &View) -> Result<Vec<u8>> {
             continue;
         }
         match (text(&old)?, text(&new)?) {
-            (Some(x), Some(y)) => hunks(&mut out, &x, &y),
+            (Some(x), Some(y)) => {
+                let n = |v: &Option<View>, t: &[u8]| v.is_some().then(|| lines(t).len());
+                lens.insert(c.path.to_string(), (n(&old, &x), n(&new, &y)));
+                hunks(&mut out, &x, &y)
+            }
             _ => out.extend_from_slice(b"binary\n"),
         }
     }
-    Ok(out)
+    Ok((out, lens))
 }
 
 /// The hunks between two files (none: absent), as a diff of `new` lists
@@ -265,7 +282,7 @@ pub(crate) fn file_diff(store: &dyn Store, path: &str, old: Option<&View>, new: 
 }
 
 /// Formats whose files a diff shows by lines.
-fn is_text_format(v: &View) -> bool {
+pub(crate) fn is_text_format(v: &View) -> bool {
     v.known_format().is_some_and(|f| matches!(f.alias, "raw" | "exec"))
 }
 
@@ -470,7 +487,7 @@ pub(crate) fn children(alias: &str, b: &[u8]) -> Vec<View> {
 
 /// Notes for `new`'s lines taken from `old`'s (both line lists): each new
 /// line takes the note of an unused old line with the same `key`, in order.
-fn carry_notes<'a>(old: &[(Vec<u8>, &'a str)], new: &[Vec<u8>]) -> Vec<String> {
+pub(crate) fn carry_notes<'a>(old: &[(Vec<u8>, &'a str)], new: &[Vec<u8>]) -> Vec<String> {
     let mut by: std::collections::HashMap<&[u8], std::collections::VecDeque<&'a str>> = Default::default();
     for (k, n) in old {
         by.entry(k.as_slice()).or_default().push_back(n);

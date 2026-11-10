@@ -92,9 +92,18 @@ pub struct HistNode {
 }
 
 fn annotated_view(s: &str, what: &str) -> std::result::Result<View, String> {
+    view_of(s, what, &["annotated"])
+}
+
+/// A step's notes: `step-notes`, or (history format 3) an annotated diff.
+fn step_notes_view(s: &str) -> std::result::Result<View, String> {
+    view_of(s, "a step's notes", &["step-notes", "annotated"])
+}
+
+fn view_of(s: &str, what: &str, aliases: &[&str]) -> std::result::Result<View, String> {
     let v = View::parse(s).map_err(|e| format!("{what} is not a view: {e}"))?;
-    if v.known_format().is_none_or(|f| f.alias != "annotated") {
-        return Err(format!("{what} is not an annotated view"));
+    if v.known_format().is_none_or(|f| !aliases.contains(&f.alias)) {
+        return Err(format!("{what} is not a view of {}", aliases.join(" or ")));
     }
     Ok(v)
 }
@@ -171,7 +180,7 @@ impl HistNode {
                                 }
                                 "notes" => {
                                     let n = c.str().map_err(|_| "notes is not a string")?;
-                                    step.notes = Some(annotated_view(n, "a step's notes")?);
+                                    step.notes = Some(step_notes_view(n)?);
                                 }
                                 k => return Err(format!("a step has unknown key {k:?}")),
                             }
@@ -263,9 +272,7 @@ impl History {
                     Step {
                         changelog: string(sf.get("changelog"), "changelog")?,
                         compatible,
-                        notes: string(sf.get("notes"), "notes")?
-                            .map(|n| annotated_view(&n, "a step's notes"))
-                            .transpose()?,
+                        notes: string(sf.get("notes"), "notes")?.map(|n| step_notes_view(&n)).transpose()?,
                     },
                 );
             }

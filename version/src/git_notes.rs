@@ -1,6 +1,7 @@
 //! Notes for an imported git history (spec/git-import.md): what a git
-//! commit message says, put where cas keeps it. Each step gets an
-//! annotated diff whose changed lines carry the commit's subject, and the
+//! commit message says, put where cas keeps it. Each step gets step notes
+//! (spec/formats/step-notes.md): the message on the step, its subject on
+//! the lines it changed; and the
 //! tips get annotated files whose every line names the commit that last
 //! changed it (a forward blame, from the same diffs).
 
@@ -25,28 +26,34 @@ fn whole(message: &str) -> String {
     message.lines().map(clean).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" / ")
 }
 
-/// One note per line of a diff: the subject on what changed (path headers,
-/// `+`/`-` lines, `binary`), nothing on context and hunk headers, and the
-/// whole message on the header line when it says more than the subject.
+/// One note per line of a diff: the whole message on the header line (the
+/// step's note), the subject on every `+` and `-` line, and on the `path`
+/// line of a path with no such lines (binary, a directory, an empty file).
 fn diff_notes(d: &[u8], subject: &str, message: &str) -> Vec<String> {
-    let mut last = String::new();
-    annotated::lines(d)
-        .into_iter()
-        .enumerate()
-        .map(|(i, l)| {
-            let n = if i == 0 {
-                if message != subject { message.to_string() } else { String::new() }
-            } else if l.starts_with(b"\\") {
-                last.clone()
-            } else if l.starts_with(b"+") || l.starts_with(b"-") || l.starts_with(b"path ") || l == b"binary\n" {
-                subject.to_string()
-            } else {
-                String::new()
-            };
-            last.clone_from(&n);
-            n
-        })
-        .collect()
+    let ls = annotated::lines(d);
+    let mut out = vec![String::new(); ls.len()];
+    out[0] = message.to_string();
+    let mut path_line: Option<usize> = None;
+    let mut lines_noted = false;
+    let mut last = false;
+    for (i, l) in ls.iter().enumerate().skip(1) {
+        if l.starts_with(b"path ") {
+            if let Some(p) = path_line.filter(|_| !lines_noted) {
+                out[p] = subject.to_string();
+            }
+            (path_line, lines_noted) = (Some(i), false);
+        }
+        let changed = if *l == b"\\\n" { last } else { l.starts_with(b"+") || l.starts_with(b"-") };
+        if changed {
+            out[i] = subject.to_string();
+            lines_noted = true;
+        }
+        last = changed;
+    }
+    if let Some(p) = path_line.filter(|_| !lines_noted) {
+        out[p] = subject.to_string();
+    }
+    out
 }
 
 /// Per line of a file: the index of the node that last changed it.
@@ -280,7 +287,7 @@ fn node_edges(
     // others count only for the blame of what
     // that step changed.
     if let Some(p) = first.get(n) {
-        let d = annotated::diff(store, Some(&p.version()), &n.version())?;
+        let (d, lens) = annotated::diff_with_lens(store, Some(&p.version()), &n.version())?;
         let files = parse(&d)?;
         for q in node.after.keys().filter(|q| *q != p) {
             let mut theirs = Vec::new();
@@ -304,9 +311,11 @@ fn node_edges(
         }
         edges.preds.insert(0, (index[p], files));
         if !s.is_empty() {
-            let dv = crate::write_blob(store, alg, &d)?;
-            let dv = View::new(crate::by_alias("diff").unwrap().id(), dv)?;
-            notes.push((p.clone(), annotated::write(store, alg, &dv, &diff_notes(&d, s, m))?));
+            let sn = crate::stepnotes::from_lines(Some(&p.version()), &n.version(), &d, &lens, &diff_notes(&d, s, m))
+                .map_err(|e| crate::malformed("diff", e))?;
+            if let Some(sn) = sn {
+                notes.push((p.clone(), crate::stepnotes::write(store, alg, &sn)?));
+            }
         }
     }
     Ok((edges, notes))

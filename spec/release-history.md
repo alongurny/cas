@@ -3,9 +3,9 @@
 Two kinds of history serve two audiences ([history.md](history.md)).
 
 - **Internal histories** are where developers work: many small nodes, each
-  step with its notes, an [annotated](formats/annotated.md) view of the
-  step's [diff](formats/diff.md) that says line by line why each change was
-  made, and nodes with annotated files (`'notes'` of a node) for what is
+  step with its [notes](formats/step-notes.md), which say line by line why
+  each change was made (shown on the step's [diff](formats/diff.md), which
+  is computed, not stored), and nodes with annotated files (`'notes'` of a node) for what is
   worth saying about a file as it stands. They replace commit messages.
   They stay with the developers: they are pushed only to stores the team
   shares.

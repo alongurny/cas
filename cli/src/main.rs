@@ -16,13 +16,13 @@ use cas_core::disk::DiskBackend;
 use cas_core::server::{Request, Server, Tls};
 use cas_core::{AllowAll, Backend, CoreStore, Policy, Store, Who};
 use cas_version::access::{self, Access, Grant};
-use cas_version::annotated;
 use cas_version::derived::{self, SUMMARY};
 use cas_version::graph;
 use cas_version::history::{self, History, NodeId, Step};
 use cas_version::merge::{self, Outcome as MergeOutcome};
 use cas_version::uni::Value;
 use cas_version::{Node, Path, View, diff, formats, fs, gc, read_blob, sync, walk};
+use cas_version::{annotated, stepnotes};
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -399,15 +399,12 @@ fn run(a: Args) -> Res<()> {
             formats::publish(s).map_err(e)?;
             let mut step = step;
             if let Some(file) = &a.notes {
-                // The notes annotate the diff from the tip to this version,
-                // which the file's text must be exactly.
+                // The notes are written on the diff from the tip to this
+                // version, which the file's text must be exactly; they are
+                // kept on the files' lines, the diff is not stored.
                 let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
-                let (text, notes) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
-                let d = annotated::write_diff(s, b3(), head.as_ref(), &root).map_err(e)?;
-                if text != read_blob(s, d.key()).map_err(e)? {
-                    return Err(format!("{file}: its text is not the diff to commit; run status --diff again"));
-                }
-                step.notes = Some(annotated::write(s, b3(), &d, &notes).map_err(e)?);
+                let sn = stepnotes::from_form(s, head.as_ref(), &root, &form).map_err(|x| format!("{file}: {x}"))?;
+                step.notes = sn.map(|sn| stepnotes::write(s, b3(), &sn)).transpose().map_err(e)?;
             }
             let mut notes = BTreeMap::new();
             for spec in &a.annotate {
@@ -515,8 +512,15 @@ fn run(a: Args) -> Res<()> {
             let preds: Vec<NodeId> = st.get(&id).map_err(e)?.map(|n| n.after.into_keys().collect()).unwrap_or_default();
             if a.annotated {
                 let node = st.get(&id).map_err(e)?.unwrap_or_default();
-                let form = match node.after.iter().next() {
-                    Some((_, step)) if let Some(n) = &step.notes => annotated::show(s, n.key()).map_err(e)?,
+                let noted = node.after.iter().find(|(_, st)| st.notes.is_some());
+                let form = match noted.or(node.after.iter().next()) {
+                    Some((_, step)) if let Some(n) = &step.notes => {
+                        if n.known_format().is_some_and(|f| f.alias == "step-notes") {
+                            stepnotes::show(s, n.key()).map_err(e)?
+                        } else {
+                            annotated::show(s, n.key()).map_err(e)?
+                        }
+                    }
                     Some((p, _)) => {
                         annotated::render(&annotated::diff(s, Some(&p.version()), &id.version()).map_err(e)?, &[])
                     }
