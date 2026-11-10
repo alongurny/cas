@@ -123,7 +123,7 @@ fn line_level_merge_inside_one_file() {
 }
 
 fn step(msg: &str) -> Step {
-    Step { changelog: Some(msg.into()), compatible: false }
+    Step { changelog: Some(msg.into()), compatible: false, notes: None }
 }
 
 #[test]

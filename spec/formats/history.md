@@ -51,6 +51,10 @@ A step is the change from a predecessor to a node, a map with optional
 keys:
 
 - `'changelog'`: a string describing the change.
+- `'notes'`: a view (`<format> <key>` as a string) of an
+  [annotated](annotated.md) blob whose annotated blob is the [diff](diff.md)
+  from the predecessor's version to this node's: a note on each line, the
+  reason for each change. It replaces a changelog; a step may have both.
 - `'compatible'`: present (value `{}`) when the step is declared a
   compatible upgrade; absent, the step breaks compatibility. The default
   is deliberately conservative: compatibility is an explicit, per-step

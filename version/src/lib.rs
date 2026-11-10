@@ -9,6 +9,7 @@
 
 pub mod access;
 pub mod ancestry;
+pub mod annotated;
 pub mod derived;
 pub mod dir;
 pub mod formats;

@@ -104,11 +104,11 @@ fn version(s: &dyn Store, name: &str) -> View {
 }
 
 fn step(msg: &str) -> Step {
-    Step { changelog: Some(msg.into()), compatible: false }
+    Step { changelog: Some(msg.into()), compatible: false, notes: None }
 }
 
 fn ok(msg: &str) -> Step {
-    Step { changelog: Some(msg.into()), compatible: true }
+    Step { changelog: Some(msg.into()), compatible: true, notes: None }
 }
 
 /// A history given as (node version, [(predecessor, step)]).

@@ -102,7 +102,7 @@ pub struct Graph {
 }
 
 fn notes(h: &History, id: &NodeId) -> String {
-    let n: Vec<&str> = h.nodes[id].after.values().filter_map(|s| s.changelog.as_deref()).collect();
+    let n: Vec<&str> = h.nodes[id].after.values().filter_map(|s| s.summary()).collect();
     n.join(" / ")
 }
 
@@ -415,7 +415,7 @@ pub fn extended(store: &dyn Store, input: &View, limit: usize) -> Result<Option<
                 None => Filter::Root,
                 Some(p) => Filter::of(diff(store, &p.version(), &id.version(), None)?.iter().map(|c| &c.path)),
             };
-            let notes: Vec<&str> = n.after.values().filter_map(|s| s.changelog.as_deref()).collect();
+            let notes: Vec<&str> = n.after.values().filter_map(|s| s.summary()).collect();
             nodes.push(Record { id: id.clone(), after, notes: notes.join(" / "), filter });
         }
         nodes.extend(old.nodes.into_iter().map(|mut r| {

@@ -130,7 +130,11 @@ fn diverged_histories_are_not_overwritten() {
     let (old, mut h) = history::load(&*a, "main").unwrap();
     let tip = h.tip().unwrap();
     let pred = h.nodes[&tip].after.keys().next().unwrap().clone();
-    h.nodes.get_mut(&tip).unwrap().after.insert(pred, Step { changelog: Some("reworded".into()), compatible: false });
+    h.nodes
+        .get_mut(&tip)
+        .unwrap()
+        .after
+        .insert(pred, Step { changelog: Some("reworded".into()), compatible: false, notes: None });
     history::save(&*a, b3(), "main", old.as_ref(), &h).unwrap();
     // Under another name it is just a new history.
     sync::push(&*a, &*b, "main", "a-main").unwrap();

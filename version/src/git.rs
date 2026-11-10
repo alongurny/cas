@@ -761,7 +761,8 @@ pub fn import_with_filters(
         for (commit, parents, tree, message) in parsed {
             let version = im.tree(&tree, &raw, &mut bodies, "")?;
             let message = message.trim_end();
-            let step = Step { changelog: (!message.is_empty()).then(|| message.to_string()), compatible: false };
+            let step =
+                Step { changelog: (!message.is_empty()).then(|| message.to_string()), compatible: false, notes: None };
             let mut after = BTreeMap::new();
             for p in parents.split_whitespace() {
                 let pred = nodes.get(p).ok_or_else(|| Error::Io(format!("parent {p} of {commit} not imported")))?;

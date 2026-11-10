@@ -327,7 +327,13 @@ pub(crate) fn check_part(b: &[u8]) -> std::result::Result<(), String> {
 /// The views a part refers to: versions of a leaf's nodes, or child parts.
 pub(crate) fn part_children(key: &str, b: &[u8]) -> Result<Vec<View>> {
     Ok(match Part::decode(b).map_err(|e| malformed(key, e))? {
-        Part::Leaf(n) => n.keys().map(NodeId::version).collect(),
+        // A node's version, and its steps' notes.
+        Part::Leaf(n) => n
+            .iter()
+            .flat_map(|(id, e)| {
+                std::iter::once(id.version()).chain(e.node.after.values().filter_map(|s| s.notes.clone()))
+            })
+            .collect(),
         Part::Inner { parts, .. } => parts.into_values().collect(),
     })
 }
@@ -647,7 +653,7 @@ impl<'s> Stored<'s> {
             .iter()
             .map(|&i| {
                 let e = entries[i].take().unwrap();
-                let mut logs = e.node.after.into_values().filter_map(|s| s.changelog);
+                let mut logs = e.node.after.into_values().filter_map(|s| s.summary().map(String::from));
                 let notes = match (logs.next(), logs.next()) {
                     (None, _) => String::new(),
                     (Some(a), None) => a,

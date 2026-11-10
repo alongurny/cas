@@ -17,7 +17,7 @@ fn store() -> Session {
 }
 
 fn step(i: usize) -> Step {
-    Step { changelog: Some(format!("step {i}")), compatible: i.is_multiple_of(3) }
+    Step { changelog: Some(format!("step {i}")), compatible: i.is_multiple_of(3), notes: None }
 }
 
 /// A linear history of `n` raw versions, built in memory.
@@ -189,6 +189,7 @@ fn dag(s: &Session, edges: &[(usize, usize)]) -> (History, Vec<NodeId>) {
             let st = |k: usize| Step {
                 changelog: k.is_multiple_of(2).then(|| format!("s{i}.{k}")),
                 compatible: k.is_multiple_of(3),
+                notes: None,
             };
             after.insert(ids[a % i].clone(), st(a));
             after.insert(ids[b % i].clone(), st(b));

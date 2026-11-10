@@ -107,6 +107,8 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
         format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),
         format("history", include_str!("../../spec/formats/history.md"), Kind::Leaf(crate::htree::check_root)),
+        format("annotated", include_str!("../../spec/formats/annotated.md"), Kind::Leaf(crate::annotated::check)),
+        format("diff", include_str!("../../spec/formats/diff.md"), Kind::Leaf(crate::annotated::check_diff)),
         format(
             "history-part",
             include_str!("../../spec/formats/history-part.md"),

@@ -40,6 +40,7 @@ pub(crate) fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(d), _)) => d.blob_children(r.key(), &read_blob(store, r.key())?),
         Some((_, "history" | "history-part")) => Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default()),
+        Some((_, a @ ("annotated" | "diff"))) => Ok(crate::annotated::children(a, &read_blob(store, r.key())?)),
         _ => Ok(Vec::new()),
     }
 }
@@ -102,6 +103,7 @@ fn children_of_light(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<
             Ok(Some(root.nodes.into_iter().collect()))
         }
         Some((_, "history-part")) => Ok(Some(crate::htree::part_children(r.key(), bytes)?)),
+        Some((_, a @ ("annotated" | "diff"))) => Ok(Some(crate::annotated::children(a, bytes))),
         _ => Ok(None),
     }
 }

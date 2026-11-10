@@ -16,6 +16,7 @@ use cas_core::disk::DiskBackend;
 use cas_core::server::{Request, Server, Tls};
 use cas_core::{AllowAll, Backend, CoreStore, Policy, Store, Who};
 use cas_version::access::{self, Access, Grant};
+use cas_version::annotated;
 use cas_version::derived::{self, SUMMARY};
 use cas_version::graph;
 use cas_version::history::{self, History, NodeId, Step};
@@ -58,7 +59,11 @@ History options: -H HISTORY (default main), -n NODE (a tag, `latest`, or a key
 prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
   commit DIR                    add DIR as a new node after the tip (DIR/.cas-index
                                 caches stat data, so unchanged files are not rehashed)
+  commit DIR --notes FILE       ... with a note on each line of the step's diff
+                                (FILE: what status --diff prints, notes added)
   status DIR                    how DIR differs from the node (nothing is stored)
+  status DIR --diff             the line diff from the node to DIR, to annotate
+                                (stores DIR's file blobs)
   watch DIR                     follow DIR's changes (inotify) until stopped, so
                                 commit and status look only at what changed
   reset DIR                     make DIR the node's version again (discards changes)
@@ -67,7 +72,11 @@ prefix; default latest), -m CHANGELOG, --doc TEXT, --compatible.
                                 put the newest stash back into DIR and drop it
   log                           nodes, newest first, with tags and changelogs
   ls [PREFIX]                   paths of a node's version
-  diff                          changes from a node's predecessor
+  diff [--annotated]            changes from a node's predecessor (--annotated:
+                                the line diff with the step's notes)
+  annotated make FILE           store FILE's text and notes (the authoring form:
+                                `| line`, `# note`); prints the annotation's view
+  annotated show KEY            an annotation's text with its notes
   checkout DEST [PREFIX]        write a node's version (or a prefix) to DEST
   sparse DEST PATH...           check out only PATHs (files or directories) of a
                                 node into DEST; a commit of DEST keeps the rest
@@ -149,6 +158,9 @@ struct Args {
     doc: Option<String>,
     compatible: bool,
     full: bool,
+    notes: Option<String>,
+    show_diff: bool,
+    annotated: bool,
     remote: Option<String>,
     token_file: Option<String>,
     ca: Option<String>,
@@ -165,6 +177,9 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         doc: None,
         compatible: false,
         full: false,
+        notes: None,
+        show_diff: false,
+        annotated: false,
         remote: None,
         token_file: None,
         ca: None,
@@ -182,6 +197,9 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--doc" => a.doc = Some(value("--doc")?),
             "--compatible" => a.compatible = true,
             "--full" => a.full = true,
+            "--notes" => a.notes = Some(value("--notes")?),
+            "--diff" => a.show_diff = true,
+            "--annotated" => a.annotated = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
             "--ca" => a.ca = Some(value("--ca")?),
@@ -328,7 +346,7 @@ fn run(a: Args) -> Res<()> {
     let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}\n{USAGE}"));
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     let name = a.history.as_str();
-    let step = Step { changelog: a.message.clone(), compatible: a.compatible };
+    let step = Step { changelog: a.message.clone(), compatible: a.compatible, notes: None };
     // The node -n names: a tag, `latest` or a node id is found from the
     // history's root and one leaf; only a key prefix needs every node.
     let at = || -> Res<NodeId> {
@@ -358,6 +376,18 @@ fn run(a: Args) -> Res<()> {
             )
             .map_err(e)?;
             formats::publish(s).map_err(e)?;
+            let mut step = step;
+            if let Some(file) = &a.notes {
+                // The notes annotate the diff from the tip to this version,
+                // which the file's text must be exactly.
+                let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
+                let (text, notes) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
+                let d = annotated::write_diff(s, b3(), head.as_ref(), &root).map_err(e)?;
+                if text != read_blob(s, d.key()).map_err(e)? {
+                    return Err(format!("{file}: its text is not the diff to commit; run status --diff again"));
+                }
+                step.notes = Some(annotated::write(s, b3(), &d, &notes).map_err(e)?);
+            }
             let id = history::commit(s, b3(), name, &root, step, a.doc.clone()).map_err(e)?;
             out!("{}", id);
         }
@@ -365,7 +395,11 @@ fn run(a: Args) -> Res<()> {
             let dir = arg(1, "DIR")?;
             let v = at()?.version();
             let dirf = formats::by_alias("tree").unwrap();
-            if cmd == "status" {
+            if cmd == "status" && a.show_diff {
+                let root = fs::import_worktree(s, b3(), dirf, dir.as_ref(), Some(&a.store), Some(&v)).map_err(e)?;
+                let d = annotated::diff(s, Some(&v), &root).map_err(e)?;
+                std::io::Write::write_all(&mut std::io::stdout(), &annotated::render(&d, &[])).map_err(e)?;
+            } else if cmd == "status" {
                 for c in fs::status(s, b3(), dirf, dir.as_ref(), Some(&a.store), &v).map_err(e)? {
                     let mark = match (&c.old, &c.new) {
                         (None, _) => "added",
@@ -435,11 +469,40 @@ fn run(a: Args) -> Res<()> {
             let st = history::Stored::open(s, Some(&v)).map_err(e)?;
             let id = find_node(&st, &a.node, name)?;
             let preds: Vec<NodeId> = st.get(&id).map_err(e)?.map(|n| n.after.into_keys().collect()).unwrap_or_default();
+            if a.annotated {
+                let node = st.get(&id).map_err(e)?.unwrap_or_default();
+                let form = match node.after.iter().next() {
+                    Some((_, step)) if let Some(n) = &step.notes => annotated::show(s, n.key()).map_err(e)?,
+                    Some((p, _)) => {
+                        annotated::render(&annotated::diff(s, Some(&p.version()), &id.version()).map_err(e)?, &[])
+                    }
+                    None => annotated::render(&annotated::diff(s, None, &id.version()).map_err(e)?, &[]),
+                };
+                std::io::Write::write_all(&mut std::io::stdout(), &form).map_err(e)?;
+                return Ok(());
+            }
             let Some(pred) = preds.first() else { return Err("the node has no predecessor".into()) };
             for c in diff(s, &pred.version(), &id.version(), None).map_err(e)? {
                 out!("{:8} -> {:8} {}", node_text(&c.old), node_text(&c.new), c.path);
             }
         }
+        Some("annotated") => match a.rest.get(1).map(String::as_str) {
+            Some("make") => {
+                let file = arg(2, "FILE")?;
+                let form = std::fs::read(&file).map_err(|x| format!("{file}: {x}"))?;
+                let (text, notes) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
+                let target = cas_version::put(s, b3(), "raw", &text).map_err(e)?;
+                formats::publish(s).map_err(e)?;
+                let v = annotated::write(s, b3(), &target, &notes).map_err(e)?;
+                out!("{v}");
+            }
+            Some("show") => {
+                let key = arg(2, "KEY")?;
+                let form = annotated::show(s, &key).map_err(e)?;
+                std::io::Write::write_all(&mut std::io::stdout(), &form).map_err(e)?;
+            }
+            _ => return Err(format!("annotated make FILE | annotated show KEY\n{USAGE}")),
+        },
         Some("checkout") => {
             let dest = arg(1, "DEST")?;
             let n = fs::checkout_indexed(s, &at()?.version(), prefix(2)?.as_ref(), dest.as_ref(), Some(&a.store))

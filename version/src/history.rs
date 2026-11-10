@@ -69,6 +69,16 @@ pub struct Step {
     pub changelog: Option<String>,
     /// Declared a compatible upgrade. Default: breaking.
     pub compatible: bool,
+    /// An `annotated` view of the step's `diff`: a note on each line, what
+    /// a changelog says for the whole step (spec/formats/annotated.md).
+    pub notes: Option<View>,
+}
+
+impl Step {
+    /// What a log shows for the step: its changelog, or that it has notes.
+    pub fn summary(&self) -> Option<&str> {
+        self.changelog.as_deref().or(self.notes.as_ref().map(|_| "(notes)"))
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -85,6 +95,9 @@ impl HistNode {
             let after = self.after.iter().map(|(p, s)| {
                 let mut sm = BTreeMap::new();
                 opt_str(&mut sm, "changelog", &s.changelog);
+                if let Some(n) = &s.notes {
+                    sm.insert(Value::str("notes"), Value::str(n.to_string()));
+                }
                 if s.compatible {
                     sm.insert(Value::str("compatible"), Value::empty());
                 }
@@ -135,6 +148,14 @@ impl HistNode {
                                         return Err("compatible is {} when present".into());
                                     }
                                     step.compatible = true;
+                                }
+                                "notes" => {
+                                    let n = c.str().map_err(|_| "notes is not a string")?;
+                                    let v = View::parse(n).map_err(|e| format!("notes is not a view: {e}"))?;
+                                    if v.known_format().is_none_or(|f| f.alias != "annotated") {
+                                        return Err("notes is not an annotated view".into());
+                                    }
+                                    step.notes = Some(v);
                                 }
                                 k => return Err(format!("a step has unknown key {k:?}")),
                             }
@@ -203,7 +224,7 @@ impl History {
             let f = fields(&n, "a node", &["after", "doc"])?;
             let mut node = HistNode { doc: string(f.get("doc"), "node doc")?, after: BTreeMap::new() };
             for (p, s) in f.get("after").map_or(Ok(BTreeMap::new()), |v| map_of(v, "after"))? {
-                let sf = fields(&s, "a step", &["changelog", "compatible"])?;
+                let sf = fields(&s, "a step", &["changelog", "compatible", "notes"])?;
                 let compatible = match sf.get("compatible") {
                     None => false,
                     Some(v) if *v == Value::empty() => true,
@@ -211,7 +232,13 @@ impl History {
                 };
                 node.after.insert(
                     NodeId::parse(&p)?,
-                    Step { changelog: string(sf.get("changelog"), "changelog")?, compatible },
+                    Step {
+                        changelog: string(sf.get("changelog"), "changelog")?,
+                        compatible,
+                        notes: string(sf.get("notes"), "notes")?
+                            .map(|n| View::parse(&n).map_err(|e| format!("notes is not a view: {e}")))
+                            .transpose()?,
+                    },
                 );
             }
             h.nodes.insert(id, node);

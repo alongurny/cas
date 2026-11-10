@@ -227,7 +227,7 @@ fn a_graph_extends_without_being_recorded() {
     graph(&s, b3(), &history::head(&s, "main").unwrap().unwrap()).unwrap();
     for (i, p) in ["e", "d/f0", "e"].iter().enumerate() {
         v = edit(&v, p, &format!("later {i}"));
-        let step = Step { changelog: Some(format!("step {i}")), compatible: i == 1 };
+        let step = Step { changelog: Some(format!("step {i}")), compatible: i == 1, notes: None };
         history::commit(&s, b3(), "main", &v, step, None).unwrap();
     }
     let head = history::head(&s, "main").unwrap().unwrap();
