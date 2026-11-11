@@ -229,3 +229,14 @@ fn the_views_a_blob_holds_follow_from_its_type() {
     let aliases: Vec<&str> = kids.iter().map(|v| by_id(v.format()).unwrap().alias).collect();
     assert_eq!(aliases, ["directory", "tag", "release", "note", "release", "note"]);
 }
+
+#[test]
+fn names_are_a_short_list_of_bytes() {
+    use cas_version::typed::name_fits;
+    for good in ["a", "main.tex", ".gitignore", "a b", "A-b_9.tar.gz", "a.", &"x".repeat(255)] {
+        assert!(name_fits(good.as_bytes()), "{good}");
+    }
+    for bad in ["", ".", "..", "a..b", "a/b", "a$", "é", "a\tb", "~", &"x".repeat(256)] {
+        assert!(!name_fits(bad.as_bytes()), "{bad}");
+    }
+}

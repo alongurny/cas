@@ -8,8 +8,8 @@
 //! one (a length byte and the bytes), then zeros to the next block. A blob
 //! is a head record, a list of records, or a head followed by a list.
 
+use crate::View;
 use crate::formats::by_alias;
-use crate::{View, valid_name};
 use std::sync::LazyLock;
 
 /// A key field. It names a blob of one of `targets`; with several targets a
@@ -118,7 +118,7 @@ impl Rec {
         if self.name {
             let len = take(1)?[0] as usize;
             v.name = take(len)?.to_vec();
-            if !std::str::from_utf8(&v.name).is_ok_and(valid_name) {
+            if !name_fits(&v.name) {
                 return Err("a name is not valid".into());
             }
         }
@@ -254,6 +254,15 @@ impl Type {
         }
         Ok(out)
     }
+}
+
+/// A name: 1 to 255 bytes, each a letter `A` to `Z` or `a` to `z`, a digit,
+/// `.`, `-`, `_` or a space; not `.` alone, and no two dots in a row.
+pub fn name_fits(b: &[u8]) -> bool {
+    (1..=255).contains(&b.len())
+        && b.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_' | b' '))
+        && b != b"."
+        && !b.windows(2).any(|w| w == b"..")
 }
 
 /// `text`: UTF-8 with no control characters.

@@ -1040,8 +1040,11 @@ impl Dir {
     pub fn fits(&self, items: &[Item]) -> std::result::Result<(), String> {
         let Dir::Directory = self else { return Ok(()) };
         for i in items {
-            if i.name.len() > 255 {
-                return Err(format!("a directory holds names of at most 255 bytes, not {:?}", i.name));
+            if !crate::typed::name_fits(i.name.as_bytes()) {
+                return Err(format!(
+                    "a directory holds names of 1 to 255 letters, digits, `.`, `-`, `_` and spaces, not `.` alone and with no `..`, not {:?}",
+                    i.name
+                ));
             }
             if !directory_kind_ids().iter().any(|f| f == i.child.format()) {
                 let alias = i.child.known_format().map_or("an unknown format", |f| f.alias);
