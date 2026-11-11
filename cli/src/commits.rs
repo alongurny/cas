@@ -6,6 +6,7 @@ use crate::{Args, Res, b3, e, node_text, short};
 use cas_core::Store;
 use cas_core::disk::DiskBackend;
 use cas_version::commits::{self, Commit, Notes};
+use cas_version::releases;
 use cas_version::stepnotes::{self, StepNotes};
 use cas_version::{Path, View, annotated, diff, formats, fs, history, object_at, walk};
 use std::collections::{BTreeMap, HashMap};
@@ -26,7 +27,11 @@ const PORTED: &[&str] = &[
     "rebase",
     "merge-base",
     "path-log",
+    "publish",
 ];
+
+/// The commands that work on a release history.
+const RELEASE: &[&str] = &["log", "ls", "checkout", "sparse", "compatible"];
 
 /// The commands that are not about one history.
 const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated", "push", "pull"];
@@ -40,6 +45,12 @@ pub fn handles(a: &Args, s: &dyn Store) -> Res<bool> {
     }
     let name = a.history.as_str();
     let ours = match history::head(s, name).map_err(e)? {
+        Some(v) if releases::is_release(&v) => {
+            if !RELEASE.contains(&cmd) {
+                return Err(format!("{cmd} is not for a release history ({name}): {}", RELEASE.join(", ")));
+            }
+            true
+        }
         Some(v) => commits::is_commit(&v),
         None => a.commits,
     };
@@ -49,7 +60,7 @@ pub fn handles(a: &Args, s: &dyn Store) -> Res<bool> {
         }
         return Ok(false);
     }
-    if !PORTED.contains(&cmd) {
+    if !PORTED.contains(&cmd) && !RELEASE.contains(&cmd) {
         return Err(format!("{cmd} is not yet available for a history of commits ({name})"));
     }
     Ok(true)
@@ -81,6 +92,9 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
     let dirf = formats::by_alias("directory").unwrap();
     let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}"));
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
+    if history::head(s, name).map_err(e)?.is_some_and(|v| releases::is_release(&v)) {
+        return run_release(a, s);
+    }
     let tip = commits::tip(s, name).map_err(e)?;
     // The commit -n names: `latest`, a key, or the start of one.
     let at = || -> Res<(String, Commit)> {
@@ -286,6 +300,27 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 out!("{}  {line}", short(&k));
             }
         }
+        "publish" => {
+            if let Some(x) = a.rest.get(1) {
+                return Err(format!("publish takes no {x:?}: the release history is `releases`, or --as <name>"));
+            }
+            let public = a.remote.clone().unwrap_or_else(|| "releases".into());
+            let tag = a.tag.as_ref().ok_or("publish needs --tag <version>, a semantic version such as 1.4.0")?;
+            let changelog = match &a.changelog {
+                Some(file) => Some(std::fs::read_to_string(file).map_err(|x| format!("{file}: {x}"))?),
+                None => None,
+            };
+            let edge = match (&a.change, &changelog) {
+                (Some(c), Some(l)) => Some((c.as_str(), l.as_str())),
+                (None, None) => None,
+                _ => return Err("publish takes --change <kind> and --changelog <file> together".into()),
+            };
+            let key = releases::publish(s, b3(), &public, &at()?.1.version(), tag, edge).map_err(e)?;
+            out!("{tag} {}", short(&key));
+        }
+        "compatible" => {
+            return Err("compatible is for a release history: -H releases compatible <from> <to>".into());
+        }
         "import-git" => {
             if tip.is_some() {
                 return Err(format!("history {name} exists"));
@@ -312,6 +347,58 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             );
         }
         _ => unreachable!("handles() lets only ported commands through"),
+    }
+    Ok(())
+}
+
+/// Commands on a release history (spec/formats/release.md).
+fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
+    let name = a.history.as_str();
+    let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}"));
+    let tip = releases::tip(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
+    let find = |what: &str| -> Res<String> {
+        releases::resolve(s, &tip, what).map_err(e)?.ok_or(format!("no release {what} in {name}"))
+    };
+    let version = || -> Res<View> { Ok(releases::read(s, &find(&a.node)?).map_err(e)?.version()) };
+    match a.rest[0].as_str() {
+        "log" => {
+            for (k, r, tag) in releases::log(s, &tip).map_err(e)? {
+                out!("{tag}  {}", short(&k));
+                for (from, (changelog, change)) in &r.from {
+                    let from_tag = commits::text(s, &releases::read(s, from).map_err(e)?.tag).map_err(e)?;
+                    let text = commits::text(s, changelog).map_err(e)?;
+                    out!("  {change} from {from_tag}: {text}");
+                }
+            }
+        }
+        "ls" => {
+            let prefix = a.rest.get(1).map(|p| Path::new(p.as_str()).map_err(e)).transpose()?;
+            for item in walk(s, &version()?, prefix.as_ref()) {
+                let (p, n) = item.map_err(e)?;
+                out!("{:8} {p}", node_text(&Some(n)));
+            }
+        }
+        "checkout" => {
+            let dest = arg(1, "<dest>")?;
+            let prefix = a.rest.get(2).map(|p| Path::new(p.as_str()).map_err(e)).transpose()?;
+            let n = fs::checkout_indexed(s, &version()?, prefix.as_ref(), dest.as_ref(), Some(&a.store)).map_err(e)?;
+            out!("{n} paths written to {dest}");
+        }
+        "sparse" => {
+            let dest = arg(1, "<dest>")?;
+            let paths = a.rest[2..].iter().map(Path::new).collect::<Result<Vec<_>, _>>().map_err(e)?;
+            if paths.is_empty() {
+                return Err("sparse needs at least one <path>".into());
+            }
+            let n = fs::checkout_sparse(s, &version()?, &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
+            out!("{n} paths written to {dest}");
+        }
+        "compatible" => {
+            let (from, to) = (find(&arg(1, "<from>")?)?, find(&arg(2, "<to>")?)?);
+            let safe = releases::safe(s, &from, &to).map_err(e)?;
+            out!("{}", if safe { "compatible" } else { "breaking" });
+        }
+        _ => unreachable!("handles() lets only release commands through"),
     }
     Ok(())
 }

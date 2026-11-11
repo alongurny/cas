@@ -402,3 +402,49 @@ fn commit_histories_push_pull_merge_and_rebase() {
     assert!(!none.status.success());
     assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
 }
+
+/// Releases of a commit history: a tag on each, a kind of change and a
+/// changelog from the one before.
+#[test]
+fn releases_have_tags_and_typed_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store, out) = (tmp.path().join("work"), tmp.path().join("store"), tmp.path().join("out"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("a"), "1\n").unwrap();
+    let w = work.to_str().unwrap();
+    let log = tmp.path().join("changelog");
+    let l = log.to_str().unwrap();
+    let fails = |args: &[&str]| {
+        let o = Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(args).output().unwrap();
+        assert!(!o.status.success(), "cas {args:?} should fail");
+        String::from_utf8_lossy(&o.stderr).to_string()
+    };
+
+    cas(&store, &["--commits", "--author", "Dana", "commit", w]);
+    assert!(fails(&["publish"]).contains("--tag"));
+    assert!(fails(&["publish", "--tag", "v1"]).contains("semantic version"));
+    assert!(cas(&store, &["publish", "--tag", "1.0.0"]).starts_with("1.0.0 "));
+
+    for (text, tag, change) in [("2\n", "1.0.1", "patch"), ("3\n", "1.1.0", "feature"), ("4\n", "2.0.0", "breaking")] {
+        std::fs::write(work.join("a"), text).unwrap();
+        cas(&store, &["--author", "Dana", "commit", w]);
+        std::fs::write(&log, format!("What {tag} changes.\nIn two lines.\n")).unwrap();
+        cas(&store, &["publish", "--tag", tag, "--change", change, "--changelog", l]);
+    }
+    assert!(fails(&["publish", "--tag", "2.0.1"]).contains("changelog"));
+    assert!(fails(&["publish", "--tag", "1.1.0", "--change", "patch", "--changelog", l]).contains("already has"));
+    assert!(fails(&["publish", "--tag", "2.0.1", "--change", "minor", "--changelog", l]).contains("not one of"));
+
+    let shown = cas(&store, &["-H", "releases", "log"]);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(lines.len(), 7, "{shown}");
+    assert!(lines[0].starts_with("2.0.0  "));
+    assert_eq!(lines[1], "  breaking from 1.1.0: What 2.0.0 changes. / In two lines.");
+    assert_eq!(lines[6].split("  ").next(), Some("1.0.0"));
+    assert_eq!(cas(&store, &["-H", "releases", "compatible", "1.0.0", "1.1.0"]), "compatible\n");
+    assert_eq!(cas(&store, &["-H", "releases", "compatible", "1.0.0", "2.0.0"]), "breaking\n");
+    cas(&store, &["-H", "releases", "-n", "1.0.1", "checkout", out.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(out.join("a")).unwrap(), "2\n");
+    assert!(fails(&["-H", "releases", "commit", w]).contains("not for a release history"));
+    assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
+}

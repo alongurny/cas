@@ -66,7 +66,7 @@ through its changelog (publish --changelog).
 With --commits, commit and import-git start a history of commits (spec/formats/commit.md:
 versions as `directory`, notes as `annotation`, an author and a time on each commit;
 --author <name>, default $CAS_AUTHOR or $USER). On such a history commit, status, reset,
-clean, log, ls, diff, checkout, sparse, path-log, merge-base, merge <other>, rebase <onto>,\npush and pull work; tags and releases, stash and last-modified are being moved over.
+clean, log, ls, diff, checkout, sparse, path-log, merge-base, merge <other>, rebase <onto>,\npush and pull work; stash, last-modified and summary are being moved over. From such a history\npublish --tag <semantic version> [--change breaking|feature|patch|security --changelog <file>]\nadds its tip to the release history (default releases; --as <name>): a first release has no\nchange, a later one says its change from the one before. On a release history (-H releases)\nlog, ls, checkout, sparse (-n <tag>) and compatible <from> <to> work.
   commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
                                   caches stat data, so unchanged files are not rehashed)
   commit <dir> --notes <file>     ... with a note on each line of the step's diff
@@ -183,6 +183,8 @@ struct Args {
     show_diff: bool,
     annotated: bool,
     author: Option<String>,
+    tag: Option<String>,
+    change: Option<String>,
     commits: bool,
     remote: Option<String>,
     token_file: Option<String>,
@@ -204,6 +206,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         show_diff: false,
         annotated: false,
         author: None,
+        tag: None,
+        change: None,
         commits: false,
         remote: None,
         token_file: None,
@@ -231,6 +235,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--diff" => a.show_diff = true,
             "--annotated" => a.annotated = true,
             "--author" => a.author = Some(value("--author")?),
+            "--tag" => a.tag = Some(value("--tag")?),
+            "--change" => a.change = Some(value("--change")?),
             "--commits" => a.commits = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
