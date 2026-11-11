@@ -44,6 +44,7 @@ macro_rules! out {
     }};
 }
 
+mod commits;
 mod forge;
 
 fn flush_out() {
@@ -62,6 +63,10 @@ History options: -H <history> (default main), -n <node> (a tag, `latest`, or a k
 prefix; default latest), --compatible. There is no commit
 message: a step says why through its notes (commit --notes), and a release
 through its changelog (publish --changelog).
+With --commits, commit and import-git start a history of commits (spec/formats/commit.md:
+versions as `directory`, notes as `annotation`, an author and a time on each commit;
+--author <name>, default $CAS_AUTHOR or $USER). On such a history commit, status, reset,
+clean, log, ls, diff, checkout and sparse work; the other commands are being moved over.
   commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
                                   caches stat data, so unchanged files are not rehashed)
   commit <dir> --notes <file>     ... with a note on each line of the step's diff
@@ -177,6 +182,8 @@ struct Args {
     annotate: Vec<String>,
     show_diff: bool,
     annotated: bool,
+    author: Option<String>,
+    commits: bool,
     remote: Option<String>,
     token_file: Option<String>,
     ca: Option<String>,
@@ -196,6 +203,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         annotate: Vec::new(),
         show_diff: false,
         annotated: false,
+        author: None,
+        commits: false,
         remote: None,
         token_file: None,
         ca: None,
@@ -221,6 +230,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--annotate" => a.annotate.push(value("--annotate")?),
             "--diff" => a.show_diff = true,
             "--annotated" => a.annotated = true,
+            "--author" => a.author = Some(value("--author")?),
+            "--commits" => a.commits = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
             "--ca" => a.ca = Some(value("--ca")?),
@@ -386,6 +397,9 @@ fn run(a: Args) -> Res<()> {
     let remote = Remote { token: token.as_deref(), ca: ca.as_deref() };
     let s = open(&a.store, remote)?;
     let s = &*s;
+    if commits::handles(&a, s)? {
+        return commits::run(&a, s);
+    }
     let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}\n{USAGE}"));
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     let name = a.history.as_str();

@@ -58,7 +58,8 @@ pub fn import_indexed(
     };
     let mut entries = BTreeMap::new();
     let mut reused = Vec::new();
-    let mut scan = Scan { store, alg, old: old.as_ref(), new: new.as_mut(), reused: &mut reused };
+    let mut scan =
+        Scan { store, alg, exec: has_exec(format), old: old.as_ref(), new: new.as_mut(), reused: &mut reused };
     let mut edits = None;
     match &base {
         Some((changed, o, _)) => edits = Some(scan.watched(dir, o, changed, &mut entries)?),
@@ -77,7 +78,7 @@ pub fn import_indexed(
     for ((path, file), present) in reused.into_iter().zip(store.has_many(&keys)?) {
         if !present {
             let meta = fs::symlink_metadata(&file)?;
-            let r = put_file(store, alg, &file, &meta)?;
+            let r = put_file(store, alg, &file, &meta, has_exec(format))?;
             if let Some(n) = new.as_mut() {
                 n.files.insert(path.as_str().to_string(), (Stat::of(&meta), r.clone()));
             }
@@ -100,10 +101,18 @@ pub fn import_indexed(
     Ok(root)
 }
 
-fn put_file(store: &dyn Store, alg: &'static Algorithm, file: &FsPath, meta: &fs::Metadata) -> Result<View> {
+/// `exec`: whether the directory format tells executable files apart
+/// (`directory` does not: every file in it is `raw`).
+fn put_file(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    file: &FsPath,
+    meta: &fs::Metadata,
+    exec: bool,
+) -> Result<View> {
     if meta.file_type().is_symlink() {
         put(store, alg, "symlink", &fs::read_link(file)?.into_os_string().into_vec())
-    } else if meta.permissions().mode() & 0o111 != 0 {
+    } else if exec && meta.permissions().mode() & 0o111 != 0 {
         put(store, alg, "exec", &fs::read(file)?)
     } else {
         put(store, alg, "raw", &fs::read(file)?)
@@ -113,6 +122,7 @@ fn put_file(store: &dyn Store, alg: &'static Algorithm, file: &FsPath, meta: &fs
 struct Scan<'a> {
     store: &'a dyn Store,
     alg: &'static Algorithm,
+    exec: bool,
     old: Option<&'a Index>,
     new: Option<&'a mut Index>,
     /// Files whose view came from the cache, to check against the store.
@@ -204,12 +214,15 @@ impl Scan<'_> {
                 return Ok(());
             }
             let stat = Stat::of(meta);
-            let r = match self.old.and_then(|o| o.fresh(path.as_str(), &stat)) {
+            let cached = self.old.and_then(|o| o.fresh(path.as_str(), &stat));
+            // A cache written for another directory format may hold `exec`.
+            let cached = cached.filter(|v| self.exec || v.known_format().is_none_or(|f| f.alias != "exec"));
+            let r = match cached {
                 Some(v) => {
                     self.reused.push((path.clone(), file.to_path_buf()));
                     v.clone()
                 }
-                None => put_file(self.store, self.alg, file, meta)?,
+                None => put_file(self.store, self.alg, file, meta, self.exec)?,
             };
             if let Some(n) = self.new.as_deref_mut() {
                 n.files.insert(path.as_str().to_string(), (stat, r.clone()));
@@ -502,4 +515,8 @@ pub fn reset(
         import_indexed(&Overlay::new(store), alg, format, dir, scope)?;
     }
     Ok(done)
+}
+
+fn has_exec(format: &Format) -> bool {
+    format.alias != "directory"
 }

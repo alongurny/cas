@@ -10,6 +10,7 @@
 pub mod access;
 pub mod ancestry;
 pub mod annotated;
+pub mod commits;
 pub mod derived;
 pub mod dir;
 pub mod formats;

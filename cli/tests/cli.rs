@@ -278,3 +278,56 @@ fn diff_and_merge_base_with_the_ancestry_gc_records() {
     assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      a");
     assert_eq!(cas(&store, &["merge-base", &short(&first), &short(&second)]), first);
 }
+
+/// A history of commits (spec/formats/commit.md): `directory` versions,
+/// an author and a time on each commit, notes as an annotation.
+#[test]
+fn a_history_of_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store, out) = (tmp.path().join("work"), tmp.path().join("store"), tmp.path().join("out"));
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("README"), "hi\n").unwrap();
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let w = work.to_str().unwrap();
+
+    let first = cas(&store, &["--commits", "--author", "Dana", "commit", w]);
+    assert!(first.starts_with("blake3:"));
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+    assert_eq!(cas(&store, &["status", w]), "changed  src/lib.rs\n");
+
+    // Notes are written on the diff to commit: one on the step, one on a line.
+    let form = cas(&store, &["status", w, "--diff"]);
+    let mut noted = String::from("# add b\n");
+    for l in form.lines() {
+        if l == "| +fn b() {}" {
+            noted.push_str("# b is new\n");
+        }
+        noted.push_str(l);
+        noted.push('\n');
+    }
+    let notes = tmp.path().join("notes");
+    std::fs::write(&notes, noted).unwrap();
+    cas(&store, &["--author", "Dana", "commit", w, "--notes", notes.to_str().unwrap()]);
+
+    let log = cas(&store, &["log"]);
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(lines[0].ends_with("  Dana  add b"), "{log}");
+    assert!(lines[1].ends_with("  Dana  "), "{log}");
+    assert_eq!(cas(&store, &["diff"]), "raw      -> raw      src/lib.rs\n");
+    let shown = cas(&store, &["diff", "--annotated"]);
+    assert!(shown.starts_with("# add b\n"), "{shown}");
+    assert!(shown.contains("# b is new\n| +fn b() {}\n"), "{shown}");
+    assert_eq!(cas(&store, &["ls"]), "raw      README\ndir      src\nraw      src/lib.rs\n");
+
+    // The first commit by the start of its key.
+    cas(&store, &["-n", &first.trim()[7..19], "checkout", out.to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(out.join("src/lib.rs")).unwrap(), "fn a() {}\n");
+    assert_eq!(cas(&store, &["status", w]), "");
+    assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
+
+    // Commands not moved over yet say so.
+    let o = Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["tag", "v1"]).output().unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("not yet available for a history of commits"));
+}

@@ -35,6 +35,7 @@ fn put(
     old: Option<&View>,
 ) -> Result<View> {
     let Kind::Dir(d) = &format.kind else { unreachable!() };
+    d.fits(items).map_err(Error::UnknownFormat)?;
     let (top, blobs) = d.blobs(alg, items);
     if let Some(old) = old
         && old.key() == top

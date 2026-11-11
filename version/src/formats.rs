@@ -167,7 +167,7 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
             Kind::Leaf(crate::htree::check_part),
         ),
         // Formats given as types (spec/types.md).
-        format("directory", include_str!("../../spec/formats/directory.md"), Kind::Leaf(crate::typed::check_directory)),
+        format("directory", include_str!("../../spec/formats/directory.md"), Kind::Dir(&dir::DIRECTORY)),
         format("commit", include_str!("../../spec/formats/commit.md"), Kind::Leaf(crate::typed::check_commit)),
         format(
             "annotation",

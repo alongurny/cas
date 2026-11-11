@@ -21,10 +21,13 @@ pub struct Item {
 pub enum Dir {
     Text,
     Tree,
+    /// `directory` (spec/formats/directory.md): given as a type.
+    Directory,
 }
 
 pub static DIR: Dir = Dir::Text;
 pub static TREE: Dir = Dir::Tree;
+pub static DIRECTORY: Dir = Dir::Directory;
 
 /// What one `tree` blob holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +76,7 @@ impl Dir {
         match self {
             Dir::Text => Dir::text_decode(key, bytes).map(|_| ()),
             Dir::Tree => tree_decode(bytes).map(|_| ()).map_err(|e| malformed(key, e)),
+            Dir::Directory => directory_decode(key, bytes).map(|_| ()),
         }
     }
 
@@ -81,7 +85,9 @@ impl Dir {
     /// read before (gc's mark).
     pub(crate) fn blob_children_light(&self, key: &str, bytes: &[u8], skip: &DigestSet) -> Result<Vec<View>> {
         match self {
-            Dir::Text => Ok(self.blob_children(key, bytes)?.into_iter().filter(|v| !skip.contains(v.key())).collect()),
+            Dir::Text | Dir::Directory => {
+                Ok(self.blob_children(key, bytes)?.into_iter().filter(|v| !skip.contains(v.key())).collect())
+            }
             Dir::Tree => tree_children(bytes, skip).map_err(|e| malformed(key, e)),
         }
     }
@@ -90,6 +96,7 @@ impl Dir {
     pub fn blob_children(&self, key: &str, bytes: &[u8]) -> Result<Vec<View>> {
         match self {
             Dir::Text => Ok(Dir::text_decode(key, bytes)?.into_iter().map(|i| i.child).collect()),
+            Dir::Directory => Ok(directory_decode(key, bytes)?.into_iter().map(|i| i.child).collect()),
             Dir::Tree => Ok(match tree_decode(bytes).map_err(|e| malformed(key, e))? {
                 Blob::Items(items) => items.into_iter().map(|i| i.child).collect(),
                 Blob::Parts { parts, .. } => {
@@ -108,6 +115,10 @@ impl Dir {
                 (alg.key(&bytes), vec![(alg.key(&bytes), bytes)])
             }
             Dir::Tree => tree_blobs(alg, items),
+            Dir::Directory => {
+                let bytes = directory_encode(items);
+                (alg.key(&bytes), vec![(alg.key(&bytes), bytes)])
+            }
         }
     }
 
@@ -117,6 +128,7 @@ impl Dir {
         match self {
             Dir::Text => Dir::text_decode(key, bytes),
             Dir::Tree => tree_load(store, key, bytes),
+            Dir::Directory => directory_decode(key, bytes),
         }
     }
 
@@ -125,6 +137,7 @@ impl Dir {
         match self {
             Dir::Text => Dir::text_find(key, bytes, name),
             Dir::Tree => tree_find(store, key, bytes, name),
+            Dir::Directory => directory_find(key, bytes, name),
         }
     }
 }
@@ -192,6 +205,14 @@ impl Dir {
                 Ok(v)
             }
             Dir::Tree => Ok(tree_find_memo(store, key, name, memo)?.2.clone()),
+            Dir::Directory => {
+                if let Some(f) = memo.get(name, key) {
+                    return Ok(f.2.clone());
+                }
+                let v = directory_find(key, &memo.read(store, key)?, name)?;
+                memo.insert(name, key, std::rc::Rc::new((0, None, v.clone())));
+                Ok(v)
+            }
         }
     }
 }
@@ -994,4 +1015,86 @@ impl Dir {
         }
         Ok(items)
     }
+}
+
+// The `directory` format: a type (spec/types.md), so its bytes are read
+// and written by the type's parser and printer.
+
+/// What a `directory` entry may be, in tag order.
+const DIRECTORY_KINDS: [&str; 3] = ["raw", "symlink", "directory"];
+
+fn directory_type() -> &'static crate::typed::Type {
+    crate::typed::by_type("directory").unwrap()
+}
+
+fn directory_kind_ids() -> &'static [String; 3] {
+    static IDS: std::sync::LazyLock<[String; 3]> =
+        std::sync::LazyLock::new(|| DIRECTORY_KINDS.map(|a| crate::by_alias(a).unwrap().id().to_string()));
+    &IDS
+}
+
+impl Dir {
+    /// Whether a directory of this format can hold `items`: a `directory`
+    /// holds only files, links and directories of its own format, by
+    /// blake3 keys, under names of at most 255 bytes.
+    pub fn fits(&self, items: &[Item]) -> std::result::Result<(), String> {
+        let Dir::Directory = self else { return Ok(()) };
+        for i in items {
+            if i.name.len() > 255 {
+                return Err(format!("a directory holds names of at most 255 bytes, not {:?}", i.name));
+            }
+            if !directory_kind_ids().iter().any(|f| f == i.child.format()) {
+                let alias = i.child.known_format().map_or("an unknown format", |f| f.alias);
+                return Err(format!("a directory holds raw, symlink and directory, not {alias} ({})", i.name));
+            }
+            if crate::typed::key_bytes(i.child.key()).is_none() {
+                return Err(format!("a directory holds blake3 keys, not {}", i.child.key()));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The one blob of a `directory` holding `items`, which must fit
+/// ([`Dir::fits`]).
+fn directory_encode(items: &[Item]) -> Vec<u8> {
+    use crate::typed::{RecV, Value};
+    let list = items
+        .iter()
+        .map(|i| RecV {
+            keys: vec![crate::typed::key_bytes(i.child.key()).expect("a directory's items fit it")],
+            kinds: vec![
+                directory_kind_ids().iter().position(|f| f == i.child.format()).expect("a directory's items fit it")
+                    as u8
+                    + 1,
+            ],
+            ints: Vec::new(),
+            name: i.name.as_bytes().to_vec(),
+        })
+        .collect();
+    directory_type().print(&Value { head: None, list })
+}
+
+/// Parse a `directory` blob; valid only if it prints back to itself.
+fn directory_decode(key: &str, bytes: &[u8]) -> Result<Vec<Item>> {
+    let t = directory_type();
+    let v = t.parse(bytes).map_err(|e| malformed(key, e))?;
+    if t.print(&v) != bytes {
+        return Err(malformed(key, "not the one encoding of its value"));
+    }
+    Ok(v.list
+        .into_iter()
+        .map(|r| Item {
+            name: String::from_utf8(r.name).expect("a parsed name is valid"),
+            child: View {
+                format: directory_kind_ids()[r.kinds[0] as usize - 1].clone(),
+                key: crate::typed::key_text(&r.keys[0]),
+            },
+        })
+        .collect())
+}
+
+fn directory_find(key: &str, bytes: &[u8], name: &str) -> Result<Option<View>> {
+    let mut items = directory_decode(key, bytes)?;
+    Ok(items.binary_search_by(|i| i.name.as_str().cmp(name)).ok().map(|i| items.swap_remove(i).child))
 }
