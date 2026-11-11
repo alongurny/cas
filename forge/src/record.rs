@@ -197,7 +197,13 @@ impl Record {
 
 /// The view variable `var` holds, if set.
 pub fn head(store: &dyn Store, var: &str) -> Result<Option<View>> {
-    Ok(cas_version::history::head(store, var)?)
+    match store.read(var)? {
+        None => Ok(None),
+        Some(b) => {
+            let s = String::from_utf8(b).map_err(|_| Error::new(500, format!("{var} is not UTF-8")))?;
+            View::parse(&s).map(Some).map_err(|e| Error::new(500, format!("{var}: {e}")))
+        }
+    }
 }
 
 /// The record at `var`, with the view it was read from.

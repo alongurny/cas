@@ -28,13 +28,12 @@
 			{#each step.entry.tags as t (t)}<span class="tag">{t}</span>{/each}
 			<span class="grow"></span>
 			{#each step.entry.after as a (a.id)}
-				<span class="muted">after <a class="mono" href="/{base}/step{qs({ history, node: a.id })}">{short(a.id)}</a>{a.compatible ? ' (compatible)' : ''}</span>
+				<span class="muted">after <a class="mono" href="/{base}/step{qs({ history, node: a.id })}">{short(a.id)}</a></span>
 			{/each}
 			<a href="/{base}/tree{qs({ history, node: step.entry.id })}">files</a>
 		</div>
-		{#if step.changelog}<pre>{step.changelog}</pre>{/if}
 		{#if step.note}<pre>{step.note}</pre>{/if}
-		{#if step.entry.doc}<pre class="muted">{step.entry.doc}</pre>{/if}
+		<p class="muted">{step.entry.author}</p>
 		{#each checks as c (c.name)}<span class="tag {c.status}">{c.name}: {c.status}</span> {/each}
 	</div>
 	<Diff lines={step.lines} />

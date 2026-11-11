@@ -457,7 +457,7 @@ pub fn run(a: &Args, words: &[String], ca: Option<&[u8]>) -> Res<()> {
                 for r in arr(j) {
                     let tags: Vec<String> =
                         arr(&r["tags"]).iter().filter_map(|t| t.as_str().map(String::from)).collect();
-                    let compat = if r["compatible"].as_bool() == Some(true) { "compatible" } else { "breaking" };
+                    let compat = r["change"].as_str().unwrap_or("first").to_string();
                     out!(
                         "{}  {}  {}  {}",
                         tags.join(","),
@@ -471,7 +471,7 @@ pub fn run(a: &Args, words: &[String], ca: Option<&[u8]>) -> Res<()> {
                 let tag = o.arg(1, "<tag>")?;
                 let f = a.changelog.as_ref().ok_or("release publish needs --changelog <file>")?;
                 let changelog = std::fs::read_to_string(f).map_err(|x| format!("{f}: {x}"))?;
-                let b = json!({ "tag": tag, "changelog": changelog, "compatible": a.compatible, "node": node() });
+                let b = json!({ "tag": tag, "changelog": changelog, "change": a.change, "node": node() });
                 let j = api.call("POST", &api.p("releases")?, Some(b))?;
                 show(j, &|j| out!("released {tag} as {}", short(&s(j, "id"))));
             }

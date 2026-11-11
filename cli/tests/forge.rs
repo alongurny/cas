@@ -48,7 +48,7 @@ impl Site {
         let tok = self.dir.path().join(format!("{who}.token"));
         let mut c = Command::new(env!("CARGO_BIN_EXE_cas"))
             .current_dir(self.dir.path())
-            .arg("--nodes")
+            .env("CAS_AUTHOR", who)
             .args(["--ca", &self.ca, "--store", &format!("{}{at}", self.url), "--token-file", tok.to_str().unwrap()])
             .args(args)
             .stdin(Stdio::piped())
@@ -137,9 +137,9 @@ fn everything_the_web_does_from_the_terminal() {
     assert!(s.ok("alice", p, &["issue", "list"]).trim().is_empty());
     // Releases and their archive.
     write(s.dir.path(), "cl", "First.\n");
-    s.ok("alice", p, &["release", "publish", "v1", "--changelog", "cl"]);
-    assert!(s.ok("alice", p, &["release", "list"]).contains("v1"));
-    s.ok("alice", p, &["release", "archive", "v1", "v1.tar.gz"]);
+    s.ok("alice", p, &["release", "publish", "1.0.0", "--changelog", "cl"]);
+    assert!(s.ok("alice", p, &["release", "list"]).contains("1.0.0"));
+    s.ok("alice", p, &["release", "archive", "1.0.0", "v1.tar.gz"]);
     assert!(std::fs::metadata(s.dir.path().join("v1.tar.gz")).unwrap().len() > 0);
     // A token for one project reads it and nothing else.
     s.ok("alice", "", &["token", "make", "ci", "--scope", "project:lab/tool", "--days", "1", "--out", "ci.token"]);

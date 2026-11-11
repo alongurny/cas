@@ -520,7 +520,7 @@ pub const COMMANDS: &[Cmd] = &[
             FORGE,
             &[
                 "release list",
-                "release publish <tag> --changelog <file> [--compatible]",
+                "release publish <version> --changelog <file> [--change <kind>]",
                 "release archive <tag> <file.tar.gz>",
             ],
             "releases of a project",

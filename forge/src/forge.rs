@@ -19,7 +19,7 @@ pub struct Caches {
     pub projects: Option<Arc<BTreeSet<ProjectId>>>,
     pub settings: BTreeMap<ProjectId, Arc<Doc>>,
     /// Histories lately read, newest last.
-    pub histories: Vec<(cas_version::View, Arc<cas_version::history::History>)>,
+    pub histories: Vec<(cas_version::View, Arc<crate::browse::Hist>)>,
 }
 
 pub struct Forge {

@@ -4,10 +4,10 @@
 //! computed from the result for the node before it along the first
 //! predecessors.
 
+use crate::browse::Hist;
 use crate::names::ProjectId;
 use crate::{Error, Forge, Result};
 use cas_core::Expect;
-use cas_version::history::{History, NodeId};
 use cas_version::uni::Value;
 use cas_version::{Path, View, annotated, object_at, put, read_blob};
 use serde_json::{Value as J, json};
@@ -26,14 +26,14 @@ fn function(f: &Forge) -> String {
 
 /// The nodes from `at` back along first predecessors whose file at `path`
 /// differs from their predecessor's, oldest first, with the file at each.
-fn changes(f: &Forge, h: &History, at: &NodeId, path: &Path) -> Result<Vec<(NodeId, View)>> {
+fn changes(f: &Forge, h: &Hist, at: &str, path: &Path) -> Result<Vec<(String, View)>> {
     let mut out = Vec::new();
-    let mut cur = Some(at.clone());
-    let mut file = object_at(&*f.store, &at.version(), path)?;
+    let mut cur = Some(at.to_string());
+    let mut file = object_at(&*f.store, &h.version(at), path)?;
     while let (Some(id), Some(here)) = (cur.clone(), file.clone()) {
-        let pred = h.nodes.get(&id).and_then(|n| n.after.keys().next().cloned());
+        let pred = h.parent(&id).cloned();
         let before = match &pred {
-            Some(p) => object_at(&*f.store, &p.version(), path)?,
+            Some(p) => object_at(&*f.store, &h.version(p), path)?,
             None => None,
         };
         if before.as_ref() != Some(&here) {
@@ -56,7 +56,7 @@ impl Forge {
     /// the node that last changed it.
     pub fn blame(&self, p: &ProjectId, var: &str, what: &str, path: &str) -> Result<J> {
         let (_, h) = self.require_history(p, var)?;
-        let at = self.node(&h, what)?;
+        let at = self.node(p, &h, what)?;
         let path = Path::new(path)?;
         let chain = changes(self, &h, &at, &path)?;
         if chain.is_empty() {
@@ -78,7 +78,7 @@ impl Forge {
             let qv = put(&*self.store, self.alg, "uni-bin", &q.serialize())?;
             let var = format!("derived/{fid}/{}", qv.key());
             let text = lines_of(self, file)?;
-            let notes = match cas_version::history::head(&*self.store, &var)? {
+            let notes = match crate::record::head(&*self.store, &var)? {
                 Some(r) => annotated::verify(&*self.store, r.key())?.notes().into_iter().map(String::from).collect(),
                 None => {
                     let notes: Vec<String> = match &prev {
@@ -112,9 +112,9 @@ impl Forge {
         let (text, notes) = last.unwrap();
         let mut lines = Vec::new();
         for (t, n) in text.iter().zip(&notes) {
-            let line = NodeId::parse(n).ok().filter(|id| h.nodes.contains_key(id)).map(|id| self.line(&h, &id));
+            let line = h.get(n).map(|c| self.line(c));
             lines.push(json!({ "text": t.trim_end_matches('\n'), "node": n, "line": line }));
         }
-        Ok(json!({ "path": path.as_str(), "node": at.to_string(), "lines": lines }))
+        Ok(json!({ "path": path.as_str(), "node": at, "lines": lines }))
     }
 }

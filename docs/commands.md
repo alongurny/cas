@@ -529,7 +529,7 @@ Issues of a project.
 
 ```
 cas release list
-cas release publish <tag> --changelog <file> [--compatible]
+cas release publish <version> --changelog <file> [--change <kind>]
 cas release archive <tag> <file.tar.gz>
 ```
 

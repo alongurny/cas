@@ -68,18 +68,10 @@ impl Forge {
     fn check_targets(&self, p: &ProjectId) -> Result<Vec<View>> {
         let mut out = Vec::new();
         for var in [crate::project::DEV, crate::project::RELEASE] {
-            if let Some((_, h)) = self.history(p, var)?
-                && let Some(t) = h.tip()
-            {
-                out.push(t.version());
-            }
+            out.extend(self.tip_version(p, var)?);
         }
         for s in self.proposals(p, "open")? {
-            if let Some((_, h)) = self.history(p, s["source"].as_str().unwrap_or(""))?
-                && let Some(t) = h.tip()
-            {
-                out.push(t.version());
-            }
+            out.extend(self.tip_version(p, s["source"].as_str().unwrap_or(""))?);
         }
         out.sort();
         out.dedup();

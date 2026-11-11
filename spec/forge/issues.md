@@ -1,7 +1,8 @@
 # Forge: issues
 
-Issues are a history, `p/<owner>/<project>/i`: each change to an issue is
-a step. A version of it holds, for issue `n`:
+Issues are a history of commits, `p/<owner>/<project>/i`: each change to
+an issue is a commit by the user who made it. A version of it (a
+`directory` of `raw` files) holds, for issue `n`:
 
 - `<n>/issue.uni`, a `uni-txt` document: `title`, `state` (`open` or
   `closed`), `author`, `created`, `updated` (time), `labels` (set),

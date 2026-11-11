@@ -7,7 +7,7 @@ use cas_core::server::{DEFAULT_MAX_BODY, Server, self_signed};
 use cas_core::{Store, Who};
 use cas_forge::api::{self, Options};
 use cas_forge::gate;
-use cas_version::history::{self, Step};
+use cas_version::commits::{self, Commit, Notes};
 use cas_version::{Node, Path, View, build, by_alias, put};
 use serde_json::{Value as J, json};
 use std::collections::BTreeMap;
@@ -124,7 +124,21 @@ fn version(store: &dyn Store, files: &[(&str, &str)]) -> View {
     for (p, text) in files {
         e.insert(Path::new(*p).unwrap(), Node::File(put(store, b3(), "raw", text.as_bytes()).unwrap()));
     }
-    build(store, b3(), by_alias("dir").unwrap(), &e).unwrap()
+    build(store, b3(), by_alias("directory").unwrap(), &e).unwrap()
+}
+
+/// A commit of `version` after `parent`, noted `note`; its key.
+fn commit(store: &dyn Store, parent: Option<&str>, version: &View, note: &str) -> String {
+    let notes = Notes { note: note.to_string(), paths: BTreeMap::new() };
+    let step = commits::write_notes(store, b3(), &notes, &|_| Ok(false)).unwrap();
+    let c = Commit {
+        version: version.key().to_string(),
+        author: commits::put_text(store, b3(), "author", "Test <test@example.org>").unwrap(),
+        notes: if parent.is_none() { step.clone() } else { None },
+        time: 1_762_880_000,
+        parents: parent.map(|p| (p.to_string(), step)).into_iter().collect(),
+    };
+    commits::write(store, b3(), &c).unwrap()
 }
 
 #[test]
@@ -145,8 +159,9 @@ fn people_projects_proposals_issues_releases() {
     // Alice pushes a private history; h/dev is protected, even for her.
     let aw = s.wire("alice/demo", &alice);
     let v1 = version(&aw, &[("README.md", "hello\n"), ("src/a.txt", "one\ntwo\nthree\n")]);
-    history::commit(&aw, b3(), "u/alice/init", &v1, Step::default(), None).unwrap();
-    assert!(history::commit(&aw, b3(), "h/dev", &v1, Step::default(), None).is_err());
+    let c1 = commit(&aw, None, &v1, "");
+    commits::advance(&aw, "u/alice/init", None, &c1).unwrap();
+    assert!(commits::advance(&aw, "h/dev", None, &c1).is_err());
 
     let n = s.ok(
         "POST",
@@ -173,12 +188,12 @@ fn people_projects_proposals_issues_releases() {
     // Bob joins as a writer and proposes a change.
     s.ok("PUT", "projects/alice/demo/members/bob", Some(&alice), Some(json!({ "role": "write" })));
     assert!(bw.read(readme.key()).unwrap().is_some());
-    let mut mine = cas_version::history::read(&bw, &history::head(&bw, "h/dev").unwrap().unwrap()).unwrap();
     let v2 = version(&bw, &[("README.md", "hello\n"), ("src/a.txt", "one\ntwo and a half\nthree\n")]);
-    mine.append(&v2, Step::default(), None).unwrap();
-    history::save(&bw, b3(), "u/bob/fix", None, &mine).unwrap();
+    let dev = commits::tip(&bw, "h/dev").unwrap().unwrap();
+    let c2 = commit(&bw, Some(&dev), &v2, "");
+    commits::advance(&bw, "u/bob/fix", None, &c2).unwrap();
     // Not his to write: another user's history, or a shared one.
-    assert!(history::save(&bw, b3(), "u/alice/x", None, &mine).is_err());
+    assert!(commits::advance(&bw, "u/alice/x", None, &c2).is_err());
     let n = s.ok(
         "POST",
         "projects/alice/demo/proposals",
@@ -259,13 +274,13 @@ fn people_projects_proposals_issues_releases() {
         "POST",
         "projects/alice/demo/releases",
         Some(&alice),
-        Some(json!({ "tag": "v1", "changelog": "two is now two and a half" })),
+        Some(json!({ "tag": "1.0.0", "changelog": "two is now two and a half" })),
     );
     let rel = s.ok("GET", "projects/alice/demo/releases", Some(&bob), None);
-    assert_eq!(rel[0]["tags"], json!(["v1"]));
+    assert_eq!(rel[0]["tags"], json!(["1.0.0"]));
     let mut resp = s
         .http
-        .get(format!("{}/api/v1/projects/alice/demo/releases/v1/archive.tar.gz", s.url))
+        .get(format!("{}/api/v1/projects/alice/demo/releases/1.0.0/archive.tar.gz", s.url))
         .header("Authorization", &format!("Bearer {bob}"))
         .call()
         .unwrap();

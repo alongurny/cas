@@ -7,7 +7,7 @@ use cas_core::server::{DEFAULT_MAX_BODY, Server, self_signed};
 use cas_core::{Store, Who};
 use cas_forge::api::{self, Options};
 use cas_forge::gate;
-use cas_version::history::{self, Step};
+use cas_version::commits::{self, Commit, Notes};
 use cas_version::{Node, Path, View, build, by_alias, put};
 use serde_json::{Value as J, json};
 use std::collections::BTreeMap;
@@ -129,7 +129,21 @@ fn version(s: &dyn Store, files: &[(&str, &str)]) -> View {
     for (p, t) in files {
         m.insert(Path::new(*p).unwrap(), Node::File(put(s, b3(), "raw", t.as_bytes()).unwrap()));
     }
-    build(s, b3(), by_alias("dir").unwrap(), &m).unwrap()
+    build(s, b3(), by_alias("directory").unwrap(), &m).unwrap()
+}
+
+/// A commit of `version` after `parent`, noted `note`; its key.
+fn commit(store: &dyn Store, parent: Option<&str>, version: &View, note: &str) -> String {
+    let notes = Notes { note: note.to_string(), paths: BTreeMap::new() };
+    let step = commits::write_notes(store, b3(), &notes, &|_| Ok(false)).unwrap();
+    let c = Commit {
+        version: version.key().to_string(),
+        author: commits::put_text(store, b3(), "author", "Test <test@example.org>").unwrap(),
+        notes: if parent.is_none() { step.clone() } else { None },
+        time: 1_762_880_000,
+        parents: parent.map(|p| (p.to_string(), step)).into_iter().collect(),
+    };
+    commits::write(store, b3(), &c).unwrap()
 }
 
 #[test]
@@ -144,7 +158,8 @@ fn git_clones_fetches_and_pushes_cas_histories() {
     // A history made in cas, merged to dev.
     let aw = s.wire("alice/demo", &alice);
     let v1 = version(&aw, &[("README.md", "hello\n"), ("src/a.txt", "one\n")]);
-    history::commit(&aw, b3(), "u/alice/init", &v1, Step::default(), Some("the start".into())).unwrap();
+    let c1 = commit(&aw, None, &v1, "the start");
+    commits::advance(&aw, "u/alice/init", None, &c1).unwrap();
     s.ok(
         "POST",
         "projects/alice/demo/proposals",
@@ -184,11 +199,11 @@ fn git_clones_fetches_and_pushes_cas_histories() {
     let pushed = s.must(&a, &["rev-parse", "HEAD"]);
 
     // It is a cas history: the commit's message is the step's note.
-    let (_, h) = history::load(&aw, "u/alice/more").unwrap();
-    assert_eq!(h.nodes.len(), 2);
-    let tip = h.tip().unwrap();
-    let step = h.nodes[&tip].after.values().next().unwrap();
-    assert_eq!(step.line(&aw).unwrap().as_deref(), Some("two lines / with a body"));
+    let tip = commits::tip(&aw, "u/alice/more").unwrap().unwrap();
+    let log = commits::log(&aw, &tip).unwrap();
+    assert_eq!(log.len(), 2);
+    let tip = commits::read(&aw, &tip).unwrap();
+    assert_eq!(commits::line(&aw, &tip).unwrap(), "two lines / with a body");
     let txt = cas_version::object_at(&aw, &tip.version(), &Path::new("src/a.txt").unwrap()).unwrap().unwrap();
     assert_eq!(cas_version::read_blob(&aw, txt.key()).unwrap(), b"one\ntwo\n");
 
@@ -215,9 +230,9 @@ fn git_clones_fetches_and_pushes_cas_histories() {
     assert!(!ok && t.contains("non-fast-forward"), "{t}");
     // A new branch, then deleted.
     s.must(&a, &["push", "-q", "origin", "HEAD:u/alice/gone"]);
-    assert!(history::load(&aw, "u/alice/gone").unwrap().0.is_some());
+    assert!(commits::tip(&aw, "u/alice/gone").unwrap().is_some());
     s.must(&a, &["push", "-q", "origin", ":u/alice/gone"]);
-    assert!(history::load(&aw, "u/alice/gone").unwrap().0.is_none());
+    assert!(commits::tip(&aw, "u/alice/gone").unwrap().is_none());
 
     // Bob, once a writer, fetches incrementally and pushes his own.
     s.ok("PUT", "projects/alice/demo/members/bob", Some(&alice), Some(json!({ "role": "write" })));

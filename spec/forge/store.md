@@ -14,13 +14,13 @@ collected like any other data.
 | `forge/events` | The newest segment of the event log ([events](events.md)) |
 | `p/<owner>/<project>/meta` | The project's settings ([project](project.md)) |
 | `p/<owner>/<project>/h/dev` | The development history (the default) |
-| `p/<owner>/<project>/h/release` | The release history ([release-history](../release-history.md)) |
+| `p/<owner>/<project>/h/release` | The release history ([release](../formats/release.md)) |
 | `p/<owner>/<project>/h/<name>` | Other shared histories |
 | `p/<owner>/<project>/u/<user>/<name>` | A user's private histories, the sources of proposals |
 | `p/<owner>/<project>/r/<n>` | Proposal `n` ([proposal](proposal.md)) |
 | `p/<owner>/<project>/i` | The issues history ([issues](issues.md)) |
 | `p/<owner>/<project>/m/<name>` | A mirror's state ([mirror](mirror.md)) |
-| `p/<owner>/<project>/git/<history>` | Which git commit each node of a history is ([git](git.md)) |
+| `p/<owner>/<project>/git/<history>` | Which git commit each commit of a history is ([git](git.md)) |
 | `p/<owner>/<project>/git/tags` | Git's annotated tags ([git](git.md)) |
 | `derived/<F>/<X>` | Derived results: blame, check results ([checks](checks.md)) |
 

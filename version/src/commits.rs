@@ -804,3 +804,19 @@ pub fn drop(store: &dyn Store, name: &str, old: &str) -> Result<()> {
     store.remove(name, &Expect::Value(view("commit", old).to_string().into_bytes()))?;
     Ok(())
 }
+
+/// The step into `c` that says why: the parent it is from (the one whose
+/// step has notes, else the first; none for a first commit) and the notes,
+/// which for a first commit are those on its version.
+pub fn step(store: &dyn Store, c: &Commit) -> Result<(Option<String>, Notes)> {
+    let from = c.parents.iter().find(|(_, s)| s.is_some()).or(c.parents.iter().next());
+    let notes = match from {
+        Some((_, n)) => n.as_ref(),
+        None => c.notes.as_ref(),
+    };
+    let notes = match notes {
+        Some(k) => read_notes(store, k)?,
+        None => Notes::default(),
+    };
+    Ok((from.map(|(p, _)| p.clone()), notes))
+}

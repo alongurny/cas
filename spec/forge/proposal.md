@@ -16,11 +16,11 @@ Variable `p/<owner>/<project>/r/<n>`, a [record](store.md) whose
 | `revisions` | list of revisions |
 | `approvals` | map from user name to the revision number they approved |
 | `threads` | map from thread id to a review thread |
-| `merged` | the target's tip after the merge, a node id |
+| `merged` | the target's tip after the merge, a commit's key |
 
-A revision's fields: `time`, `tip` (the source's tip, a node id) and
+A revision's fields: `time`, `tip` (the source's tip, a commit's key) and
 `base` (the target's tip it was offered against, or empty). The record
-keeps the histories themselves at `rev/<i>/source` and `rev/<i>/target`
+keeps the tips themselves at `rev/<i>/source` and `rev/<i>/target`
 (views), so a reviewed revision stays readable after its source moves.
 
 ## Review threads
@@ -35,11 +35,11 @@ nearest to it; a thread whose line is gone is outdated.
 
 ## Merging
 
-Merge is a rebase only: the source's steps beyond the target are replayed
-on the target's tip, and the target moves by one compare-and-set to the
+Merge is a rebase only: the source's commits beyond the target are replayed
+on the target's tip, each keeping its author, time and notes, and the target moves by one compare-and-set to the
 result. The gates of the target ([project](project.md)) are checked
 first. A promoted thread's first comment becomes the note of its line in
-the newest replayed step that added a line with the thread's text. A line
-no replayed step added (a line of the source's first node, merged into an
+the newest replayed commit whose step added a line with the thread's text. A line
+no replayed step added (a line of the source's first commit, merged into an
 empty target) gets no note. Merging sets `state` to `merged`
 and `merged` to the new tip.

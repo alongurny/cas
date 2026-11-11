@@ -1,10 +1,12 @@
 //! Reading a project: histories, logs, trees, files, steps and diffs.
 
 use crate::names::{ProjectId, check_history};
+use crate::project::RELEASE;
 use crate::{Error, Forge, Result};
-use cas_version::history::{History, NodeId};
-use cas_version::{Kind, Path, View, annotated, object_at, read_blob, stepnotes};
+use cas_version::commits::{self, Commit};
+use cas_version::{Kind, Path, View, annotated, object_at, read_blob, releases, stepnotes};
 use serde_json::{Value as J, json};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 const HISTORIES_KEPT: usize = 8;
@@ -12,16 +14,51 @@ const HISTORIES_KEPT: usize = 8;
 /// The largest file the API returns whole.
 pub const MAX_FILE: usize = 8 << 20;
 
+/// A history of commits as the forge reads it: its tip and every commit
+/// the tip reaches, newest first.
+pub struct Hist {
+    pub tip: String,
+    pub log: Vec<(String, Commit)>,
+    at: HashMap<String, usize>,
+}
+
+impl Hist {
+    pub fn get(&self, key: &str) -> Option<&Commit> {
+        self.at.get(key).map(|i| &self.log[*i].1)
+    }
+
+    pub fn has(&self, key: &str) -> bool {
+        self.at.contains_key(key)
+    }
+
+    /// The version of commit `key`, which the history holds.
+    pub fn version(&self, key: &str) -> View {
+        self.log[self.at[key]].1.version()
+    }
+
+    /// The parent the step into `key` is shown from: the one whose step has
+    /// notes, else the first.
+    pub fn parent(&self, key: &str) -> Option<&String> {
+        let c = self.get(key)?;
+        c.parents.iter().find(|(_, s)| s.is_some()).or(c.parents.iter().next()).map(|(p, _)| p)
+    }
+}
+
 impl Forge {
-    /// The history at `view`, from the cache when lately read.
-    pub fn history_at(&self, view: &View) -> Result<Arc<History>> {
+    /// The history of commits at `view`, from the cache when lately read.
+    pub fn history_at(&self, view: &View) -> Result<Arc<Hist>> {
         {
             let c = self.caches.lock().unwrap();
             if let Some((_, h)) = c.histories.iter().find(|(v, _)| v == view) {
                 return Ok(h.clone());
             }
         }
-        let h = Arc::new(cas_version::history::read(&*self.store, view)?);
+        if !commits::is_commit(view) {
+            return Err(Error::bad(format!("{view} is not a commit")));
+        }
+        let log = commits::log(&*self.store, view.key())?;
+        let at = log.iter().enumerate().map(|(i, (k, _))| (k.clone(), i)).collect();
+        let h = Arc::new(Hist { tip: view.key().to_string(), log, at });
         let mut c = self.caches.lock().unwrap();
         c.histories.push((view.clone(), h.clone()));
         if c.histories.len() > HISTORIES_KEPT {
@@ -30,17 +67,28 @@ impl Forge {
         Ok(h)
     }
 
-    /// History `var` of `p`, with the view it holds.
-    pub fn history(&self, p: &ProjectId, var: &str) -> Result<Option<(View, Arc<History>)>> {
+    /// History `var` of `p`, with the view it holds. The release history
+    /// is not one of commits: see [`Forge::releases`].
+    pub fn history(&self, p: &ProjectId, var: &str) -> Result<Option<(View, Arc<Hist>)>> {
         check_history(var)?;
-        match cas_version::history::head(&*self.store, &p.var(var))? {
+        match crate::record::head(&*self.store, &p.var(var))? {
             None => Ok(None),
             Some(v) => Ok(Some((v.clone(), self.history_at(&v)?))),
         }
     }
 
-    pub fn require_history(&self, p: &ProjectId, var: &str) -> Result<(View, Arc<History>)> {
+    pub fn require_history(&self, p: &ProjectId, var: &str) -> Result<(View, Arc<Hist>)> {
         self.history(p, var)?.ok_or_else(|| Error::missing(format!("no history {var} in {p}")))
+    }
+
+    /// The version at the tip of history `var` of `p`, which may be the
+    /// release history.
+    pub fn tip_version(&self, p: &ProjectId, var: &str) -> Result<Option<View>> {
+        match crate::record::head(&*self.store, &p.var(var))? {
+            None => Ok(None),
+            Some(v) if releases::is_release(&v) => Ok(Some(releases::read(&*self.store, v.key())?.version())),
+            Some(v) => Ok(Some(commits::read(&*self.store, v.key())?.version())),
+        }
     }
 
     /// The histories of `p`: name, view, tip.
@@ -52,65 +100,86 @@ impl Forge {
             if !(rest.starts_with("h/") || rest.starts_with("u/")) {
                 continue;
             }
-            let Some(v) = cas_version::history::head(&*self.store, &var)? else { continue };
-            let tips = cas_version::derived::heads(&*self.store, &v).map(|h| h.tips).unwrap_or_default();
-            out.push(json!({
-                "name": rest,
-                "view": v.to_string(),
-                "tips": tips.keys().map(|t| t.to_string()).collect::<Vec<_>>(),
-            }));
+            let Some(v) = crate::record::head(&*self.store, &var)? else { continue };
+            out.push(json!({ "name": rest, "view": v.to_string(), "tips": [v.key()] }));
         }
         Ok(out)
     }
 
-    /// The node `what` names in `h`: a tag, a node id, a unique key
-    /// prefix, or (empty) the tip.
-    pub fn node(&self, h: &History, what: &str) -> Result<NodeId> {
-        let what = if what.is_empty() { "latest" } else { what };
-        h.resolve(what).ok_or_else(|| Error::missing(format!("no node {what:?}")))
+    /// The tags of the releases of `p`, by the key of the version released.
+    pub fn release_tags(&self, p: &ProjectId) -> Result<BTreeMap<String, Vec<String>>> {
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        if let Some(tip) = releases::tip(&*self.store, &p.var(RELEASE))? {
+            for (_, r, tag) in releases::log(&*self.store, &tip)? {
+                out.entry(r.version).or_default().push(tag);
+            }
+        }
+        Ok(out)
     }
 
-    /// What a node's steps say, in one line.
-    pub fn line(&self, h: &History, id: &NodeId) -> String {
-        let n = &h.nodes[id];
-        let lines: Vec<String> = n.after.values().filter_map(|s| s.line(&*self.store).ok().flatten()).collect();
-        if lines.is_empty() { n.doc.clone().unwrap_or_default() } else { lines.join(" / ") }
+    /// The commit `what` names in `h`: a key, the start of one, the tag of
+    /// a release (the newest commit with the version released), or (empty)
+    /// the tip.
+    pub fn node(&self, p: &ProjectId, h: &Hist, what: &str) -> Result<String> {
+        if what.is_empty() || what == "latest" {
+            return Ok(h.tip.clone());
+        }
+        if h.has(what) {
+            return Ok(what.to_string());
+        }
+        let digits = what.strip_prefix("blake3:").unwrap_or(what);
+        if !digits.is_empty() && digits.bytes().all(|c| c.is_ascii_hexdigit()) {
+            let want = format!("blake3:{}", digits.to_ascii_lowercase());
+            let mut hits = h.log.iter().filter(|(k, _)| k.starts_with(&want));
+            if let (Some((k, _)), None) = (hits.next(), hits.next()) {
+                return Ok(k.clone());
+            }
+        }
+        let tags = self.release_tags(p)?;
+        let version = tags.iter().find(|(_, t)| t.iter().any(|t| t == what)).map(|(v, _)| v);
+        version
+            .and_then(|v| h.log.iter().find(|(_, c)| c.version == *v))
+            .map(|(k, _)| k.clone())
+            .ok_or_else(|| Error::missing(format!("no commit {what:?}")))
     }
 
-    fn entry(&self, h: &History, id: &NodeId) -> J {
-        let n = &h.nodes[id];
-        let tags: Vec<&String> = h.tags.iter().filter(|(_, t)| *t == id).map(|(k, _)| k).collect();
+    /// What a commit says, in one line.
+    pub fn line(&self, c: &Commit) -> String {
+        commits::line(&*self.store, c).unwrap_or_default()
+    }
+
+    fn entry(&self, key: &str, c: &Commit, tags: &BTreeMap<String, Vec<String>>) -> J {
         json!({
-            "id": id.to_string(),
-            "version": id.version().to_string(),
-            "line": self.line(h, id),
-            "doc": n.doc,
-            "after": n.after.iter().map(|(p, s)| json!({
-                "id": p.to_string(), "compatible": s.compatible, "changelog": s.changelog,
-                "notes": s.notes.as_ref().map(View::to_string),
-            })).collect::<Vec<_>>(),
-            "tags": tags,
+            "id": key,
+            "version": c.version().to_string(),
+            "line": self.line(c),
+            "author": commits::text(&*self.store, &c.author).unwrap_or_default(),
+            "time": c.time,
+            "after": c.parents.iter().map(|(p, n)| json!({ "id": p, "notes": n })).collect::<Vec<_>>(),
+            "tags": tags.get(&c.version).cloned().unwrap_or_default(),
         })
     }
 
     /// The log of history `var`, newest first: `skip` entries left out,
-    /// at most `limit`; only nodes that changed `path` when one is given.
+    /// at most `limit`; only commits that changed `path` when one is given.
     pub fn log(&self, p: &ProjectId, var: &str, path: Option<&str>, skip: usize, limit: usize) -> Result<J> {
         let (_, h) = self.require_history(p, var)?;
-        let ids: Vec<NodeId> = match path.filter(|p| !p.is_empty()) {
-            Some(path) => cas_version::derived::path_log(&*self.store, &h, &Path::new(path)?)?,
-            None => h.log(),
+        let tags = self.release_tags(p)?;
+        let (total, page): (usize, Vec<J>) = match path.filter(|p| !p.is_empty()) {
+            Some(path) => {
+                let hits = commits::path_log(&*self.store, &h.tip, &Path::new(path)?)?;
+                (hits.len(), hits.iter().skip(skip).take(limit).map(|(k, c)| self.entry(k, c, &tags)).collect())
+            }
+            None => (h.log.len(), h.log.iter().skip(skip).take(limit).map(|(k, c)| self.entry(k, c, &tags)).collect()),
         };
-        let total = ids.len();
-        let page: Vec<J> = ids.iter().skip(skip).take(limit).map(|id| self.entry(&h, id)).collect();
         Ok(json!({ "total": total, "entries": page }))
     }
 
-    /// One node: its entry and its steps.
+    /// One commit: its entry.
     pub fn node_info(&self, p: &ProjectId, var: &str, what: &str) -> Result<J> {
         let (_, h) = self.require_history(p, var)?;
-        let id = self.node(&h, what)?;
-        Ok(self.entry(&h, &id))
+        let id = self.node(p, &h, what)?;
+        Ok(self.entry(&id, h.get(&id).expect("a commit of the history"), &self.release_tags(p)?))
     }
 
     /// What is at `path` (none: the root) of `version`: a directory's
@@ -150,41 +219,31 @@ impl Forge {
         Ok((v, bytes))
     }
 
-    /// The diff of the step into node `what` from its first predecessor
-    /// (from nothing for a root), each line with its note.
+    /// The diff of the step into commit `what` (from nothing for a first
+    /// commit), each line with its note.
     pub fn step(&self, p: &ProjectId, var: &str, what: &str) -> Result<J> {
         let (_, h) = self.require_history(p, var)?;
-        let id = self.node(&h, what)?;
-        let n = &h.nodes[&id];
-        let (before, step) = match n.after.iter().next() {
-            Some((b, s)) => (Some(b.version()), Some(s)),
-            None => (None, None),
-        };
-        let after = id.version();
+        let id = self.node(p, &h, what)?;
+        let c = h.get(&id).expect("a commit of the history");
+        let (from, n) = commits::step(&*self.store, c)?;
+        let before = from.map(|f| commits::read(&*self.store, &f).map(|c| c.version())).transpose()?;
+        let after = c.version();
         let d = annotated::diff(&*self.store, before.as_ref(), &after)?;
-        let mut note = String::new();
-        let mut notes: Vec<String> = Vec::new();
-        if let Some(v) = step.and_then(|s| s.notes.as_ref())
-            && v.known_format().is_some_and(|f| f.alias == "step-notes")
-        {
-            let sn = stepnotes::verify(&*self.store, v.key())?;
-            note = sn.note.clone();
-            notes = stepnotes::line_notes(&sn, &d).into_iter().map(String::from).collect();
-        }
+        let sn = stepnotes::StepNotes { before: before.clone(), after: after.clone(), note: n.note, paths: n.paths };
+        let notes = stepnotes::line_notes(&sn, &d);
         let lines: Vec<J> = annotated::lines(&d)
             .iter()
             .enumerate()
             .map(|(i, l)| {
                 let text = String::from_utf8_lossy(l);
-                json!({ "text": text.strip_suffix('\n').unwrap_or(&text), "note": notes.get(i).cloned().unwrap_or_default() })
+                json!({ "text": text.strip_suffix('\n').unwrap_or(&text), "note": notes.get(i).copied().unwrap_or_default() })
             })
             .collect();
         Ok(json!({
-            "entry": self.entry(&h, &id),
+            "entry": self.entry(&id, c, &self.release_tags(p)?),
             "before": before.as_ref().map(View::to_string),
             "after": after.to_string(),
-            "note": note,
-            "changelog": step.and_then(|s| s.changelog.clone()),
+            "note": sn.note,
             "lines": lines,
         }))
     }

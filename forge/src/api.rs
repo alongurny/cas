@@ -240,7 +240,7 @@ fn version_of(
     }
     let var = q.get("history").map_or(crate::project::DEV, String::as_str);
     let (_, h) = forge.require_history(p, var)?;
-    Ok(forge.node(&h, q.get("node").map_or("", String::as_str))?.version())
+    Ok(h.version(&forge.node(p, &h, q.get("node").map_or("", String::as_str))?))
 }
 
 type Out = Result<(u16, J)>;
@@ -468,8 +468,7 @@ fn project_route(
             j["name"] = json!(p.name);
             j["role"] = json!(role.as_str());
             j["histories"] = json!(f.histories(p)?);
-            let readme =
-                f.history(p, crate::project::DEV)?.and_then(|(_, h)| h.tip()).and_then(|t| f.readme(p, &t.version()));
+            let readme = f.tip_version(p, crate::project::DEV)?.and_then(|v| f.readme(p, &v));
             j["readme"] = json!(readme.map(|(path, text)| json!({ "path": path, "text": text })));
             j["releases"] = json!(f.releases(p)?.into_iter().take(1).collect::<Vec<_>>());
             ok(j)
@@ -787,8 +786,13 @@ fn project_route(
             ok(json!(f.releases(p)?))
         }
         ("POST", ["releases"]) => {
-            let tip =
-                f.publish_release(me()?, p, b.s("node"), b.need("tag")?, b.need("changelog")?, b.flag("compatible"))?;
+            // `change` says what kind; the earlier `compatible` flag still reads.
+            let change = match b.opt("change") {
+                Some(c) => c.to_string(),
+                None if b.flag("compatible") => "feature".to_string(),
+                None => "breaking".to_string(),
+            };
+            let tip = f.publish_release(me()?, p, b.s("node"), b.need("tag")?, b.need("changelog")?, &change)?;
             Ok((201, json!({ "id": tip })))
         }
 

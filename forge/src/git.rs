@@ -9,17 +9,16 @@ use crate::project::RELEASE;
 use crate::{Error, Forge, Result};
 use cas_core::Expect;
 use cas_core::server::{Request, Response};
-use cas_version::View;
-use cas_version::gitobj::{self, Links};
-use cas_version::history::{self, History, NodeId};
+use cas_version::gitcommits::{self, Links};
+use cas_version::{View, commits, gitobj};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 
-/// Where a history's links are kept: which git commit each of its nodes
-/// is, in project variable `git/<history>`.
 /// The project variable holding git's annotated tags (`git-tags`).
 pub const TAGS: &str = "git/tags";
 
+/// Where a history's links are kept: which git commit each of its commits
+/// is, in project variable `git/<history>`.
 pub fn links_var(history: &str) -> String {
     format!("git/{history}")
 }
@@ -253,15 +252,15 @@ impl Forge {
 
     /// History `var`'s links and the view they were read from.
     pub fn git_links(&self, p: &ProjectId, var: &str) -> Result<(Option<View>, Links)> {
-        match history::head(&*self.store, &p.var(&links_var(var)))? {
+        match crate::record::head(&*self.store, &p.var(&links_var(var)))? {
             None => Ok((None, Links::new())),
-            Some(v) => Ok((Some(v.clone()), gitobj::read_links(&*self.store, &v)?)),
+            Some(v) => Ok((Some(v.clone()), gitcommits::read_links(&*self.store, &v)?)),
         }
     }
 
     /// Git's annotated tags of `p` and the view they were read from.
     pub fn git_tags(&self, p: &ProjectId) -> Result<(Option<View>, gitobj::Tags)> {
-        match history::head(&*self.store, &p.var(TAGS))? {
+        match crate::record::head(&*self.store, &p.var(TAGS))? {
             None => Ok((None, gitobj::Tags::new())),
             Some(v) => Ok((Some(v.clone()), gitobj::read_tags(&*self.store, &v)?)),
         }
@@ -288,11 +287,11 @@ impl Forge {
     }
 
     /// Save history `var`'s `links` over `old`; a concurrent change is
-    /// merged in (links only grow, and a node's commit never changes).
+    /// merged in (links only grow, and a commit's git commit never changes).
     pub fn save_links(&self, p: &ProjectId, var: &str, old: Option<View>, links: &Links) -> Result<()> {
         let (mut old, mut links) = (old, links.clone());
         for _ in 0..8 {
-            let v = gitobj::write_links(&*self.store, self.alg, &links)?;
+            let v = gitcommits::write_links(&*self.store, self.alg, &links)?;
             if old.as_ref() == Some(&v) {
                 return Ok(());
             }
@@ -312,7 +311,8 @@ impl Forge {
         Err(Error::conflict(format!("the git links of {var} kept moving")))
     }
 
-    /// Every history of `p` git sees, dev first, with its links.
+    /// Every history of commits of `p`, dev first, with its links. The
+    /// release history is not one: git sees releases as tags.
     fn linked(&self, p: &ProjectId) -> Result<Vec<Linked>> {
         let prefix = p.prefix();
         let mut names: Vec<String> = self
@@ -325,26 +325,25 @@ impl Forge {
         names.sort_by_key(|r| r != crate::project::DEV);
         let mut out = Vec::new();
         for var in names {
-            let Some((view, h)) = self.history(p, &var)? else { continue };
+            let Some(view) = crate::record::head(&*self.store, &p.var(&var))? else { continue };
+            if !commits::is_commit(&view) {
+                continue;
+            }
             let (links_view, links) = self.git_links(p, &var)?;
             let before = links.len();
-            out.push(Linked { var, view, h, links, links_view, before });
+            out.push(Linked { var, tip: view.key().to_string(), view, links, links_view, before });
         }
         Ok(out)
     }
 
-    /// Give every node of every history a commit, sharing commits between
-    /// histories where nodes are the same, and save the links that grew.
+    /// Give every commit of every history a git commit, sharing them
+    /// between histories that share commits, and save the links that grew.
     fn link_all(&self, p: &ProjectId) -> Result<Vec<Linked>> {
         let mut all = self.linked(p)?;
         for i in 0..all.len() {
-            if all[i].h.nodes.keys().all(|n| all[i].links.contains_key(n)) {
-                continue;
-            }
             let mut links = std::mem::take(&mut all[i].links);
-            let others: Vec<gitobj::Other<'_>> =
-                all.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, l)| (&*l.h, &l.links)).collect();
-            gitobj::to_git_from(&*self.store, &all[i].h, &mut links, &others)?;
+            let others: Vec<&Links> = all.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, l)| &l.links).collect();
+            gitcommits::to_git(&*self.store, &all[i].tip, &mut links, &others)?;
             all[i].links = links;
         }
         for l in &all {
@@ -356,38 +355,38 @@ impl Forge {
     }
 
     /// Every ref git sees, by name, with its commit (or tag object), made
-    /// from the project's histories.
+    /// from the project's histories and releases.
     fn refs(&self, p: &ProjectId) -> Result<(BTreeMap<String, String>, Vec<Linked>)> {
         let all = self.link_all(p)?;
         let mut out = BTreeMap::new();
-        let mut tags: Vec<(String, NodeId, usize)> = Vec::new();
-        let mut by_version: BTreeMap<View, String> = BTreeMap::new();
-        for (i, l) in all.iter().enumerate() {
-            if l.var != RELEASE {
-                for (n, c) in &l.links {
-                    by_version.entry(n.version()).or_insert_with(|| c.clone());
+        // The newest commit with each version, dev's first.
+        let mut by_version: BTreeMap<String, String> = BTreeMap::new();
+        for l in &all {
+            for (k, c) in &self.history_at(&l.view)?.log {
+                if let Some(g) = l.links.get(k) {
+                    by_version.entry(c.version.clone()).or_insert_with(|| g.clone());
                 }
             }
-            if let (Some(r), Some(t)) = (ref_of(&l.var), tip_of(&l.h)) {
-                out.insert(r, l.links[&t].clone());
-            }
-            for (name, n) in &l.h.tags {
-                tags.push((name.clone(), n.clone(), i));
+            if let (Some(r), Some(g)) = (ref_of(&l.var), l.links.get(&l.tip)) {
+                out.insert(r, g.clone());
             }
         }
-        // A release's tag names the commit of a non-release history with
-        // its version when there is one: the commit the work made.
-        tags.sort_by_key(|(_, _, i)| all[*i].var != RELEASE);
+        let known: BTreeSet<&String> = all.iter().flat_map(|l| l.links.values()).collect();
+        // A tag object git brought, while the commit it names is here.
         let (_, objects) = self.git_tags(p)?;
-        for (name, n, i) in tags {
-            let c = by_version.get(&n.version()).or_else(|| all[i].links.get(&n)).cloned();
-            if let Some(c) = c {
-                // Git's tag object, when there is one naming that commit.
-                let c = match objects.get(&name) {
-                    Some(t) if gitobj::peel_tag(&*self.store, t).as_deref() == Some(c.as_str()) => t.clone(),
-                    _ => c,
-                };
-                out.entry(format!("refs/tags/{name}")).or_insert(c);
+        for (name, t) in &objects {
+            if gitobj::peel_tag(&*self.store, t).is_some_and(|c| known.contains(&c)) {
+                out.insert(format!("refs/tags/{name}"), t.clone());
+            }
+        }
+        // A release is a tag on the commit that made its version.
+        for (version, tags) in self.release_tags(p)? {
+            let Some(c) = by_version.get(&version) else { continue };
+            for tag in tags {
+                // Git may have brought it as `v1.4.0`, with its tag object.
+                if !out.contains_key(&format!("refs/tags/v{tag}")) {
+                    out.entry(format!("refs/tags/{tag}")).or_insert_with(|| c.clone());
+                }
             }
         }
         Ok((out, all))
@@ -599,6 +598,9 @@ impl Forge {
             .and_then(var_of)
             .ok_or_else(|| Error::bad(format!("{r} is not a branch here: push to dev or u/{}/<name>", c.user)))?;
         crate::names::check_history(&var)?;
+        if var == RELEASE {
+            return Err(Error::denied("the release history is not pushed to: publish a release"));
+        }
         if !self.may_move(Some(c), &p.var(&var)) {
             let why = if var.starts_with("h/") && self.is_protected(p, &var) {
                 format!("{var} is protected: open a proposal from u/{}/<name>", c.user)
@@ -611,14 +613,14 @@ impl Forge {
         }
         let mut all = self.link_all(p)?;
         let at = all.iter().position(|l| l.var == var);
-        let (old_view, h, lv, mut links) = match at {
+        let (old_tip, lv, mut links) = match at {
             Some(i) => {
                 let l = all.remove(i);
-                (Some(l.view), (*l.h).clone(), l.links_view, l.links)
+                (Some(l.tip), l.links_view, l.links)
             }
-            None => (None, History::default(), self.git_links(p, &var)?.0, Links::new()),
+            None => (None, self.git_links(p, &var)?.0, Links::new()),
         };
-        let current = tip_of(&h).map(|t| links[&t].clone()).unwrap_or_else(|| ZERO.to_string());
+        let current = old_tip.as_ref().and_then(|t| links.get(t).cloned()).unwrap_or_else(|| ZERO.to_string());
         if current != old {
             return Err(Error::conflict("stale info: fetch first"));
         }
@@ -626,24 +628,26 @@ impl Forge {
             if dry {
                 return Ok(());
             }
-            let Some(ov) = old_view else { return Ok(()) };
-            as_actor(Some(&c.user), || self.store.remove(&p.var(&var), &Expect::Value(ov.to_string().into_bytes())))?;
+            let Some(t) = old_tip else { return Ok(()) };
+            let held = commits::view("commit", &t).to_string().into_bytes();
+            as_actor(Some(&c.user), || self.store.remove(&p.var(&var), &Expect::Value(held)))?;
             if let Some(lv) = lv {
                 self.store.remove(&p.var(&links_var(&var)), &Expect::Value(lv.to_string().into_bytes()))?;
             }
             return Ok(());
         }
-        let mut h2 = h.clone();
-        let others: Vec<gitobj::Other<'_>> = all.iter().map(|l| (&*l.h, &l.links)).collect();
-        let tip = gitobj::extend_from(&*self.store, self.alg, &mut h2, &mut links, new, &others)?;
-        if h2.tips() != BTreeSet::from([tip.clone()]) || !h2.extends(&h) {
+        let others: Vec<&Links> = all.iter().map(|l| &l.links).collect();
+        let tip = gitcommits::from_git(&*self.store, self.alg, &mut links, new, &others)?;
+        if let Some(o) = &old_tip
+            && !commits::reaches(&*self.store, &tip, o)?
+        {
             return Err(Error::conflict("non-fast-forward: a history only grows"));
         }
-        if dry || h2 == h {
+        if dry || old_tip.as_ref() == Some(&tip) {
             return Ok(());
         }
         self.save_links(p, &var, lv, &links)?;
-        as_actor(Some(&c.user), || history::save(&*self.store, self.alg, &p.var(&var), old_view.as_ref(), &h2))?;
+        as_actor(Some(&c.user), || commits::advance(&*self.store, &p.var(&var), old_tip.as_deref(), &tip))?;
         Ok(())
     }
 }
@@ -715,11 +719,11 @@ impl PackCache {
     }
 }
 
-/// A history git sees, with its links.
+/// A history git sees, with its tip and its links.
 struct Linked {
     var: String,
     view: View,
-    h: std::sync::Arc<History>,
+    tip: String,
     links: Links,
     links_view: Option<View>,
     before: usize,
@@ -744,12 +748,6 @@ fn var_of(b: &str) -> Option<String> {
         return Some(b.to_string());
     }
     (!b.is_empty() && !b.contains('/')).then(|| format!("h/{b}"))
-}
-
-/// The node a branch names: the tip, or the newest when the history
-/// forks.
-fn tip_of(h: &History) -> Option<NodeId> {
-    h.tip().or_else(|| h.log().into_iter().next())
 }
 
 /// The object an annotated tag names.

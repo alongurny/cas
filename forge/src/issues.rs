@@ -1,11 +1,12 @@
-//! Issues (spec/forge/issues.md): a history, one step per change.
+//! Issues (spec/forge/issues.md): a history of commits, one for each change,
+//! by whoever made it.
 
 use crate::accounts::Caller;
 use crate::gate::as_actor;
 use crate::names::{ProjectId, Role};
 use crate::record::Doc;
 use crate::{Error, Forge, Result, now};
-use cas_version::history::{self, HistNode, Step};
+use cas_version::commits::{self, Commit};
 use cas_version::uni::Value;
 use cas_version::{Edit, Kind, Node, Path, View, build, by_alias, object_at, put, read_blob, update};
 use serde_json::{Value as J, json};
@@ -30,51 +31,49 @@ pub struct Change {
 impl Forge {
     /// The tip version of the issues history (none yet: `None`).
     fn issues_version(&self, p: &ProjectId) -> Result<Option<View>> {
-        let Some(v) = history::head(&*self.store, &p.issues())? else { return Ok(None) };
-        let heads = cas_version::derived::heads(&*self.store, &v)?;
-        Ok(heads.tips.keys().next().map(|t| t.version()))
+        match commits::tip(&*self.store, &p.issues())? {
+            Some(t) => Ok(Some(commits::read(&*self.store, &t)?.version())),
+            None => Ok(None),
+        }
     }
 
     /// Commit `edits` (made by `f` from the current version) to the issues
-    /// history, retried while others commit first.
+    /// history, by `user` and now; retried while others commit first.
     pub(crate) fn commit_issues(
         &self,
         user: &str,
         p: &ProjectId,
         mut f: impl FnMut(Option<&View>) -> Result<BTreeMap<Path, Edit>>,
     ) -> Result<()> {
-        let alg = self.alg;
-        as_actor(Some(user), || {
-            history::edit(&*self.store, alg, &p.issues(), |st, root| {
-                let tip = match root.tips.len() {
-                    0 => None,
-                    1 => root.tips.first().cloned(),
-                    _ => return Err(cas_version::Error::Diverged("the issues have several tips".into())),
-                };
-                let base = match &tip {
-                    Some(t) => t.version(),
-                    None => build(&*self.store, alg, by_alias("dir").unwrap(), &BTreeMap::new())?,
-                };
-                let edits = f(tip.as_ref().map(|_| &base)).map_err(|e| cas_version::Error::Io(e.message))?;
-                let version = update(&*self.store, alg, &base, &edits)?;
-                let id = st.new_id(&version)?;
-                let after = tip.iter().map(|t| (t.clone(), Step::default())).collect();
-                if let Some(t) = &tip {
-                    root.tips.remove(t);
-                }
-                root.tips.insert(id.clone());
-                Ok((BTreeMap::from([(id, Some(HistNode { after, doc: None, notes: BTreeMap::new() }))]), ()))
-            })
-        })
-        .map_err(|e| match e {
-            cas_version::Error::Io(m) => Error::bad(m),
-            e => e.into(),
-        })?;
-        Ok(())
+        let (store, alg, var) = (&*self.store, self.alg, p.issues());
+        let author = commits::put_text(store, alg, "author", user)?;
+        loop {
+            let tip = commits::tip(store, &var)?;
+            let base = match &tip {
+                Some(t) => commits::read(store, t)?.version(),
+                None => build(store, alg, by_alias("directory").unwrap(), &BTreeMap::new())?,
+            };
+            let edits = f(tip.as_ref().map(|_| &base))?;
+            let version = update(store, alg, &base, &edits)?;
+            let parents = tip.iter().map(|t| (t.clone(), None)).collect();
+            let c = Commit {
+                version: version.key().to_string(),
+                author: author.clone(),
+                notes: None,
+                time: now(),
+                parents,
+            };
+            let key = commits::write(store, alg, &c)?;
+            match as_actor(Some(user), || commits::advance(store, &var, tip.as_deref(), &key)) {
+                Err(cas_version::Error::Store(cas_core::Error::Conflict)) => continue,
+                r => return Ok(r?),
+            }
+        }
     }
 
+    /// A document as a file of a directory.
     pub(crate) fn put_doc(&self, d: &Doc) -> Result<Node> {
-        Ok(Node::File(put(&*self.store, self.alg, "uni-txt", d.text().as_bytes())?))
+        Ok(Node::File(put(&*self.store, self.alg, "raw", d.text().as_bytes())?))
     }
 
     /// The issue's document at `version`.

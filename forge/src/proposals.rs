@@ -5,9 +5,9 @@ use crate::gate::as_actor;
 use crate::names::{ProjectId, Role, check_history};
 use crate::record::{self, Doc, Record, list_key};
 use crate::{Error, Forge, Result, now};
-use cas_version::history::{History, NodeId};
-use cas_version::merge::{self, Outcome};
-use cas_version::{View, annotated, stepnotes};
+use cas_version::commits::{self, Commit, Notes, Outcome};
+use cas_version::stepnotes::{self, StepNotes};
+use cas_version::{View, annotated, object_at};
 use serde_json::{Value as J, json};
 
 /// A line of a file: its text, by side and revision, for anchoring.
@@ -63,30 +63,29 @@ impl Forge {
         })
     }
 
-    fn tip_of(&self, view: &View) -> Result<NodeId> {
-        let h = self.history_at(view)?;
-        h.tip().ok_or_else(|| Error::conflict("the history has several tips; merge them first"))
+    /// The version of the commit `view` names.
+    fn version_at(&self, view: &View) -> Result<View> {
+        Ok(commits::read(&*self.store, view.key())?.version())
+    }
+
+    /// The version of the commit with key `key`, if it is one here.
+    fn version_of(&self, key: &str) -> Option<View> {
+        commits::read(&*self.store, key).ok().map(|c| c.version())
     }
 
     /// Add a revision to `r` from the source's and target's current views,
     /// unless the latest has the same source.
     pub(crate) fn revise(&self, p: &ProjectId, r: &mut Record) -> Result<bool> {
-        let src = cas_version::history::head(&*self.store, &p.var(r.doc.s("source")))?
+        let src = record::head(&*self.store, &p.var(r.doc.s("source")))?
             .ok_or_else(|| Error::missing("the proposal's source is gone"))?;
         let k = r.doc.doc("revisions").0.len() as u64;
         if k > 0 && r.views.get(&format!("rev/{k}/source")) == Some(&src) {
             return Ok(false);
         }
-        let tgt = cas_version::history::head(&*self.store, &p.var(r.doc.s("target")))?;
+        let tgt = record::head(&*self.store, &p.var(r.doc.s("target")))?;
         let mut rev = Doc::new();
-        rev.set_num("time", now()).set("tip", self.tip_of(&src)?.to_string());
-        rev.set(
-            "base",
-            match &tgt {
-                Some(t) => self.history_at(t)?.tip().map(|t| t.to_string()).unwrap_or_default(),
-                None => String::new(),
-            },
-        );
+        rev.set_num("time", now()).set("tip", src.key());
+        rev.set("base", tgt.as_ref().map(|t| t.key().to_string()).unwrap_or_default());
         let i = r.doc.push("revisions", rev);
         r.views.insert(format!("rev/{i}/source"), src);
         if let Some(t) = tgt {
@@ -160,11 +159,11 @@ impl Forge {
         let g = s.doc("gates").doc(r.doc.s("target"));
         let latest = r.doc.doc("revisions").0.len() as u64;
         let approvals = r.doc.doc("approvals").0.values().filter(|v| v.as_str() == Some(&latest.to_string())).count();
-        let tip = r.views.get(&format!("rev/{latest}/source")).map(|v| self.tip_of(v)).transpose()?;
+        let tip = r.views.get(&format!("rev/{latest}/source")).map(|v| self.version_at(v)).transpose()?;
         let mut checks = Vec::new();
         for name in g.keys("checks") {
             let status = match &tip {
-                Some(t) => self.check_status(&t.version(), &name)?,
+                Some(t) => self.check_status(t, &name)?,
                 None => "pending".into(),
             };
             checks.push((name, status));
@@ -179,9 +178,9 @@ impl Forge {
         let r = self.proposal(p, n)?;
         let latest = r.doc.doc("revisions").0.len() as u64;
         let src = r.views.get(&format!("rev/{latest}/source")).cloned();
-        let tip = src.as_ref().map(|v| self.tip_of(v)).transpose()?;
+        let tip = src.as_ref().map(|v| self.version_at(v)).transpose()?;
         let base = r.doc.list("revisions").last().map(|rv| rv.s("base").to_string()).unwrap_or_default();
-        let base_version = NodeId::parse(&base).ok().map(|b| b.version());
+        let base_version = self.version_of(&base);
         let mut threads = Vec::new();
         for (id, t) in r.doc.entries("threads") {
             let mut j = t.json();
@@ -194,7 +193,7 @@ impl Forge {
             threads.push(j);
         }
         let diff = match &tip {
-            Some(t) => self.compare(base_version.as_ref(), &t.version())?,
+            Some(t) => self.compare(base_version.as_ref(), t)?,
             None => json!(null),
         };
         let mut j = summary(&r.doc);
@@ -226,7 +225,7 @@ impl Forge {
 
     /// The line (1-based) of thread `t` in the latest revision, and whether
     /// it is outdated (its line is gone).
-    fn anchor_now(&self, r: &Record, t: &Doc, latest: u64, tip: Option<&NodeId>, base: Option<&View>) -> (u64, bool) {
+    fn anchor_now(&self, r: &Record, t: &Doc, latest: u64, tip: Option<&View>, base: Option<&View>) -> (u64, bool) {
         let rev = t.num("revision");
         let line = t.num("line");
         if rev == latest {
@@ -235,15 +234,11 @@ impl Forge {
         let path = t.s("path");
         let side_new = t.s("side") != "old";
         let then = if side_new {
-            r.views.get(&format!("rev/{rev}/source")).and_then(|v| self.tip_of(v).ok()).map(|n| n.version())
+            r.views.get(&format!("rev/{rev}/source")).and_then(|v| self.version_at(v).ok())
         } else {
-            r.doc
-                .list("revisions")
-                .get(rev as usize - 1)
-                .and_then(|rv| NodeId::parse(rv.s("base")).ok())
-                .map(|n| n.version())
+            r.doc.list("revisions").get(rev as usize - 1).and_then(|rv| self.version_of(rv.s("base")))
         };
-        let now = if side_new { tip.map(NodeId::version) } else { base.cloned() };
+        let now = if side_new { tip.cloned() } else { base.cloned() };
         let (Some(then), Some(now)) = (then, now) else { return (line, true) };
         let _ = then;
         let text = t.s("text");
@@ -277,9 +272,9 @@ impl Forge {
             }
             let latest = r.doc.doc("revisions").0.len() as u64;
             let version = if side == "new" {
-                r.views.get(&format!("rev/{latest}/source")).map(|v| self.tip_of(v)).transpose()?.map(|t| t.version())
+                r.views.get(&format!("rev/{latest}/source")).map(|v| self.version_at(v)).transpose()?
             } else {
-                r.doc.list("revisions").last().and_then(|rv| NodeId::parse(rv.s("base")).ok()).map(|b| b.version())
+                r.doc.list("revisions").last().and_then(|rv| self.version_of(rv.s("base")))
             };
             let lines = version.map(|v| file_lines(self, &v, path)).unwrap_or_default();
             let Some(line_text) = lines.get(line as usize - 1) else {
@@ -441,90 +436,104 @@ impl Forge {
             return Err(Error::conflict(format!("the gates do not hold: {}", g.json())));
         }
         let (source, target) = (r.doc.s("source").to_string(), r.doc.s("target").to_string());
-        let (_, mine) = self.require_history(p, &source)?;
+        let src = commits::tip(&*self.store, &p.var(&source))?
+            .ok_or_else(|| Error::missing("the proposal's source is gone"))?;
         let promoted: Vec<Doc> =
             r.doc.entries("threads").into_iter().map(|(_, t)| t).filter(|t| t.flag("promote")).collect();
         let tip = loop {
-            let (old, onto) = match self.history(p, &target)? {
-                Some((v, h)) => (Some(v), (*h).clone()),
-                None => (None, History::default()),
-            };
-            let (mut h, outcome) = if onto.nodes.is_empty() {
-                // Into an empty history: the source's steps as they are.
-                let tip = mine.tip().ok_or_else(|| Error::conflict("the source has several tips"))?;
-                ((*mine).clone(), Outcome::Done(tip))
-            } else {
-                merge::rebase(&*self.store, self.alg, &mine, &onto)?
-            };
-            let tip = match outcome {
-                Outcome::UpToDate => return Err(Error::conflict("nothing to merge: the target has every step")),
-                Outcome::Conflicts(m) => {
-                    let paths: Vec<String> = m.conflicts.iter().map(|c| c.path.to_string()).collect();
-                    return Err(Error::conflict(format!(
-                        "rebase onto {target} conflicts at {}; rebase and push again",
-                        paths.join(", ")
-                    )));
-                }
-                Outcome::Done(t) => t,
+            let old = commits::tip(&*self.store, &p.var(&target))?;
+            let mut tip = match &old {
+                // Into an empty history: the source's commits as they are.
+                None => src.clone(),
+                Some(onto) => match commits::rebase(&*self.store, self.alg, &src, onto)? {
+                    // The source is behind the target or at it.
+                    Outcome::FastForward(_) => {
+                        return Err(Error::conflict("nothing to merge: the target has every step"));
+                    }
+                    // The source is on top of the target already.
+                    Outcome::UpToDate => src.clone(),
+                    Outcome::Done(t) => t,
+                    Outcome::Conflicts(m) => {
+                        let paths: Vec<String> = m.conflicts.iter().map(|c| c.path.to_string()).collect();
+                        return Err(Error::conflict(format!(
+                            "rebase onto {target} conflicts at {}; rebase and push again",
+                            paths.join(", ")
+                        )));
+                    }
+                },
             };
             for t in &promoted {
-                self.promote_into(&mut h, &onto, t)?;
+                tip = self.promote_into(&tip, old.as_deref(), t)?;
             }
-            let saved = as_actor(Some(&c.user), || {
-                cas_version::history::save(&*self.store, self.alg, &p.var(&target), old.as_ref(), &h)
-            });
-            match saved {
-                Ok(_) => break tip,
+            match as_actor(Some(&c.user), || commits::advance(&*self.store, &p.var(&target), old.as_deref(), &tip)) {
+                Ok(()) => break tip,
                 Err(cas_version::Error::Store(cas_core::Error::Conflict)) => continue,
                 Err(e) => return Err(e.into()),
             }
         };
         self.edit_proposal(p, n, |r| {
-            r.doc.set("state", "merged").set("merged", tip.to_string()).set("merged_by", &c.user);
+            r.doc.set("state", "merged").set("merged", tip.clone()).set("merged_by", &c.user);
             Ok(())
         })?;
         self.event("merge", Some(&c.user), |e| {
-            e.set("project", p.to_string()).set_num("number", n).set("var", target.clone()).set("new", tip.to_string());
+            e.set("project", p.to_string()).set_num("number", n).set("var", target.clone()).set("new", tip.clone());
         });
-        Ok(tip.to_string())
+        Ok(tip)
     }
 
-    /// Put thread `t`'s first note on its line, in the newest replayed step
-    /// of `h` (beyond `onto`) that added a line with its text.
-    fn promote_into(&self, h: &mut History, onto: &History, t: &Doc) -> Result<()> {
+    /// Put thread `t`'s first note on its line, in the newest commit from
+    /// `tip` back to `onto` (not included) that added a line with its
+    /// text. That commit and those after it are written again; the new tip.
+    fn promote_into(&self, tip: &str, onto: Option<&str>, t: &Doc) -> Result<String> {
         let Some(note) = t.list("comments").first().map(|c| c.s("text").replace(char::is_control, " ")) else {
-            return Ok(());
+            return Ok(tip.to_string());
         };
-        let path = t.s("path").to_string();
-        let mut id = h.tip();
-        while let Some(cur) = id {
-            if onto.nodes.contains_key(&cur) {
-                break;
-            }
-            let Some((pred, step)) = h.nodes[&cur].after.iter().next().map(|(a, s)| (a.clone(), s.clone())) else {
-                break;
-            };
-            let (before, after) = (pred.version(), cur.version());
-            let (d, lens) = annotated::diff_with_lens(&*self.store, Some(&before), &after)?;
-            let mut notes: Vec<String> =
-                match step.notes.as_ref().filter(|v| v.known_format().is_some_and(|f| f.alias == "step-notes")) {
-                    Some(v) => stepnotes::line_notes(&stepnotes::verify(&*self.store, v.key())?, &d)
-                        .into_iter()
-                        .map(String::from)
-                        .collect(),
-                    None => vec![String::new(); annotated::lines(&d).len()],
-                };
-            if let Some(i) = added_line(&d, &path, &self.thread_text(t)) {
-                notes[i] = note.clone();
-                if let Some(sn) = stepnotes::from_lines(Some(&before), &after, &d, &lens, &notes).map_err(Error::bad)? {
-                    let v = stepnotes::write(&*self.store, self.alg, &sn)?;
-                    h.nodes.get_mut(&cur).unwrap().after.get_mut(&pred).unwrap().notes = Some(v);
-                }
-                return Ok(());
-            }
-            id = Some(pred);
+        let (store, path) = (&*self.store, t.s("path").to_string());
+        // The replayed commits, newest first, each with its one parent.
+        let mut chain: Vec<(Commit, String)> = Vec::new();
+        let mut at = tip.to_string();
+        while Some(at.as_str()) != onto {
+            let c = commits::read(store, &at)?;
+            let mut parents = c.parents.keys();
+            let (Some(pred), None) = (parents.next().cloned(), parents.next()) else { break };
+            chain.push((c, pred.clone()));
+            at = pred;
         }
-        Ok(())
+        for (i, (c, pred)) in chain.iter().enumerate() {
+            let (before, after) = (commits::read(store, pred)?.version(), c.version());
+            let (d, lens) = annotated::diff_with_lens(store, Some(&before), &after)?;
+            let Some(line) = added_line(&d, &path, &self.thread_text(t)) else { continue };
+            let said = match &c.parents[pred] {
+                Some(k) => commits::read_notes(store, k)?,
+                None => Notes::default(),
+            };
+            let sn =
+                StepNotes { before: Some(before.clone()), after: after.clone(), note: said.note, paths: said.paths };
+            let mut notes: Vec<String> = stepnotes::line_notes(&sn, &d).into_iter().map(String::from).collect();
+            if line >= notes.len() {
+                return Ok(tip.to_string());
+            }
+            notes[line] = note;
+            let Some(sn) = stepnotes::from_lines(Some(&before), &after, &d, &lens, &notes).map_err(Error::bad)? else {
+                return Ok(tip.to_string());
+            };
+            let is_dir = |p: &str| -> cas_version::Result<bool> {
+                Ok(object_at(store, &after, &cas_version::Path::new(p)?)?.is_some_and(|v| v.is_dir_view()))
+            };
+            let step = commits::write_notes(store, self.alg, &Notes { note: sn.note, paths: sn.paths }, &is_dir)?;
+            let mut noted = c.clone();
+            noted.parents.insert(pred.clone(), step);
+            let mut key = commits::write(store, self.alg, &noted)?;
+            // The commits after it follow the new one.
+            for (child, _) in chain[..i].iter().rev() {
+                let mut child = child.clone();
+                let (_, step) = child.parents.pop_first().expect("one parent");
+                child.parents.insert(key, step);
+                key = commits::write(store, self.alg, &child)?;
+            }
+            return Ok(key);
+        }
+        Ok(tip.to_string())
     }
 
     /// The text of the line a thread is on, in the revision it was made on.

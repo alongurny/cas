@@ -18,6 +18,7 @@ of `h/dev` and of `h/release` without results, in projects listing it.
 It posts results to `POST /api/v1/runner/results`.
 
 Blame is derived the same way: `derived/<blame>/<X>` for a `uni-bin`
-query `{history, node, path}` at `X` is an annotated file of the path's
-text at the node, each line noting the node id that last changed it,
-computed from the result for the node before it.
+query `{after, node, path}` at `X` is an annotated file of the path's
+text at commit `node`, each line noting the key of the commit that last
+changed it, computed from the result for the commit before it along first
+parents.

@@ -16,29 +16,28 @@ holds the same bytes, so the two cost little more than one.
 | Git ref | History |
 | --- | --- |
 | `HEAD` | `refs/heads/dev` |
-| `refs/heads/<x>` (no `/` in `x`) | `h/<x>`: `dev`, `release`, other shared histories |
+| `refs/heads/<x>` (no `/` in `x`) | `h/<x>`: `dev`, other shared histories of commits |
 | `refs/heads/u/<user>/<name>` | `u/<user>/<name>` |
-| `refs/tags/<t>` | tag `t` of a history; a tag of `h/release` names the commit of a non-release history with the same version when there is one; git's annotated tag object when the project keeps one for `t` naming that commit |
+| `refs/tags/<t>` | release `t` of `h/release`: the newest commit, of any history, whose version is the one released; git's annotated tag object when the project keeps one for `t` naming that commit |
 
-A branch names its history's tip (the newest node when the history forks).
+A branch names its history's tip. The release history is a history of
+releases, not of commits, so it is not a branch: git sees releases as tags.
 
 ## Links
 
 Variable `p/<owner>/<project>/git/<history>` holds history `<history>`'s
-links ([git-links](../formats/git-links.md)): which commit each of its
-nodes is. Node ids are a history's own (two commits with one tree are
-`v` and `v#1` in the order the history met them), so each history has its
-links. A node with no commit yet takes the commit another history of the
-project has for the same node id with the same predecessors, themselves
-the same commits; so a proposal merged by fast forward puts on `h/dev` the
-commit that was pushed. Otherwise it gets a new commit when git first asks
-for it: its version's tree, its predecessors' commits as parents, its
-step's note (or changelog, or the node's doc) as the message, by
-`cas <cas@localhost>` at time 0, so the same history always gives the same
-commits. A history that came from git (a push, a mirror, a migration) keeps
-git's commits. The links reach the commits, so gc keeps them and blob reads
-are scoped by them as by any variable. The variables are readable on the
-wire and change only through the forge; deleting a branch removes both.
+links ([git-commits](../formats/git-commits.md)): which git commit each of
+its commits is. A commit with no git commit yet takes the one another
+history of the project has for it; so a proposal merged by fast forward
+puts on `h/dev` the commit that was pushed. Otherwise it gets a new git
+commit when git first asks for it: its version's tree, its parents'
+commits as parents, its author and time, and as the message the note of
+the step from its first parent (a first commit's own note), so the same
+history always gives the same commits. A history that came from git (a
+push, a mirror, a migration) keeps git's commits. The links reach the
+commits, so gc keeps them and blob reads are scoped by them as by any
+variable. The variables are readable on the wire and change only through
+the forge; deleting a branch removes both.
 
 ## Annotated tags
 
@@ -68,13 +67,14 @@ it again. A kept pack whose checksum is wrong is made again.
 bodies may be gzipped and chunked. A push is checked by the wire's rules
 ([store](store.md)): `h/<x>` needs maintain and must not be protected;
 `u/<user>/...` is the user's own and needs write. A tag push is refused
-(releases make tags: `cas release publish`). An update must be a fast
-forward: the pushed commit's new ancestors become nodes after the
-history's tip, each commit's tree a version (the `tree` directory format,
-as the importer writes it), its message the note of the step from its
-first parent (lines joined with ` / `), a root commit's message its node's
-doc. A commit that is already a node of another history of the project
-brings that node, and what precedes it, along, with their links. Deleting a branch removes
+(releases make tags: `cas release publish`), and so is a push to
+`release`. An update must be a fast forward: each new git commit becomes
+a commit after the history's tip, with git's author and time, its tree a
+version (a `directory`; a name that does not fit the name rule is held
+escaped, [types](../types.md)), its message the note of the step from its
+first parent (lines joined with ` / `), a root commit's message its own
+note. A git commit another history of the project already links brings
+that commit, and what precedes it, along, with its links. Deleting a branch removes
 its history. Each move is an ordinary move of the history variable, by the
 pusher, so proposals, checks and events follow as they do on the wire.
 
