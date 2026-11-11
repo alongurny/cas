@@ -1,5 +1,9 @@
 # git's t/perf, ported
 
+> These measurements were made on the earlier history format, which was
+> removed on 2026-11-11 in favour of histories of commits. They are kept as
+> a record; some commands and functions they name no longer exist.
+
 `bench/perf/run.sh REPO` runs the git `t/perf` tests that have a cas
 counterpart, on both tools, on one corpus. It uses t/perf's method: each time
 is the best of several runs (`REPEAT`, default 3), and setup is not timed.

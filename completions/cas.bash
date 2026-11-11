@@ -33,7 +33,7 @@ _cas() {
     if [[ $cur == -* ]]; then
         local opts='--store --token-file --ca --meta -j -H -n --help --version'
         case $cmd in
-            commit) opts+=' --author --notes --annotate --nodes' ;;
+            commit) opts+=' --author --notes --annotate' ;;
             status) opts+=' --diff' ;;
             stash) opts+=' --author' ;;
             diff) opts+=' --annotated' ;;
@@ -50,8 +50,8 @@ _cas() {
         return
     fi
     case $cmd in
-        '') COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible tag import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
-        help) COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible tag import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
+        '') COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
+        help) COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
         merge|rebase) COMPREPLY=($(compgen -W "$(command cas __histories 2>/dev/null)" -- "$cur")) ;;
         commit) COMPREPLY=($(compgen -f -- "$cur")) ;;
         status) COMPREPLY=($(compgen -f -- "$cur")) ;;

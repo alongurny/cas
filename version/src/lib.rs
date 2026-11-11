@@ -8,7 +8,6 @@
 //! a view of its root directory. See `spec/version.md`.
 
 pub mod access;
-pub mod ancestry;
 pub mod annotated;
 pub mod commits;
 pub mod derived;
@@ -17,13 +16,8 @@ pub mod formats;
 pub mod fs;
 pub mod fsck;
 pub mod gc;
-pub mod git;
-mod git_notes;
 pub mod gitcommits;
 pub mod gitobj;
-pub mod graph;
-pub mod history;
-mod htree;
 pub mod index;
 pub mod merge;
 pub mod proofs;
@@ -220,7 +214,7 @@ pub enum Error {
     Io(String),
     /// An access policy or grant that does not parse (spec/access.md).
     Policy(String),
-    /// Notes where a release history allows none (spec/release-history.md).
+    /// Not a release history, or not something a release can be made of.
     NotRelease(String),
 }
 
@@ -300,6 +294,17 @@ pub fn put(store: &dyn Store, alg: &'static Algorithm, alias: &str, bytes: &[u8]
 
 pub(crate) fn malformed(key: &str, reason: impl Into<String>) -> Error {
     Error::Malformed { key: key.to_string(), reason: reason.into() }
+}
+
+/// The view the variable `name` holds, if it is set.
+pub fn head(store: &dyn Store, name: &str) -> Result<Option<View>> {
+    match store.read(name)? {
+        None => Ok(None),
+        Some(v) => {
+            let s = String::from_utf8(v).map_err(|_| malformed(name, "value is not UTF-8"))?;
+            View::parse(&s).map(Some).map_err(|_| malformed(name, "value is not a view"))
+        }
+    }
 }
 
 #[cfg(test)]

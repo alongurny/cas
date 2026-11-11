@@ -6,9 +6,8 @@
 //! map of its name, input format, output format and spec key. Changing a
 //! function's definition gives a new id, so results never mix.
 
-use crate::history::{History, NodeId};
 use crate::uni::Value;
-use crate::{Error, Path, Result, View, by_alias, malformed, object_at, read_blob, tree, write_blob};
+use crate::{Error, Result, View, by_alias, malformed, read_blob, tree, write_blob};
 use cas_core::algo::{self, Algorithm};
 use cas_core::{Error as CoreError, Expect, Store};
 
@@ -144,77 +143,6 @@ pub static SUMMARY: Function = Function {
     spec: include_str!("../../spec/functions/summary.md"),
     compute: summary,
 };
-
-/// The nodes of `h` whose step changed `path` (or anything under it),
-/// newest first in log order. A node counts when what lies at `path`
-/// differs from every predecessor's; a root counts when `path` exists in
-/// it. Each test is one lookup per side, so the cost follows the depth of
-/// `path`, not the size of the trees.
-pub fn path_log(store: &dyn Store, h: &History, path: &Path) -> Result<Vec<NodeId>> {
-    let at = |id: &NodeId| object_at(store, &id.version(), path);
-    let mut out = Vec::new();
-    for id in h.log() {
-        let here = at(&id)?;
-        let after = &h.nodes[&id].after;
-        let hit = if after.is_empty() {
-            here.is_some()
-        } else {
-            let mut changed = true;
-            for p in after.keys() {
-                if at(p)? == here {
-                    changed = false;
-                }
-            }
-            changed
-        };
-        if hit {
-            out.push(id);
-        }
-    }
-    Ok(out)
-}
-
-/// A history's tips, with the nodes each follows, and its tags: what most
-/// commands need. The history's root holds the tips and tags, so this
-/// reads the root, the parts above the leaves and one leaf per tip.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Heads {
-    pub tips: std::collections::BTreeMap<NodeId, Vec<NodeId>>,
-    pub tags: std::collections::BTreeMap<String, NodeId>,
-}
-
-impl Heads {
-    pub fn of(h: &History) -> Heads {
-        let tips = h.tips().into_iter().map(|t| {
-            let after = h.nodes[&t].after.keys().cloned().collect();
-            (t, after)
-        });
-        Heads { tips: tips.collect(), tags: h.tags.clone() }
-    }
-
-    /// Resolve a tag, `latest` (the single tip) or a tip's node id; `None`
-    /// when only the whole history can answer.
-    pub fn resolve(&self, what: &str) -> Option<NodeId> {
-        if let Some(n) = self.tags.get(what) {
-            return Some(n.clone());
-        }
-        if what == "latest" {
-            return if self.tips.len() == 1 { self.tips.keys().next().cloned() } else { None };
-        }
-        self.tips.keys().find(|t| t.as_str() == what).cloned()
-    }
-}
-
-/// The heads of the history at `input`.
-pub fn heads(store: &dyn Store, input: &View) -> Result<Heads> {
-    let st = crate::history::Stored::open(store, Some(input))?;
-    let mut tips = std::collections::BTreeMap::new();
-    for t in &st.root.tips {
-        let n = st.get(t)?.ok_or_else(|| malformed(input.key(), format!("tip {t} is not a node")))?;
-        tips.insert(t.clone(), n.after.into_keys().collect());
-    }
-    Ok(Heads { tips, tags: st.root.tags.clone() })
-}
 
 /// Record `bytes` as `f(input)`, computed by the caller. Best effort: a
 /// refusal leaves the next reader to compute it.

@@ -756,26 +756,6 @@ fn tree_blobs(alg: &'static Algorithm, items: &[Item]) -> (String, Vec<(String, 
     (top, out)
 }
 
-/// The leaf of a `tree` directory holding `items` (sorted, valid names,
-/// at least one), as [`tree_cut`] cuts them: its bytes.
-pub(crate) fn tree_leaf(items: &[Item]) -> Vec<u8> {
-    debug_assert!(!items.is_empty());
-    encode_items(items)
-}
-
-/// Where the leaves of a `tree` directory end: after each index whose
-/// name has height above 0, and after the last.
-pub(crate) fn tree_cut<'n>(names: impl ExactSizeIterator<Item = &'n str>) -> Vec<(usize, u32)> {
-    let n = names.len();
-    names
-        .enumerate()
-        .filter_map(|(i, name)| {
-            let h = height(name);
-            (h > 0 || i + 1 == n).then_some((i, h))
-        })
-        .collect()
-}
-
 /// The blobs above `leaves` (greatest name, key, that name's height) of a
 /// `tree` directory, appended to `out`; the key of the top.
 pub(crate) fn tree_upper(

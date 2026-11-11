@@ -7,8 +7,7 @@
 //! `lines` blob for each noted file and `runs` for its lines, each note a
 //! `note` blob stored once.
 
-use crate::history::{History, NodeId, Step};
-use crate::stepnotes::{PathNotes, Runs, StepNotes};
+use crate::stepnotes::{PathNotes, Runs};
 use crate::typed::{NONE, RecV, Value, by_type, check_text, key_bytes, key_text};
 use crate::{Error, Result, View, by_alias, malformed, read_blob};
 use cas_core::algo::Algorithm;
@@ -115,7 +114,7 @@ pub fn one_line(s: &str) -> String {
 /// The newest commit of history `name`: `None` when the variable is unset,
 /// an error when it holds something other than a commit.
 pub fn tip(store: &dyn Store, name: &str) -> Result<Option<String>> {
-    match crate::history::head(store, name)? {
+    match crate::head(store, name)? {
         None => Ok(None),
         Some(v) if is_commit(&v) => Ok(Some(v.key)),
         Some(v) => Err(Error::UnknownFormat(format!("history {name} holds {v}, not a commit"))),
@@ -172,6 +171,26 @@ pub fn log(store: &dyn Store, tip: &str) -> Result<Vec<(String, Commit)>> {
             }
         }
         out.push((k, c));
+    }
+    Ok(out)
+}
+
+/// The commits `tip` reaches without passing one `stop` names (which is
+/// left out, with all before it), newer before older along each line.
+pub fn log_until(store: &dyn Store, tip: &str, stop: &dyn Fn(&str) -> bool) -> Result<Vec<(String, Commit)>> {
+    let mut out = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut wave = vec![tip.to_string()];
+    while !wave.is_empty() {
+        wave.retain(|k| !stop(k) && seen.insert(k.clone()));
+        let mut next = Vec::new();
+        for (k, r) in wave.iter().zip(store.read_many(&wave)) {
+            let b = r?.ok_or_else(|| Error::Missing(k.clone()))?;
+            let c = Commit::decode(&b).map_err(|e| malformed(k, e))?;
+            next.extend(c.parents.keys().cloned());
+            out.push((k.clone(), c));
+        }
+        wave = next;
     }
     Ok(out)
 }
@@ -502,107 +521,6 @@ impl<'a> Converter<'a> {
         self.dirs.insert(v.key.clone(), top.clone());
         Ok(top)
     }
-
-    fn is_dir(&self, versions: &[&View], path: &str) -> Result<bool> {
-        let path = crate::Path::new(path)?;
-        for v in versions {
-            if let Some(o) = crate::object_at(self.store, v, &path)? {
-                return Ok(o.is_dir());
-            }
-        }
-        Ok(false)
-    }
-
-    /// The annotation of a step of the earlier `history` format.
-    fn step(&mut self, before: &View, after: &View, step: &Step) -> Result<Option<String>> {
-        let notes = match &step.notes {
-            Some(v) if v.known_format().is_some_and(|f| f.alias == "step-notes") => {
-                let sn = StepNotes::decode(&read_blob(self.store, v.key())?).map_err(|e| malformed(v.key(), e))?;
-                Notes { note: sn.note, paths: sn.paths }
-            }
-            Some(v) => return Err(Error::UnknownFormat(format!("step notes {v} are not step-notes"))),
-            None => Notes { note: step.changelog.as_deref().map(one_line).unwrap_or_default(), paths: BTreeMap::new() },
-        };
-        write_notes(self.store, self.alg, &notes, &|p| self.is_dir(&[after, before], p))
-    }
-
-    /// The commits of the history `h`: each node's commit key. `meta` gives
-    /// a node's author and time, which the earlier format did not keep.
-    pub fn history(
-        &mut self,
-        h: &History,
-        meta: &dyn Fn(&NodeId) -> (String, u64),
-    ) -> Result<BTreeMap<NodeId, String>> {
-        let mut out: BTreeMap<NodeId, String> = BTreeMap::new();
-        let mut authors: HashMap<String, String> = HashMap::new();
-        for (id, node) in crate::history::predecessors_first(h.nodes.clone()) {
-            let old = id.version();
-            let version = self.directory(&old)?;
-            let mut parents = BTreeMap::new();
-            for (p, step) in &node.after {
-                let parent = out.get(p).ok_or_else(|| Error::Missing(format!("node {p}")))?.clone();
-                parents.insert(parent, self.step(&p.version(), &old, step)?);
-            }
-            let mut notes =
-                Notes { note: node.doc.as_deref().map(one_line).unwrap_or_default(), paths: BTreeMap::new() };
-            for (path, v) in &node.notes {
-                let a = crate::annotated::Annotated::decode(&read_blob(self.store, v.key())?)
-                    .map_err(|e| malformed(v.key(), e))?;
-                if a.runs.iter().any(|r| !r.1.is_empty()) {
-                    notes.paths.insert(path.clone(), PathNotes { note: String::new(), old: None, new: Some(a.runs) });
-                }
-            }
-            let notes = write_notes(self.store, self.alg, &notes, &|p| self.is_dir(&[&old], p))?;
-            let (author, time) = meta(&id);
-            let author = match authors.get(&author) {
-                Some(k) => k.clone(),
-                None => {
-                    let k = put_text(self.store, self.alg, "author", &one_line(&author))?;
-                    authors.insert(author, k.clone());
-                    k
-                }
-            };
-            let c = Commit { version, author, notes, time, parents };
-            out.insert(id, write(self.store, self.alg, &c)?);
-        }
-        Ok(out)
-    }
-}
-
-/// Import every commit reachable from `rev` in the git repository `repo`
-/// as commits: the key of the newest, and how many there are. A git
-/// commit's message becomes the note on its steps and its subject the note
-/// on the lines it changed; its author and committer time are kept.
-pub fn import_git(
-    store: &dyn Store,
-    alg: &'static Algorithm,
-    repo: &std::path::Path,
-    rev: &str,
-) -> Result<(String, crate::git::Imported)> {
-    let (h, n, _) = crate::git::import_with_filters(store, alg, repo, rev, true)?;
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["log", "--encoding=UTF-8", "--format=%H%x1f%an <%ae>%x1f%ct", rev])
-        .output()?;
-    if !out.status.success() {
-        return Err(Error::Io(format!("git log: {}", String::from_utf8_lossy(&out.stderr).trim())));
-    }
-    let mut meta: HashMap<NodeId, (String, u64)> = HashMap::new();
-    for l in String::from_utf8_lossy(&out.stdout).lines() {
-        let f: Vec<&str> = l.split('\x1f').collect();
-        let [commit, author, time] = f[..] else { return Err(Error::Io(format!("bad git log line {l:?}"))) };
-        if let Some(id) = n.nodes.get(commit) {
-            meta.insert(id.clone(), (author.to_string(), time.parse().unwrap_or(0)));
-        }
-    }
-    let commits = Converter::new(store, alg).history(&h, &|id| meta.get(id).cloned().unwrap_or_default())?;
-    let tips = h.tips();
-    let tip = match (tips.len(), tips.first()) {
-        (1, Some(t)) => commits[t].clone(),
-        _ => return Err(Error::Diverged(format!("{rev} (it has {} tips)", tips.len()))),
-    };
-    Ok((tip, n))
 }
 
 // Sync, merge and rebase.

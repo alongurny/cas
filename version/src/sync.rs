@@ -9,7 +9,6 @@
 //! a walk can stop at the first blob the destination already holds.
 
 use crate::formats::{self, Kind};
-use crate::history;
 use crate::{Error, Result, View, is_blob_key, read_blob};
 use cas_core::keyhash::DigestSet;
 use cas_core::keyhash::{KeyMap, KeySet};
@@ -39,11 +38,8 @@ pub struct Copied {
 pub fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(d), _)) => d.blob_children(r.key(), &read_blob(store, r.key())?),
-        Some((_, "history" | "history-part")) => Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default()),
         Some((_, a @ ("annotated" | "diff"))) => Ok(crate::annotated::children(a, &read_blob(store, r.key())?)),
-        Some((_, "step-notes")) => Ok(crate::stepnotes::children(&read_blob(store, r.key())?)),
         Some((_, "git-tree" | "git-commit" | "git-tag")) => Ok(crate::gitobj::children(&read_blob(store, r.key())?)),
-        Some((_, "git-links")) => Ok(crate::gitobj::links_children(&read_blob(store, r.key())?)),
         Some((_, "git-commits")) => Ok(crate::gitcommits::links_children(&read_blob(store, r.key())?)),
         Some((_, "git-tags")) => Ok(crate::gitobj::tags_children(&read_blob(store, r.key())?)),
         Some((_, a)) if crate::typed::by_type(a).is_some() => {
@@ -107,18 +103,9 @@ pub(crate) fn children_of(r: &View, bytes: &[u8]) -> Result<Option<Vec<View>>> {
 fn children_of_light(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<Vec<View>>> {
     match r.known_format().map(|f| (&f.kind, f.alias)) {
         Some((Kind::Dir(d), _)) => Ok(Some(d.blob_children_light(r.key(), bytes, skip)?)),
-        Some((_, "history")) => {
-            let root = crate::htree::Root::decode(bytes).map_err(|e| crate::malformed(r.key(), e))?;
-            Ok(Some(root.nodes.into_iter().collect()))
-        }
-        Some((_, "history-part")) => Ok(Some(crate::htree::part_children(r.key(), bytes)?)),
         Some((_, a @ ("annotated" | "diff"))) => Ok(Some(crate::annotated::children(a, bytes))),
-        Some((_, "step-notes")) => Ok(Some(crate::stepnotes::children(bytes))),
         Some((_, "git-tree" | "git-commit" | "git-tag")) => {
             Ok(Some(crate::gitobj::children(bytes).into_iter().filter(|v| !skip.contains(v.key())).collect()))
-        }
-        Some((_, "git-links")) => {
-            Ok(Some(crate::gitobj::links_children(bytes).into_iter().filter(|v| !skip.contains(v.key())).collect()))
         }
         Some((_, "git-commits")) => {
             Ok(Some(crate::gitcommits::links_children(bytes).into_iter().filter(|v| !skip.contains(v.key())).collect()))
@@ -142,40 +129,90 @@ fn wrong_bytes(key: &str) -> Error {
 /// parents (the closure invariant). Breadth first: each depth is one
 /// `has_many` on `dst` and one `read_many` on `src`. A blob is written as
 /// soon as everything under it is in the destination, so only containers
-/// still waiting on their subtrees are held in memory. A history's nodes
-/// are copied in groups of [`ROOTS_PER_ROUND`], oldest first, which bounds
-/// that to a group's subtrees: later groups find most of their trees
-/// present already.
+/// still waiting on their subtrees are held in memory. The commits
+/// a commit reaches are copied in groups of [`ROOTS_PER_ROUND`], oldest
+/// first, which bounds that to a group's subtrees and the round trips to a
+/// few for each group.
 pub fn copy(src: &dyn Store, dst: &dyn Store, root: &View) -> Result<Copied> {
-    let is_history = root.known_format().is_some_and(|f| f.alias == "history");
-    if is_history && !dst.has_many(&[root.key().to_string()])?[0] {
-        let h = history::read(src, root)?;
-        let versions = h.log().into_iter().rev().map(|id| id.version()).collect();
-        return copy_history(src, dst, root, versions, HashSet::new());
+    if crate::commits::is_commit(root) {
+        let missing = missing_commits(src, dst, root.key())?;
+        return std::thread::scope(|sc| {
+            copy_roots(Copier::new(src, dst, HashSet::new(), Writer::start(sc, dst)), dst, root, missing)
+        });
     }
     std::thread::scope(|sc| Copier::new(src, dst, HashSet::new(), Writer::start(sc, dst)).copy_root(root))
 }
 
-/// Copy the history at `root` in `src` into `dst`: first `versions`
-/// (oldest first, in groups of [`ROOTS_PER_ROUND`], each as soon as it is
-/// known to be missing), then the history's own blobs, skipping the parts
-/// `dst` already holds. Push passes only the versions of nodes the
-/// destination's history lacks, and as `known` the versions it is known to
-/// hold: its local diff walk, as git's push negotiates against the
-/// remote's ref.
-fn copy_history(
-    src: &dyn Store,
-    dst: &dyn Store,
-    root: &View,
-    versions: Vec<View>,
-    known: HashSet<String>,
-) -> Result<Copied> {
-    std::thread::scope(|sc| {
-        copy_history_with(Copier::new(src, dst, known, Writer::start(sc, dst)), dst, root, versions)
-    })
+/// The commits `tip` reaches in `src` that `dst` lacks, parents before
+/// children. A commit `dst` holds is there with all before it (the closure
+/// invariant), so the walk stops at each; it asks `dst` about commits in
+/// groups that double in size, so a short push costs a few questions and a
+/// long one few for its length.
+fn missing_commits(src: &dyn Store, dst: &dyn Store, tip: &str) -> Result<Vec<View>> {
+    use crate::commits::{self, Commit};
+    let mut read: HashMap<String, Commit> = HashMap::new();
+    let mut missing: HashSet<String> = HashSet::new();
+    let mut present: HashSet<String> = HashSet::new();
+    // Each commit met, with the commits it was met from.
+    let mut via: HashMap<String, Vec<String>> = HashMap::new();
+    let mut queue: std::collections::VecDeque<String> = [tip.to_string()].into();
+    let mut size = 1;
+    while !queue.is_empty() {
+        let mut group = Vec::new();
+        while group.len() < size
+            && let Some(k) = queue.pop_front()
+        {
+            // Met only from commits `dst` holds: it holds this one too.
+            if via.get(&k).is_some_and(|from| from.iter().all(|f| present.contains(f))) {
+                present.insert(k);
+                continue;
+            }
+            let c = commits::read(src, &k)?;
+            for p in c.parents.keys() {
+                let from = via.entry(p.clone()).or_default();
+                if from.is_empty() {
+                    queue.push_back(p.clone());
+                }
+                from.push(k.clone());
+            }
+            read.insert(k.clone(), c);
+            group.push(k);
+        }
+        if group.is_empty() {
+            continue;
+        }
+        let have = dst.has_many(&group)?;
+        for (k, h) in group.into_iter().zip(have) {
+            if h {
+                present.insert(k);
+            } else {
+                missing.insert(k);
+            }
+        }
+        size = (size * 2).min(ROOTS_PER_ROUND);
+    }
+    // Parents first.
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut stack = vec![(tip.to_string(), false)];
+    while let Some((k, done)) = stack.pop() {
+        if done {
+            out.push(commits::view("commit", &k));
+            continue;
+        }
+        if !missing.contains(&k) || !seen.insert(k.clone()) {
+            continue;
+        }
+        stack.push((k.clone(), true));
+        for p in read[&k].parents.keys() {
+            stack.push((p.clone(), false));
+        }
+    }
+    Ok(out)
 }
 
-fn copy_history_with(mut c: Copier, dst: &dyn Store, root: &View, versions: Vec<View>) -> Result<Copied> {
+/// Copy `versions` (in groups of [`ROOTS_PER_ROUND`], in order), then `root`.
+fn copy_roots(mut c: Copier, dst: &dyn Store, root: &View, versions: Vec<View>) -> Result<Copied> {
     let mut seen = HashSet::new();
     let versions: Vec<View> = versions.into_iter().filter(|v| seen.insert(v.key().to_string())).collect();
     // One batched check for all of them first: a push of one commit finds
@@ -519,63 +556,34 @@ pub enum Outcome {
 
 /// Make `to` in `dst` hold the history `from` names in `src`, copying what
 /// is needed. Fast-forward only: the name moves when the destination has
-/// none or the new history extends its own. Otherwise `Diverged`; rebase
-/// or merge is the caller's choice.
+/// none or the new history extends its own (a history of commits reaches
+/// the commit there; a release history has the release there in its log).
+/// Otherwise `Behind`; rebase or merge is the caller's choice.
 pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(Outcome, Copied)> {
-    let head = history::head(src, from)?.ok_or_else(|| Error::Missing(format!("history {from} in the source")))?;
+    let head = crate::head(src, from)?.ok_or_else(|| Error::Missing(format!("history {from} in the source")))?;
     if crate::commits::is_commit(&head) {
         return crate::commits::push(src, dst, from, to);
     }
-    let theirs = history::head(dst, to)?;
+    if !crate::releases::is_release(&head) {
+        return Err(Error::UnknownFormat(format!("{from} holds {head}, not a history")));
+    }
+    let theirs = crate::head(dst, to)?;
     if theirs.as_ref() == Some(&head) {
         return Ok((Outcome::UpToDate, Copied::default()));
     }
-    let mine = history::Stored::open(src, Some(&head))?;
-    // The destination's history, read locally when the source has it (the
-    // usual push: the source fetched it before committing on top). Only
-    // the leaves that differ are read.
-    let added = match &theirs {
-        None => None,
-        Some(t) => {
-            let at: &dyn Store = if src.has_many(&[t.key().to_string()])?[0] { src } else { dst };
-            let c = history::Stored::open(at, Some(t))?.changed(&mine)?;
-            if c.old.iter().any(|(id, n)| c.added.get(id).is_none_or(|m| m.after != n.after)) {
-                return Err(Error::Behind(to.to_string()));
-            }
-            Some(c)
+    if let Some(t) = &theirs {
+        let ours = crate::releases::log(src, head.key())?;
+        if !crate::releases::is_release(t) || !ours.iter().any(|(k, _, _)| k == t.key()) {
+            return Err(Error::Behind(to.to_string()));
         }
-    };
-    let copied = if dst.has_many(&[head.key().to_string()])?[0] {
-        Copied { present: 1, ..Copied::default() }
-    } else {
-        match added {
-            // The destination holds its history whole, so the versions of
-            // nodes it shares with ours are there.
-            Some(c) => {
-                let known = c.same.iter().chain(c.old.keys()).map(|id| id.version().key().to_string()).collect();
-                copy_history(src, dst, &head, c.added.keys().map(|id| id.version()).collect(), known)?
-            }
-            None => copy(src, dst, &head)?,
-        }
-    };
+    }
+    let copied = copy(src, dst, &head)?;
     let expect = match &theirs {
         Some(t) => Expect::Value(t.to_string().into_bytes()),
         None => Expect::Absent,
     };
     match dst.write(to, head.to_string().as_bytes(), &expect) {
-        Ok(()) => {
-            // Note what it replaced, so the destination's graph and
-            // ancestry of the new history start from the old one's.
-            if let Some(t) = &theirs
-                && let Some(alg) = cas_core::key::classify(head.key()).and_then(|k| match k {
-                    cas_core::key::Parsed::Blob { alg, .. } => cas_core::algo::lookup(alg),
-                    cas_core::key::Parsed::Var => None,
-                })
-            {
-                crate::graph::record_after_save(dst, alg, t, &head);
-            }
-            Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied))
-        }
+        Ok(()) => Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied)),
         // The destination moved while we copied; the copy is still valid.
         Err(CoreError::Conflict) => Err(Error::Behind(to.to_string())),
         Err(e) => Err(e.into()),

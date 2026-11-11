@@ -159,14 +159,13 @@ impl<'a> Walker<'a> {
                     continue;
                 }
             };
-            // A history is checked whole too: its tree's shape and its tips.
-            // Its versions are walked oldest first, each before the next: a
-            // version's blobs are mostly deltas on the one before's, so a
-            // walk in that order decodes each blob once.
-            let mut vs = Vec::new();
-            if v.known_format().is_some_and(|f| f.alias == "history") {
-                match crate::history::read(store, &v) {
-                    Ok(h) => vs = h.log().into_iter().map(|id| (v.key().to_string(), id.version())).collect(),
+            // A history's versions are walked oldest first, each before the
+            // next: a version's blobs are mostly deltas on the one before's,
+            // so a walk in that order decodes each blob once.
+            let mut vs: Vec<(String, View)> = Vec::new();
+            if defer.is_some() && crate::commits::is_commit(&v) {
+                match crate::commits::log_until(store, v.key(), &|_| false) {
+                    Ok(log) => vs = log.into_iter().map(|(k, c)| (k, c.version())).collect(),
                     Err(Error::Missing(_)) => {}
                     Err(e) => r.bad.push((v.key().to_string(), e.to_string())),
                 }
@@ -174,7 +173,7 @@ impl<'a> Walker<'a> {
             // Notes are checked against their files after the walk, which
             // counts the lines of every text file it reads.
             match v.known_format().map(|f| f.alias) {
-                Some("annotated" | "step-notes") => self.notes.push(v.clone()),
+                Some("annotated") => self.notes.push(v.clone()),
                 Some(_) if crate::annotated::is_text_format(&v) && !bytes.contains(&0) => {
                     self.lens.insert(v.key().to_string(), crate::annotated::lines(&bytes).len());
                 }
@@ -218,7 +217,6 @@ fn check_notes(store: &dyn Store, notes: &[View], lens: &HashMap<String, usize>)
         let hs: Vec<_> = (0..threads)
             .map(|_| {
                 sc.spawn(|| {
-                    let mut memo = crate::dir::FindMemo::default();
                     let mut bad = Vec::new();
                     // Runs of nodes in order, so the memo meets neighbours.
                     loop {
@@ -227,20 +225,17 @@ fn check_notes(store: &dyn Store, notes: &[View], lens: &HashMap<String, usize>)
                             break;
                         };
                         for v in run {
-                            let res = match v.known_format().map(|f| f.alias) {
-                                Some("step-notes") => crate::stepnotes::verify_with(store, v.key(), &mut memo, &count),
-                                _ => crate::annotated::Annotated::decode(
-                                    &crate::read_blob(store, v.key()).unwrap_or_default(),
-                                )
-                                .map_err(|e| crate::malformed(v.key(), e))
-                                .and_then(|a| match count(&a.target)? {
-                                    Some(n) if n == a.len() => Ok(()),
-                                    n => Err(crate::malformed(
-                                        v.key(),
-                                        format!("notes for {} lines, the text has {n:?}", a.len()),
-                                    )),
-                                }),
-                            };
+                            let res = crate::annotated::Annotated::decode(
+                                &crate::read_blob(store, v.key()).unwrap_or_default(),
+                            )
+                            .map_err(|e| crate::malformed(v.key(), e))
+                            .and_then(|a| match count(&a.target)? {
+                                Some(n) if n == a.len() => Ok(()),
+                                n => Err(crate::malformed(
+                                    v.key(),
+                                    format!("notes for {} lines, the text has {n:?}", a.len()),
+                                )),
+                            });
                             match res {
                                 Ok(()) | Err(Error::Missing(_)) => {}
                                 Err(e) => bad.push((v.key().to_string(), e.to_string())),

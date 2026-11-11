@@ -261,26 +261,6 @@ pub fn diff_with_lens(store: &dyn Store, a: Option<&View>, b: &View) -> Result<(
     Ok((out, lens))
 }
 
-/// The hunks between two files (none: absent), as a diff of `new` lists
-/// them; `None` when either is not text.
-pub(crate) fn file_diff(store: &dyn Store, path: &str, old: Option<&View>, new: &View) -> Result<Option<FileDiff>> {
-    let text = |v: Option<&View>| -> Result<Option<Vec<u8>>> {
-        match v {
-            Some(v) if is_text_format(v) => {
-                let b = read_blob(store, v.key())?;
-                Ok((!b.contains(&0)).then_some(b))
-            }
-            Some(_) => Ok(None),
-            None => Ok(Some(Vec::new())),
-        }
-    };
-    let (Some(x), Some(y)) = (text(old)?, text(Some(new))?) else { return Ok(None) };
-    let mut d = format!("{DIFF}{new} {new}\npath {path}\nold {}\nnew {new}\n", view_text(old)).into_bytes();
-    hunks(&mut d, &x, &y);
-    let (_, _, mut f) = parse_diff(&d).map_err(|e| malformed(new.key(), e))?;
-    Ok(f.pop())
-}
-
 /// Formats whose files a diff shows by lines.
 pub(crate) fn is_text_format(v: &View) -> bool {
     v.known_format().is_some_and(|f| matches!(f.alias, "raw" | "exec"))
@@ -490,12 +470,6 @@ pub fn apply(old: &[u8], f: &FileDiff) -> std::result::Result<Vec<u8>, String> {
     }
     x[at..].iter().for_each(|l| out.extend_from_slice(l));
     Ok(out)
-}
-
-/// Write the diff from `a` to `b`: its view.
-pub fn write_diff(store: &dyn Store, alg: &'static Algorithm, a: Option<&View>, b: &View) -> Result<View> {
-    let key = write_blob(store, alg, &diff(store, a, b)?)?;
-    Ok(View { format: by_alias("diff").unwrap().id().to_string(), key })
 }
 
 /// The children of an annotation (its target) or a diff (its versions).

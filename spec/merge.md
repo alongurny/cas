@@ -19,34 +19,25 @@ from whichever side changed them; a chunk both changed differently makes the pat
 
 The result is ours with their non-conflicting changes applied. At each conflict it keeps ours,
 and nothing of theirs under or above a conflicted path is applied. Each conflict is reported with
-its base, ours and theirs nodes. A clean merge is symmetric: swapping ours and theirs gives the
+its base, ours and theirs entries. A clean merge is symmetric: swapping ours and theirs gives the
 same version.
 
 ## Histories
 
-There are no parents, so a single version has nothing to merge. Merging is
-a history operation (spec/history.md), and rebasing is preferred to it.
+A merge and a rebase work on commits ([formats/commit.md](formats/commit.md)).
 
-- `merge_nodes(history, a, b, step)`: if `a` already follows `b`, up to
-  date. Otherwise the base is the best common ancestor in the history.
-  After a criss-cross there are several; their versions are merged
-  recursively into a virtual base, with conflicts inside it resolved to
-  the first ancestor's side. Unrelated lines merge against the empty
-  tree. A clean merge adds a node following both, with `step` from each.
-  On conflicts nothing is added; the caller gets the merged version (ours
-  at each conflict) and the conflict list.
-- `combine(ours, theirs)`: the union of two histories (ours wins on
-  steps, tags and docs), so two diverged copies of a history can be merged
-  as two tips of one.
-- `rebase(mine, onto)`: the nodes `mine` has beyond the newest node it
-  shares with `onto` (they must form one line) are replayed onto `onto`'s
-  tip, oldest first: each is merged three-way with its predecessor as
-  base, the replayed tip as ours and the node as theirs. Steps and docs
-  are kept. The result is `onto` plus the replayed line, so it extends
-  `onto`. A conflict stops the rebase and returns it.
-- `publish(mine, public, step)`: one node with the version of `mine`'s
-  tip, after `public`'s tip, with `step`. `mine` must already contain
-  `public`'s tip (rebase first). The private nodes are not copied.
+- `merge(ours, theirs)`: up to date when `ours` reaches `theirs`; a fast
+  forward when `theirs` reaches `ours`. Otherwise the base is the newest
+  commit both reach, and a clean merge makes a commit of the merged version
+  with both as parents and no step notes. On conflicts nothing is written;
+  the caller gets the merged version (ours at each conflict) and the
+  conflict list. Two histories that share no commit are not merged.
+- `rebase(ours, onto)`: the commits `ours` has and `onto` lacks (they must
+  form one line, with no merge among them) are replayed onto `onto`, oldest
+  first: each is merged three-way with its parent as base, the replayed tip
+  as ours and the commit as theirs. Authors and times stay. A step keeps
+  its annotation where its line runs still fit the files, else its notes
+  without the runs. A conflict stops the rebase and returns it.
 
 ## Conformance
 
@@ -56,9 +47,5 @@ a history operation (spec/history.md), and rebasing is preferred to it.
 - path-level merges: disjoint edits, identical edits, edit/edit, remove-directory/edit-inside,
   replace-directory/add-inside, and new directories on both sides;
 - a line-level merge inside one file;
-- merging two tips of a history: clean, up to date, and conflicts that add nothing;
-- rebasing private work onto a moved public history, publishing it as one node, and a rebase
-  that stops at a conflict;
-- a criss-cross merge through a virtual base;
 - property tests on random trees: merging with an unchanged side gives the other side, identical
   sides merge to themselves, and clean merges are symmetric.

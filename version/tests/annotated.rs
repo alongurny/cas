@@ -4,9 +4,7 @@ use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Policy, Session, Store, Who};
 use cas_version::annotated::{self, Annotated};
-use cas_version::history::{self, Step};
-use cas_version::stepnotes;
-use cas_version::{Node, Path, View, build, formats, gc, put, read_blob, sync};
+use cas_version::{Node, Path, View, build, formats, put, read_blob};
 use std::collections::BTreeMap;
 
 fn b3() -> &'static Algorithm {
@@ -15,14 +13,6 @@ fn b3() -> &'static Algorithm {
 
 fn store() -> Session {
     CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive()).session(Who::anonymous())
-}
-
-/// Step notes from `a` to `b`: `note` of each line of their diff.
-fn step_notes(s: &dyn Store, a: &View, b: &View, note: impl Fn(&[u8]) -> &'static str) -> View {
-    let (d, lens) = annotated::diff_with_lens(s, Some(a), b).unwrap();
-    let notes: Vec<String> = annotated::lines(&d).into_iter().map(|l| note(l).to_string()).collect();
-    let sn = stepnotes::from_lines(Some(a), b, &d, &lens, &notes).unwrap().unwrap();
-    stepnotes::write(s, b3(), &sn).unwrap()
 }
 
 fn version(s: &dyn Store, files: &[(&str, &[u8])]) -> View {
@@ -124,132 +114,6 @@ fn a_diff_lists_added_removed_and_binary_files() {
     assert!(annotated::check_diff(root.as_bytes()).is_ok());
 }
 
-/// A step's notes are kept with the history: read back, copied by a sync,
-/// kept by gc.
-#[test]
-fn step_notes_live_in_the_history() {
-    let s = store();
-    let a = version(&s, &[("f", b"one\ntwo\n")]);
-    let b = version(&s, &[("f", b"one\n2\n")]);
-    history::commit(&s, b3(), "main", &a, Step::default(), None).unwrap();
-    let nv = step_notes(&s, &a, &b, |l| if l == b"+2\n" { "two as a digit" } else { "" });
-    // Kept on the new file's second line; no diff is stored.
-    let sn = stepnotes::verify(&s, nv.key()).unwrap();
-    assert_eq!(sn.paths["f"].new, Some(vec![(1, String::new()), (1, "two as a digit".into())]));
-    assert_eq!(sn.paths["f"].old, None);
-    let id = history::commit(&s, b3(), "main", &b, Step { notes: Some(nv.clone()), ..Step::default() }, None).unwrap();
-    formats::publish(&s).unwrap();
-    let head = history::head(&s, "main").unwrap().unwrap();
-    let h = history::read(&s, &head).unwrap();
-    let step = h.nodes[&id].after.values().next().unwrap();
-    assert_eq!(step.notes.as_ref(), Some(&nv));
-    let shown = String::from_utf8(stepnotes::show(&s, nv.key()).unwrap()).unwrap();
-    assert!(shown.contains("| -two\n# two as a digit\n| +2\n"), "{shown}");
-    // The authoring form goes back to the same notes.
-    let again = stepnotes::from_form(&s, Some(&a), &b, shown.as_bytes()).unwrap().unwrap();
-    assert_eq!(again, sn);
-    // Another store gets the notes with the history.
-    let t = store();
-    sync::copy(&s, &t, &head).unwrap();
-    assert_eq!(stepnotes::show(&t, nv.key()).unwrap(), stepnotes::show(&s, nv.key()).unwrap());
-    // gc keeps them.
-    for _ in 0..3 {
-        gc::collect(&s, b3()).unwrap();
-    }
-    assert!(stepnotes::verify(&s, nv.key()).is_ok());
-}
-
-/// A node's annotated files are kept with it, copied and kept by gc.
-#[test]
-fn node_notes_annotate_files_as_they_are() {
-    let s = store();
-    let v = version(&s, &[("f", b"alpha\nbeta\n")]);
-    let file = cas_version::object_at(&s, &v, &Path::new("f").unwrap()).unwrap().unwrap();
-    let n = annotated::write(&s, b3(), &file, &["the first".into(), String::new()]).unwrap();
-    let notes = BTreeMap::from([("f".to_string(), n.clone())]);
-    let id = history::commit_with_notes(&s, b3(), "main", &v, Step::default(), None, notes.clone()).unwrap();
-    let head = history::head(&s, "main").unwrap().unwrap();
-    let h = history::read(&s, &head).unwrap();
-    assert_eq!(h.nodes[&id].notes, notes);
-    assert!(h.has_notes());
-    formats::publish(&s).unwrap();
-    let t = store();
-    sync::copy(&s, &t, &head).unwrap();
-    assert_eq!(annotated::show(&t, n.key()).unwrap(), annotated::show(&s, n.key()).unwrap());
-    for _ in 0..3 {
-        gc::collect(&s, b3()).unwrap();
-    }
-    assert!(annotated::verify(&s, n.key()).is_ok());
-    // A note on something that is not an annotation is refused.
-    let bad = cas_version::uni::Value::map([(
-        "nodes",
-        cas_version::uni::Value::map([(
-            id.as_str(),
-            cas_version::uni::Value::map([(
-                "notes",
-                cas_version::uni::Value::map([("f", cas_version::uni::Value::str(file.to_string()))]),
-            )]),
-        )]),
-    )]);
-    assert!(history::History::from_value(&bad).is_err());
-}
-
-/// The release history gets versions and release notes, never notes.
-#[test]
-fn publishing_keeps_notes_out_of_the_release_history() {
-    use cas_version::merge::{self, Outcome};
-    let s = store();
-    let a = version(&s, &[("f", b"1\n")]);
-    let b = version(&s, &[("f", b"2\n")]);
-    let mut mine = history::History::default();
-    let ra = mine.add(&a, BTreeMap::new(), None).unwrap();
-    let notes = step_notes(&s, &a, &b, |_| "why");
-    mine.add(&b, BTreeMap::from([(ra, Step { notes: Some(notes.clone()), ..Step::default() })]), None).unwrap();
-    assert!(mine.has_notes());
-    let mut public = history::History::default();
-    let first = Step { changelog: Some("Release 1".into()), ..Step::default() };
-    let Outcome::Done(r1) = merge::publish(&mine, &mut public, first, None).unwrap() else { panic!() };
-    assert!(!public.has_notes());
-    assert_eq!(public.nodes[&r1].doc.as_deref(), Some("Release 1"), "the first release keeps its notes as doc");
-    assert_eq!(r1.version(), b);
-    // An annotated step, or a target with notes, is refused.
-    let annotated_step = Step { notes: Some(notes), ..Step::default() };
-    assert!(merge::publish(&mine, &mut history::History::default(), annotated_step, None).is_err());
-    assert!(merge::publish(&mine, &mut mine.clone(), Step::default(), None).is_err());
-}
-
-/// A rebase carries notes over to the replayed step's diff and to files
-/// after the merge, line by line.
-#[test]
-fn a_rebase_carries_notes_along() {
-    use cas_version::merge::{self, Outcome};
-    let s = store();
-    let base = version(&s, &[("f", b"a\nb\nc\n"), ("g", b"g\n")]);
-    let mut public = history::History::default();
-    let r0 = public.add(&base, BTreeMap::new(), None).unwrap();
-    let mut mine = public.clone();
-    // Mine changes f; public meanwhile changes g.
-    let ours = version(&s, &[("f", b"a\nB\nc\n"), ("g", b"g\n")]);
-    let sn = step_notes(&s, &base, &ours, |l| if l == b"+B\n" { "capital" } else { "" });
-    let file = cas_version::object_at(&s, &ours, &Path::new("f").unwrap()).unwrap().unwrap();
-    let fnote = annotated::write(&s, b3(), &file, &["".into(), "the B line".into(), "".into()]).unwrap();
-    let m1 =
-        mine.add(&ours, BTreeMap::from([(r0.clone(), Step { notes: Some(sn), ..Step::default() })]), None).unwrap();
-    mine.nodes.get_mut(&m1).unwrap().notes.insert("f".into(), fnote);
-    let theirs = version(&s, &[("f", b"a\nb\nc\n"), ("g", b"G\n")]);
-    public.add(&theirs, BTreeMap::from([(r0, Step::default())]), None).unwrap();
-    let (rebased, outcome) = merge::rebase(&s, b3(), &mine, &public).unwrap();
-    let Outcome::Done(tip) = outcome else { panic!("{outcome:?}") };
-    let node = &rebased.nodes[&tip];
-    let step = node.after.values().next().unwrap();
-    let carried = String::from_utf8(stepnotes::show(&s, step.notes.as_ref().unwrap().key()).unwrap()).unwrap();
-    assert!(carried.contains("# capital\n| +B\n"), "{carried}");
-    let a = stepnotes::verify(&s, step.notes.as_ref().unwrap().key()).unwrap();
-    assert_eq!((a.before, a.after), (Some(theirs), tip.version()), "the notes are on the new step's versions");
-    let fa = annotated::verify(&s, node.notes["f"].key()).unwrap();
-    assert_eq!(fa.notes(), ["", "the B line", ""]);
-}
-
 /// Diffs of many random edits parse and apply back. similar 2.7 once gave a
 /// `Delete` after a `Replace` a stale new index, so hunk headers that
 /// trusted it had the wrong counts.
@@ -312,32 +176,4 @@ fn a_delete_after_replacements_keeps_its_counts() {
     let d = annotated::diff(&s, Some(&va), &vb).unwrap();
     let (_, _, files) = annotated::parse_diff(&d).unwrap();
     assert_eq!(annotated::apply(&a, &files[0]).unwrap(), b);
-}
-
-/// A step-notes blob is checked: runs cover the files, notes say something,
-/// paths are in order.
-#[test]
-fn step_notes_are_checked() {
-    let s = store();
-    let a = version(&s, &[("f", b"1\n")]);
-    let b = version(&s, &[("f", b"1\n2\n")]);
-    let v = step_notes(&s, &a, &b, |l| if l == b"+2\n" { "two" } else { "" });
-    let text = String::from_utf8(read_blob(&s, v.key()).unwrap()).unwrap();
-    assert!(text.ends_with("\npath f\nnew\n1 \n1 two\n"), "{text}");
-    for bad in [text.replace("1 two", "2 two"), text.replace("1 two", "1 "), text.replace("path f\n", "path g\n")] {
-        let k = cas_version::write_blob(&s, b3(), bad.as_bytes()).unwrap();
-        assert!(stepnotes::verify(&s, &k).is_err(), "{bad}");
-    }
-    assert!(stepnotes::check(text.replace("new\n1 \n1 two\n", "").as_bytes()).is_err(), "a path with no note");
-    // fsck finds notes that do not cover their file.
-    history::commit(&s, b3(), "main", &a, Step::default(), None).unwrap();
-    let wrong = cas_version::write_blob(&s, b3(), text.replace("1 two", "2 two").as_bytes()).unwrap();
-    let wrong = View::new(v.format(), wrong).unwrap();
-    history::commit(&s, b3(), "main", &b, Step { notes: Some(wrong.clone()), ..Step::default() }, None).unwrap();
-    formats::publish(&s).unwrap();
-    let report = cas_version::fsck::fsck(&s).unwrap();
-    assert_eq!(report.bad.len(), 1, "{:?}", report.bad);
-    assert_eq!(report.bad[0].0, wrong.key());
-    // A form whose text is not the diff is refused.
-    assert!(stepnotes::from_form(&s, Some(&a), &b, b"| diff\n").is_err());
 }

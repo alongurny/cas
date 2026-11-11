@@ -83,8 +83,6 @@ pub const OPTIONS: &[Opt] = &[
     opt("--open", "", "serve to anyone, without an access policy"),
     opt("--prove", "", "prove each history of commits as it moves (needs cas-prove)"),
     opt("--max-body", "<bytes>", "the largest request body accepted (default 64 MiB)"),
-    opt("--nodes", "", "start a history in the earlier format, which the forge still keeps"),
-    opt("--compatible", "", "on a history in the earlier format, mark the step compatible"),
     opt("--json", "", "print the forge's answer as JSON"),
     opt("--project", "<owner>/<project>", "the project on the forge, when --store does not name it"),
 ];
@@ -108,7 +106,7 @@ const TOOL: &str = "The tool";
 
 pub const COMMANDS: &[Cmd] = &[
     Cmd {
-        opts: &["--author", "--notes", "--annotate", "--nodes"],
+        opts: &["--author", "--notes", "--annotate"],
         words: Words::Path,
         ..cmd(
             "commit",
@@ -317,13 +315,6 @@ pub const COMMANDS: &[Cmd] = &[
         &["-H releases compatible <from> <to>"],
         "whether upgrading from release <from> to <to> is safe",
         "Prints compatible or breaking, from the kinds of change between the two.",
-    ),
-    cmd(
-        "tag",
-        JOIN,
-        &["tag <name>"],
-        "name a node of a history in the earlier format",
-        "A history of commits has no tags of its own: `publish --tag` names a release.",
     ),
     Cmd {
         words: Words::Path,

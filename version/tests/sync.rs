@@ -5,9 +5,10 @@ use cas_core::client::HttpStore;
 use cas_core::mem::MemBackend;
 use cas_core::server::Server;
 use cas_core::{AllowAll, CoreStore, Expect, ListPage, Policy, Span, Store, Who};
-use cas_version::history::Step;
 use cas_version::sync::{self, Copied, Outcome};
-use cas_version::{Edit, Error, Node, Path, View, build, diff, formats, history, put, update, walk};
+use cas_version::{Edit, Error, Node, Path, View, build, diff, formats, head, put, update, walk};
+
+mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,7 +73,7 @@ fn big(s: &dyn Store) -> View {
             m.insert(Path::new(format!("d{i}/f{j}")).unwrap(), Node::File(f));
         }
     }
-    build(s, b3(), formats::by_alias("dir").unwrap(), &m).unwrap()
+    build(s, b3(), formats::by_alias("directory").unwrap(), &m).unwrap()
 }
 
 fn same_tree(a: &dyn Store, b: &dyn Store, root: &View) {
@@ -96,25 +97,24 @@ fn push_copies_only_what_is_missing() {
     for dst in [store(), remote()] {
         let src = store();
         let v1 = big(&*src);
-        history::commit(&*src, b3(), "main", &v1, Step::default(), None).unwrap();
+        common::commit(&*src, "main", &v1);
         let (o, n) = sync::push(&*src, &*dst, "main", "main").unwrap();
         assert_eq!(o, Outcome::Created);
-        // 100 files, 10 directories, the root, a history root and its one
-        // leaf, and the specs and objects of the dir, raw, history and
-        // history-part formats.
+        // 100 files, 10 directories, the root, the commit and its author,
+        // and the specs and objects of the directory, raw, commit and
+        // author formats.
         assert_eq!(n.blobs, 100 + 10 + 1 + 2 + 8);
         same_tree(&*src, &*dst, &v1);
 
         assert_eq!(sync::push(&*src, &*dst, "main", "main").unwrap(), (Outcome::UpToDate, Copied::default()));
 
-        // One edit: one file, one directory, the root, a history root and
-        // its leaf.
+        // One edit: one file, one directory, the root and the commit.
         let v2 = edit(&*src, &v1, "d4/f7", "changed");
-        history::commit(&*src, b3(), "main", &v2, Step::default(), None).unwrap();
+        common::commit(&*src, "main", &v2);
         let (o, n) = sync::push(&*src, &*dst, "main", "main").unwrap();
         assert_eq!(o, Outcome::FastForward);
-        assert_eq!(n.blobs, 5);
-        assert_eq!(history::head(&*dst, "main").unwrap(), history::head(&*src, "main").unwrap());
+        assert_eq!(n.blobs, 4);
+        assert_eq!(head(&*dst, "main").unwrap(), head(&*src, "main").unwrap());
         assert_eq!(diff(&*dst, &v1, &v2, None).unwrap().len(), 1);
     }
 }
@@ -123,38 +123,28 @@ fn push_copies_only_what_is_missing() {
 fn diverged_histories_are_not_overwritten() {
     let (a, b) = (store(), store());
     let v = big(&*a);
-    history::commit(&*a, b3(), "main", &v, Step::default(), None).unwrap();
+    common::commit(&*a, "main", &v);
     sync::push(&*a, &*b, "main", "main").unwrap();
     // Both sides add a node after the shared tip.
     let va = edit(&*a, &v, "d1/f1", "a");
-    history::commit(&*a, b3(), "main", &va, Step::default(), None).unwrap();
+    common::commit(&*a, "main", &va);
     let vb = edit(&*b, &v, "d2/f2", "b");
-    history::commit(&*b, b3(), "main", &vb, Step::default(), None).unwrap();
-    let b_head = history::head(&*b, "main").unwrap();
+    common::commit(&*b, "main", &vb);
+    let b_head = head(&*b, "main").unwrap();
 
     assert_eq!(sync::push(&*a, &*b, "main", "main"), Err(Error::Behind("main".into())));
-    assert_eq!(history::head(&*b, "main").unwrap(), b_head);
-    // A rewritten history (a reworded step) is not an extension either.
-    let (old, mut h) = history::load(&*a, "main").unwrap();
-    let tip = h.tip().unwrap();
-    let pred = h.nodes[&tip].after.keys().next().unwrap().clone();
-    h.nodes
-        .get_mut(&tip)
-        .unwrap()
-        .after
-        .insert(pred, Step { changelog: Some("reworded".into()), compatible: false, notes: None });
-    history::save(&*a, b3(), "main", old.as_ref(), &h).unwrap();
+    assert_eq!(head(&*b, "main").unwrap(), b_head);
     // Under another name it is just a new history.
     sync::push(&*a, &*b, "main", "a-main").unwrap();
-    assert_eq!(history::head(&*b, "a-main").unwrap(), history::head(&*a, "main").unwrap());
+    assert_eq!(head(&*b, "a-main").unwrap(), head(&*a, "main").unwrap());
 }
 
 #[test]
 fn an_interrupted_copy_resumes() {
     let src = store();
     let v = big(&*src);
-    history::commit(&*src, b3(), "main", &v, Step::default(), None).unwrap();
-    let head = history::head(&*src, "main").unwrap();
+    common::commit(&*src, "main", &v);
+    let tip = head(&*src, "main").unwrap();
     let dst = store();
     for budget in [5, 40, 1000] {
         let flaky = Flaky { inner: Arc::clone(&dst), budget: AtomicUsize::new(budget) };
@@ -163,8 +153,8 @@ fn an_interrupted_copy_resumes() {
             Err(Error::Store(cas_core::Error::Unavailable(_))) => {
                 // Whatever arrived is complete: each directory the
                 // destination has can be walked in full there.
-                assert_eq!(history::head(&*dst, "main").unwrap(), None);
-                let formats::Kind::Dir(d) = &formats::by_alias("dir").unwrap().kind else { unreachable!() };
+                assert_eq!(head(&*dst, "main").unwrap(), None);
+                let formats::Kind::Dir(d) = &formats::by_alias("directory").unwrap().kind else { unreachable!() };
                 let kids = d.blob_children(v.key(), &src.read(v.key()).unwrap().unwrap()).unwrap();
                 let present: Vec<_> = kids.iter().filter(|c| sync::has(&*dst, c.key()).unwrap()).collect();
                 // Breadth first, files arrive before the directories naming them.
@@ -182,10 +172,10 @@ fn an_interrupted_copy_resumes() {
             Err(e) => panic!("{e}"),
         }
     }
-    assert_eq!(history::head(&*dst, "main").unwrap(), head);
+    assert_eq!(head(&*dst, "main").unwrap(), tip);
     same_tree(&*src, &*dst, &v);
     // Format descriptions came along.
-    for alias in ["dir", "raw", "history"] {
+    for alias in ["directory", "raw", "commit"] {
         assert!(sync::has(&*dst, formats::by_alias(alias).unwrap().id()).unwrap(), "{alias}");
     }
 }
@@ -238,20 +228,19 @@ fn push_of_one_commit_asks_only_about_what_is_new() {
     let mut v = big(&*src);
     for i in 0..300 {
         v = edit(&*src, &v, "d1/f1", &format!("v{i}"));
-        history::commit(&*src, b3(), "main", &v, Step::default(), None).unwrap();
+        common::commit(&*src, "main", &v);
     }
     sync::push(&*src, &*inner, "main", "main").unwrap();
     let v2 = edit(&*src, &v, "d4/f7", "changed");
-    history::commit(&*src, b3(), "main", &v2, Step::default(), None).unwrap();
+    common::commit(&*src, "main", &v2);
     let dst = Counting { inner, asked: AtomicUsize::new(0), reads: AtomicUsize::new(0) };
     let (o, n) = sync::push(&*src, &dst, "main", "main").unwrap();
-    // The new file, its directory and root, and of the history its root,
-    // the leaf the new node is in and the top part over the leaves.
-    assert_eq!((o, n.blobs), (Outcome::FastForward, 6));
-    // The history and new version, then the new root's children level by
+    // The new file, its directory and root, and the commit.
+    assert_eq!((o, n.blobs), (Outcome::FastForward, 4));
+    // The commit and the one before it, then the new version level by
     // level: far fewer than the 301 versions.
     assert!(dst.asked.load(Ordering::SeqCst) < 40, "asked about {}", dst.asked.load(Ordering::SeqCst));
-    // Only the name was read, not the 300-node history.
+    // Only the name was read, not the 300 commits.
     assert_eq!(dst.reads.load(Ordering::SeqCst), 1);
 }
 
@@ -271,7 +260,7 @@ fn a_pull_keeps_the_sources_deltas() {
     // Within the delta chain limit, so the newest is a delta too.
     for i in 0..8 {
         root = edit(&src, &root, "d1/f1", &text(i));
-        history::commit(&src, b3(), "main", &root, Step::default(), None).unwrap();
+        common::commit(&src, "main", &root);
     }
     let disk = DiskBackend::open(a.path()).unwrap();
     let (order, hints) = cas_version::gc::delta_hints(&src, &|_| false).unwrap();
@@ -329,9 +318,9 @@ fn a_wrong_stored_form_is_refused() {
     }
     let src = store();
     let root = big(&*src);
-    history::commit(&*src, b3(), "main", &root, Step::default(), None).unwrap();
+    common::commit(&*src, "main", &root);
     let dst = store();
     let err = sync::push(&Liar(src.clone()), &*dst, "main", "main").unwrap_err().to_string();
     assert!(err.contains("wrong bytes"), "{err}");
-    assert!(history::head(&*dst, "main").unwrap().is_none());
+    assert!(head(&*dst, "main").unwrap().is_none());
 }

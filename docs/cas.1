@@ -50,8 +50,6 @@ There is no commit message. A commit says why through notes: \-\-notes takes the
 \fB\-\-notes\fR <file>: notes for the step: what `status <dir> \-\-diff` prints, with `# note` lines added
 .IP
 \fB\-\-annotate\fR <path>=<file>: notes on the file <path> as it is: its lines as `| line`, with `# note` lines
-.IP
-\fB\-\-nodes\fR : start a history in the earlier format, which the forge still keeps
 .TP
 \fBcas\fR status <dir>
 .TQ
@@ -198,11 +196,6 @@ The release history is `releases`, or \-\-as <name>. A first release has no chan
 Whether upgrading from release <from> to <to> is safe.
 .IP
 Prints compatible or breaking, from the kinds of change between the two.
-.TP
-\fBcas\fR tag <name>
-Name a node of a history in the earlier format.
-.IP
-A history of commits has no tags of its own: `publish \-\-tag` names a release.
 .TP
 \fBcas\fR import\-git <repo> [<rev>]
 Import the commits of a git repository as a new history.

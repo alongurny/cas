@@ -7,7 +7,6 @@
 
 use crate::dir::LeafIter;
 use crate::formats::{self, METAFORMAT};
-use crate::history::{self, NodeId};
 use crate::sync::children_light;
 use crate::tree;
 use crate::uni::Value;
@@ -58,9 +57,6 @@ fn spec_of(store: &dyn Store, key: &str) -> Result<Option<String>> {
         .map(String::from))
 }
 
-/// Record the ancestry (spec/functions/ancestry.md) of every history a
-/// variable holds that has none yet, as git gc writes its commit-graph.
-/// Best effort for each history.
 /// Every variable in `store`, without listing the blake3 blobs: no
 /// variable starts with `blake3:` (spec section 2: such a key is a blob key
 /// or invalid), so the keys on either side of that range are listed.
@@ -69,74 +65,6 @@ fn variables(store: &dyn Store) -> Result<Vec<String>> {
     keys.extend(list_all(store, &Span { from: Some(b"blake3;".to_vec()), to: None })?);
     keys.retain(|k| matches!(classify(k), Some(Parsed::Var)));
     Ok(keys)
-}
-
-/// The nodes the history at `r` holds that one it replaced (within
-/// [`NEAR`] saves, and `old` by the caller's test) does not hold as they
-/// are, oldest first (a node after its predecessors among them): what a
-/// walk that has seen the older history still needs. Reads only the
-/// leaves that differ. `None` when no such history is found.
-fn added_since(store: &dyn Store, r: &View, old: &dyn Fn(&str) -> bool) -> Option<Vec<(NodeId, history::HistNode)>> {
-    let mut at = r.clone();
-    for _ in 0..NEAR {
-        at = crate::graph::replaced(store, &at)?;
-        if old(at.key()) {
-            let new = history::Stored::open(store, Some(r)).ok()?;
-            let added = history::Stored::open(store, Some(&at)).ok()?.changed(&new).ok()?.added;
-            let out = history::predecessors_first(added);
-            return Some(out);
-        }
-    }
-    None
-}
-
-/// Whether the history at `r` has no graph cached within
-/// [`crate::graph::NEAR`] saves but has one further back, or (`full`) none
-/// at all.
-fn graph_far(store: &dyn Store, r: &View, full: bool) -> bool {
-    let cached = |v: &View| matches!(crate::derived::readable_cache(store, &crate::graph::GRAPH, v), Ok(Some(_)));
-    let mut at = r.clone();
-    for i in 0..1000 {
-        if cached(&at) {
-            return i > crate::graph::NEAR;
-        }
-        match crate::graph::replaced(store, &at) {
-            Some(p) => at = p,
-            None => return full,
-        }
-    }
-    full
-}
-
-/// How many saves back a cached ancestry still serves a history (its newer
-/// nodes are looked up in the history): gc rebuilds one only past that.
-const NEAR: usize = 64;
-
-/// `full`: a full run, which also builds a graph for a history that has
-/// none (as after the graph function changed), as git gc writes its
-/// commit-graph.
-pub fn index_histories(store: &dyn Store, alg: &'static Algorithm, full: bool) -> Result<()> {
-    for k in variables(store)? {
-        if !matches!(classify(&k), Some(Parsed::Var)) || k.starts_with("derived") {
-            continue;
-        }
-        if let Some(v) = store.read(&k)?
-            && let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok())
-            && r.known_format().is_some_and(|f| f.alias == "history")
-        {
-            if !crate::ancestry::near(store, &r, NEAR)
-                && let Ok(h) = history::read(store, &r)
-            {
-                crate::ancestry::record(store, alg, &r, &h);
-            }
-            // A graph that was built once is kept within reach: path-log
-            // extends one up to NEAR saves back.
-            if graph_far(store, &r, full) {
-                let _ = crate::graph::graph(store, alg, &r);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Every blob reachable from the variables in `store`. Walked as fsck
@@ -255,15 +183,12 @@ impl Marker<'_> {
             match children_light(self.store, &r, &self.local) {
                 Ok(c) => {
                     let mut vs = Vec::new();
-                    if r.known_format().is_some_and(|f| f.alias == "history") {
-                        // After a history the last full run marked, only the
-                        // nodes added since: the rest it marked with all
-                        // under them.
-                        let since = self.known.and_then(|k| added_since(self.store, &r, &|x| k.contains(x)));
-                        if let Some(added) = since {
-                            vs = added.into_iter().rev().map(|(id, _)| id.version()).collect();
-                        } else if let Ok(h) = history::read(self.store, &r) {
-                            vs = h.log().into_iter().map(|id| id.version()).collect();
+                    if defer.is_some() && crate::commits::is_commit(&r) {
+                        // A history's versions, without those the last full
+                        // run marked with all under them.
+                        let stop = |k: &str| self.known.is_some_and(|m| m.contains(k));
+                        if let Ok(log) = crate::commits::log_until(self.store, r.key(), &stop) {
+                            vs = log.into_iter().map(|(_, c)| c.version()).collect();
                         }
                     }
                     // The log is newest first: popped from the end, oldest first.
@@ -326,7 +251,6 @@ fn known(store: &dyn Store) -> Result<(Option<Vec<u8>>, Option<DigestSet>)> {
 /// blobs. Garbage among the old ones waits for the next full run, which
 /// comes when the blobs outside the set grow past a quarter of it.
 pub fn collect_with(store: &dyn Store, alg: &'static Algorithm, full: bool) -> Result<Report> {
-    index_histories(store, alg, full)?;
     let (old_var, old) = pending(store)?;
     let blobs: Vec<String> = list_all(store, &Span::all())?
         .into_iter()
@@ -382,24 +306,22 @@ pub fn delta_hints(store: &dyn Store, placed: &dyn Fn(&str) -> bool) -> Result<(
         }
         let Some(v) = store.read(&k)? else { continue };
         let Some(r) = std::str::from_utf8(&v).ok().and_then(|s| View::parse(s).ok()) else { continue };
-        // A history the last repack placed was walked then, with all its
-        // versions: their frames are reused.
-        if r.known_format().is_none_or(|f| f.alias != "history") || placed(r.key()) {
+        // A commit the last repack placed was walked then, with all before
+        // it: their frames are reused.
+        if !crate::commits::is_commit(&r) {
             continue;
         }
-        // After a history the last repack placed, only the nodes added
-        // since.
-        let nodes = match added_since(store, &r, placed) {
-            Some(added) => added,
-            None => {
-                let Ok(h) = history::read(store, &r) else { continue };
-                h.log().into_iter().rev().map(|id| (id.clone(), h.nodes[&id].clone())).collect()
-            }
-        };
-        for (id, node) in nodes {
-            let new = id.version();
-            let old = node.after.keys().next().map(NodeId::version);
-            pair(store, old.as_ref(), &new, &mut order, &mut hints, &mut walked, placed)?;
+        let Ok(log) = crate::commits::log_until(store, r.key(), placed) else { continue };
+        let versions: HashMap<&str, View> = log.iter().map(|(k, c)| (k.as_str(), c.version())).collect();
+        for (_, c) in log.iter().rev() {
+            let old = match c.parents.keys().next() {
+                Some(p) => match versions.get(p.as_str()) {
+                    Some(v) => Some(v.clone()),
+                    None => crate::commits::read(store, p).ok().map(|p| p.version()),
+                },
+                None => None,
+            };
+            pair(store, old.as_ref(), &c.version(), &mut order, &mut hints, &mut walked, placed)?;
         }
     }
     Ok((order, hints))

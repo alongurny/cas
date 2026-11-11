@@ -3,7 +3,10 @@
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Expect, Policy, Span, Store, Who, list_all};
-use cas_version::{Node, Path, build, formats, gc, history, put, sync, walk};
+use cas_version::commits;
+use cas_version::{Node, Path, build, formats, gc, put, sync, walk};
+
+mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -15,13 +18,13 @@ fn store() -> Arc<dyn Store> {
     Arc::new(CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive()).session(Who::anonymous()))
 }
 
-fn commit(s: &dyn Store, files: &[(&str, &str)]) -> history::NodeId {
+fn commit(s: &dyn Store, files: &[(&str, &str)]) -> String {
     let mut m = BTreeMap::new();
     for (p, c) in files {
         m.insert(Path::new(*p).unwrap(), Node::File(put(s, b3(), "raw", c.as_bytes()).unwrap()));
     }
-    let v = build(s, b3(), formats::by_alias("dir").unwrap(), &m).unwrap();
-    history::commit(s, b3(), "main", &v, history::Step::default(), None).unwrap()
+    let v = build(s, b3(), formats::by_alias("directory").unwrap(), &m).unwrap();
+    common::commit(s, "main", &v)
 }
 
 fn files(s: &dyn Store, v: &cas_version::View) -> Vec<(Path, cas_version::View)> {
@@ -54,12 +57,11 @@ fn reachable_blobs_survive_and_garbage_goes_after_two_runs() {
     assert_eq!(second.removed, vec![garbage.key().to_string()]);
     assert!(!sync::has(&*s, garbage.key()).unwrap());
     // Everything the branch reaches is still readable.
-    let v = history::load(&*s, "main").unwrap().1.tip().unwrap().version();
+    let v = common::tip_version(&*s, "main");
     assert_eq!(files(&*s, &v).len(), 2);
     // The garbage went; both pending sets are still there (the first is
-    // unreachable now and goes two runs later), the history's ancestry blob
-    // the first run recorded, and the marked set of the last full run.
-    assert_eq!(blobs(&*s), before - 1 + 2 + 1 + 1);
+    // unreachable now and goes two runs later), and the marked set of the last full run.
+    assert_eq!(blobs(&*s), before - 1 + 2 + 1);
 }
 
 #[test]
@@ -82,22 +84,22 @@ fn history_and_format_objects_are_reachable() {
     commit(&*s, &[("a", "2\n")]);
     formats::publish(&*s).unwrap();
     let marked = gc::mark(&*s).unwrap();
-    let head = history::head(&*s, "main").unwrap().unwrap();
-    assert!(marked.contains(head.key()));
-    for id in history::read(&*s, &head).unwrap().log() {
-        assert!(marked.contains(id.version().key()));
+    let tip = commits::tip(&*s, "main").unwrap().unwrap();
+    for (k, c) in commits::log(&*s, &tip).unwrap() {
+        assert!(marked.contains(&k));
+        assert!(marked.contains(c.version().key()));
     }
-    let dir = formats::by_alias("dir").unwrap();
+    let dir = formats::by_alias("directory").unwrap();
     assert!(marked.contains(dir.id()));
 }
 
-/// Delta hints between big `tree` directories pair each changed file with
+/// Delta hints between big directories pair each changed file with
 /// its old self by name, across leaves that differ, and skip what did not
 /// change.
 #[test]
 fn hints_pair_changed_files_of_big_directories_by_name() {
     let s = store();
-    let tree = formats::by_alias("tree").unwrap();
+    let tree = formats::by_alias("directory").unwrap();
     let mut m = BTreeMap::new();
     for i in 0..3000 {
         m.insert(
@@ -106,7 +108,7 @@ fn hints_pair_changed_files_of_big_directories_by_name() {
         );
     }
     let v1 = build(&*s, b3(), tree, &m).unwrap();
-    history::commit(&*s, b3(), "main", &v1, history::Step::default(), None).unwrap();
+    common::commit(&*s, "main", &v1);
     let changed = [7usize, 1500, 1501, 2999];
     let mut m2 = m.clone();
     for i in changed {
@@ -119,7 +121,7 @@ fn hints_pair_changed_files_of_big_directories_by_name() {
     m2.remove(&Path::new("f00100").unwrap());
     m2.insert(Path::new("f01500x").unwrap(), Node::File(put(&*s, b3(), "raw", b"new").unwrap()));
     let v2 = build(&*s, b3(), tree, &m2).unwrap();
-    history::commit(&*s, b3(), "main", &v2, history::Step::default(), None).unwrap();
+    common::commit(&*s, "main", &v2);
     let (_, hints) = gc::delta_hints(&*s, &|_| false).unwrap();
     let key = |m: &BTreeMap<Path, Node>, i: usize| match &m[&Path::new(format!("f{i:05}")).unwrap()] {
         Node::File(f) => f.key().to_string(),
@@ -155,16 +157,14 @@ fn runs_after_a_full_one_walk_only_what_came_since() {
     assert!(second.removed.contains(&garbage.key().to_string()), "{second:?}");
     assert!(!sync::has(&*s, garbage.key()).unwrap());
     // Both nodes' files are all there.
-    let (_, h) = history::load(&*s, "main").unwrap();
-    for id in h.log() {
-        assert_eq!(files(&*s, &id.version()).len(), 61);
+    for (_, c) in commits::log(&*s, &commits::tip(&*s, "main").unwrap().unwrap()).unwrap() {
+        assert_eq!(files(&*s, &c.version()).len(), 61);
     }
     // A full run removes no more than garbage.
     let full = gc::collect_with(&*s, b3(), true).unwrap();
     assert!(full.full);
-    let (_, h) = history::load(&*s, "main").unwrap();
-    for id in h.log() {
-        assert_eq!(files(&*s, &id.version()).len(), 61);
+    for (_, c) in commits::log(&*s, &commits::tip(&*s, "main").unwrap().unwrap()).unwrap() {
+        assert_eq!(files(&*s, &c.version()).len(), 61);
     }
 }
 

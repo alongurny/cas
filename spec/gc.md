@@ -8,8 +8,8 @@ This layer decides what may go: only blobs nothing reaches. Code:
 
 Roots are variables. A variable whose value parses as a view `<format> <key>`
 roots that blob; other variable values root nothing. From each rooted view, format walkers follow children the same
-way sync does: a `dir` follows its entries, a `history` its nodes'
-versions. Formats this tooling does not know are opaque and have no children.
+way sync does: a directory follows its entries, a commit its version, its author, its
+notes and its parents. Formats this tooling does not know are opaque and have no children.
 
 Also reachable:
 
@@ -53,10 +53,8 @@ no set (and removes `gc/marked`).
 
 A later run reads the set and does not walk into it. Whatever became
 reachable since is a new blob, reached from a root through new blobs only,
-so walking the roots without entering the set finds all of it. A history
-whose save noted the history it replaced (the `derived-hint/` note) is
-walked from that one when the set holds it: only the nodes added since are
-looked at. Unreachable is then what is in neither set; the two phases work
+so walking the roots without entering the set finds all of it. A history of commits
+is walked back only to the commits the set holds. Unreachable is then what is in neither set; the two phases work
 as above. A blob of the set that became garbage waits for the next full
 run, which comes when the blobs outside the set are more than a quarter of
 it.
@@ -66,7 +64,7 @@ repack writes are sealed: their deltas are on bases in sealed packs. When
 at most an eighth of the sealed packs' entries were removed, the repack is
 incremental: the sealed packs stay, and everything else (loose files and
 the packs commits and pulls wrote) goes into a new sealed pack, with delta
-hints only for the histories' nodes added since the last repack. The sealed
+hints only for the commits made since the last repack. The sealed
 packs are merged as a binary counter, so there are O(log n) of them. Past
 an eighth, or with `--full`, everything is rewritten into one pack and the
 removed names' bytes go. Chunks no blob names are swept on a full run, or

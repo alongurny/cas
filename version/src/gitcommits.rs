@@ -275,3 +275,39 @@ pub fn from_git(
     vw.flush()?;
     last.ok_or_else(|| Error::Missing(format!("git commit {tip}")))
 }
+
+/// Import every commit reachable from `rev` in the git repository `repo`:
+/// its objects are stored as git's, and each commit becomes a commit as
+/// [`from_git`] makes them. The key of the newest, and the links.
+pub fn import(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    repo: &std::path::Path,
+    rev: &str,
+) -> Result<(String, Links)> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let fail = |what: &str, err: &[u8]| Error::Io(format!("git {what}: {}", String::from_utf8_lossy(err).trim()));
+    let out = Command::new("git").arg("-C").arg(repo).args(["rev-parse", &format!("{rev}^{{commit}}")]).output()?;
+    if !out.status.success() {
+        return Err(fail("rev-parse", &out.stderr));
+    }
+    let tip = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut c = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["pack-objects", "--revs", "--stdout", "-q"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    c.stdin.take().expect("piped").write_all(format!("{tip}\n").as_bytes())?;
+    let out = c.wait_with_output()?;
+    if !out.status.success() {
+        return Err(fail("pack-objects", &out.stderr));
+    }
+    gitobj::unpack(store, &out.stdout)?;
+    let mut links = Links::new();
+    let key = from_git(store, alg, &mut links, &tip, &[])?;
+    Ok((key, links))
+}

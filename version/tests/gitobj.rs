@@ -5,10 +5,8 @@
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Expect, Policy, Session, Store, Who};
-use cas_version::gitobj::{self, Links};
-use cas_version::history::{self, History, Step};
-use cas_version::{Node, Path, View, build, by_alias, put};
-use std::collections::{BTreeMap, BTreeSet};
+use cas_version::gitobj;
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -125,101 +123,4 @@ fn packs_keep_git_ids_both_ways() {
         gitobj::peel_tag(&s, &tag).as_deref(),
         Some(text(git(&r, &["rev-parse", "v1^{commit}"], None)).as_str())
     );
-}
-
-#[test]
-fn conversion_goes_both_ways_and_keeps_ids() {
-    let tmp = tempfile::tempdir().unwrap();
-    let r = tmp.path().join("r");
-    std::fs::create_dir(&r).unwrap();
-    repo(&r);
-    let s = store();
-    gitobj::unpack(&s, &git(&r, &["pack-objects", "--all", "--stdout"], Some(b""))).unwrap();
-    let head = text(git(&r, &["rev-parse", "HEAD"], None));
-    let v1 = text(git(&r, &["rev-parse", "v1"], None));
-    // git to cas: every commit a node, the tag a history tag.
-    let (h, mut links) = gitobj::from_git(&s, b3(), &head, &[("v1".into(), v1)]).unwrap();
-    assert_eq!(h.nodes.len(), 4);
-    assert!(h.tags.contains_key("v1"));
-    assert_eq!(links.len(), 4);
-    assert_eq!(links[&h.tip().unwrap()], head);
-    // cas to git again: the linked nodes keep git's commits.
-    assert_eq!(gitobj::to_git(&s, &h, &mut links).unwrap(), 0);
-    // A node added in cas gets a commit after git's; its tree is the
-    // version's, byte for byte as git would write it.
-    let mut h2: History = h.clone();
-    let tip = h2.tip().unwrap();
-    let mut files = BTreeMap::new();
-    files.insert(Path::new("README").unwrap(), Node::File(put(&s, b3(), "raw", b"changed in cas\n").unwrap()));
-    let v = cas_version::update(
-        &s,
-        b3(),
-        &tip.version(),
-        &files.into_iter().map(|(p, n)| (p, cas_version::Edit::Set(n))).collect(),
-    )
-    .unwrap();
-    let id = h2.append(&v, Step::default(), None).unwrap();
-    assert_eq!(gitobj::to_git(&s, &h2, &mut links).unwrap(), 1);
-    let c = links[&id].clone();
-    let ids = gitobj::closure(&s, std::slice::from_ref(&c), &[]).unwrap();
-    let out = tmp.path().join("out");
-    std::fs::create_dir(&out).unwrap();
-    git(&out, &["init", "-q", "--bare"], None);
-    git(&out, &["index-pack", "--stdin"], Some(&gitobj::pack(&s, &ids).unwrap()));
-    git(&out, &["update-ref", "refs/heads/main", &c], None);
-    git(&out, &["fsck", "--strict", "--no-dangling"], None);
-    assert_eq!(text(git(&out, &["rev-parse", "main^"], None)), head, "the new commit follows git's");
-    assert_eq!(text(git(&out, &["show", "main:README"], None)), "changed in cas");
-    assert_eq!(text(git(&out, &["ls-tree", "main", "src/run.sh"], None)).split(' ').next(), Some("100755"));
-    // A history made in cas converts deterministically: twice, the same commits.
-    let empty = build(&s, b3(), by_alias("dir").unwrap(), &BTreeMap::new()).unwrap();
-    let mut h3 = History::default();
-    h3.append(&empty, Step::default(), None).unwrap();
-    h3.append(&v, Step::default(), Some("made in cas".into())).unwrap();
-    let (mut a, mut b) = (Links::new(), Links::new());
-    gitobj::to_git(&s, &h3, &mut a).unwrap();
-    gitobj::to_git(&s, &h3, &mut b).unwrap();
-    assert_eq!(a, b);
-    // Links are a format; a variable holding them keeps the commits.
-    let lv: View = gitobj::write_links(&s, b3(), &links).unwrap();
-    assert_eq!(gitobj::read_links(&s, &lv).unwrap(), links);
-    let _ = history::write(&s, b3(), &h).unwrap();
-}
-
-#[test]
-fn a_push_extends_a_history_with_the_importers_versions() {
-    let tmp = tempfile::tempdir().unwrap();
-    let r = tmp.path().join("r");
-    std::fs::create_dir(&r).unwrap();
-    repo(&r);
-    let s = store();
-    gitobj::unpack(&s, &git(&r, &["pack-objects", "--all", "--stdout"], Some(b""))).unwrap();
-    let head = text(git(&r, &["rev-parse", "HEAD"], None));
-    let (imported, il) = gitobj::from_git(&s, b3(), &head, &[]).unwrap();
-    // The Rust conversion gives every commit the version the importer does.
-    let (mut h, mut links) = (History::default(), Links::new());
-    let tip = gitobj::extend(&s, b3(), &mut h, &mut links, &head).unwrap();
-    assert_eq!(h.nodes.len(), 4);
-    let by_commit = |l: &Links| -> BTreeMap<String, View> { l.iter().map(|(n, c)| (c.clone(), n.version())).collect() };
-    assert_eq!(by_commit(&links), by_commit(&il));
-    assert_eq!(links[&tip], head);
-    assert_eq!(imported.tip().unwrap().version(), tip.version());
-    // A later push adds only what is new.
-    std::fs::write(r.join("README"), "hi\nthere\nagain\n").unwrap();
-    git(&r, &["commit", "-q", "-am", "third\n\nwith a body"], None);
-    let head2 = text(git(&r, &["rev-parse", "HEAD"], None));
-    gitobj::unpack(
-        &s,
-        &git(&r, &["pack-objects", "--revs", "--stdout"], Some(format!("{head2}\n^{head}\n").as_bytes())),
-    )
-    .unwrap();
-    let before = h.clone();
-    let tip2 = gitobj::extend(&s, b3(), &mut h, &mut links, &head2).unwrap();
-    assert_eq!(h.nodes.len(), 5);
-    assert!(h.extends(&before));
-    let step = &h.nodes[&tip2].after[&tip];
-    assert_eq!(step.line(&s).unwrap().as_deref(), Some("third / with a body"));
-    // Back to git: the same commits.
-    let mut again = links.clone();
-    assert_eq!(gitobj::to_git(&s, &h, &mut again).unwrap(), 0);
 }

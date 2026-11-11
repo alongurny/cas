@@ -1,5 +1,9 @@
 # cas against git
 
+> These measurements were made on the earlier history format, which was
+> removed on 2026-11-11 in favour of histories of commits. They are kept as
+> a record; some commands and functions they name no longer exist.
+
 `bench/git-vs-cas.sh REPO` runs the same operations with git and with the
 `cas` command on one repository. Measured on 2026-11-08 on the Thesis
 repository (4,532 commits, 671 files at the tip), release build, one

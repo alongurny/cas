@@ -10,10 +10,9 @@ fn cas(store: &Path, args: &[&str]) -> String {
     text
 }
 
-/// As `cas`, on a history in the earlier format (the forge still keeps it):
-/// `--nodes` starts one.
+/// As `cas`, by an author.
 fn old(store: &Path, args: &[&str]) -> String {
-    let mut all = vec!["--nodes"];
+    let mut all = vec!["--author", "Dana"];
     all.extend(args);
     cas(store, &all)
 }
@@ -37,7 +36,7 @@ fn commit_log_diff_checkout_and_sync() {
     assert_eq!(lines.len(), 2);
 
     assert_eq!(old(&store, &["diff"]).trim(), "raw      -> raw      src/lib.rs");
-    assert_eq!(old(&store, &["summary"]).trim(), "{'dirs': '2', 'files': '2'}");
+    assert_eq!(old(&store, &["summary"]).trim(), "2 directories, 2 files");
     assert_eq!(old(&store, &["path-log", "src"]).lines().count(), 2);
     assert_eq!(old(&store, &["path-log", "README"]).lines().count(), 1);
     assert!(old(&store, &["ls"]).contains("dir      empty"));
@@ -128,102 +127,6 @@ fn commit_log_diff_checkout_and_sync() {
 }
 
 #[test]
-fn private_history_rebase_publish_merge_and_gc() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
-    std::fs::create_dir_all(&work).unwrap();
-    let w = work.to_str().unwrap();
-    let s = store.to_str().unwrap();
-    std::fs::write(work.join("notes"), "one\ntwo\nthree\n").unwrap();
-    std::fs::write(work.join("other"), "1\n").unwrap();
-    old(&store, &["commit", w]);
-    old(&store, &["tag", "v1"]);
-    // A private history starts as a copy of main.
-    assert!(old(&store, &["push", s, "--as", "alon"]).starts_with("Created"));
-    std::fs::write(work.join("notes"), "ONE\ntwo\nthree\n").unwrap();
-    old(&store, &["commit", w, "-H", "alon"]);
-    std::fs::write(work.join("notes"), "ONE\nTWO\nthree\n").unwrap();
-    old(&store, &["commit", w, "-H", "alon"]);
-    assert_eq!(old(&store, &["log", "-H", "alon"]).lines().count(), 3);
-
-    // Main moves meanwhile: publishing needs a rebase first.
-    let main_work = tmp.path().join("main-work");
-    old(&store, &["checkout", main_work.to_str().unwrap()]);
-    std::fs::write(main_work.join("other"), "2\n").unwrap();
-    old(&store, &["commit", main_work.to_str().unwrap(), "--compatible"]);
-    let no = Command::new(env!("CARGO_BIN_EXE_cas"))
-        .arg("--store")
-        .arg(&store)
-        .args(["publish", "--as", "main", "-H", "alon"])
-        .output()
-        .unwrap();
-    assert!(!no.status.success());
-    assert!(old(&store, &["rebase", "main", "-H", "alon"]).starts_with("Done"));
-    let changelog = tmp.path().join("changelog");
-    std::fs::write(&changelog, "notes: upper case\n").unwrap();
-    let c = changelog.to_str().unwrap();
-    assert!(old(&store, &["publish", "--as", "main", "-H", "alon", "--changelog", c]).starts_with("Done"));
-    let log = old(&store, &["log"]);
-    assert_eq!(log.lines().count(), 3, "{log}");
-    assert!(log.lines().next().unwrap().contains("notes: upper case") && log.contains("(v1)"), "{log}");
-    assert_eq!(old(&store, &["compatible", "v1", "latest"]).trim(), "breaking");
-    assert_eq!(old(&store, &["path-log", "notes"]).lines().count(), 2);
-    let out = tmp.path().join("out");
-    old(&store, &["checkout", out.to_str().unwrap()]);
-    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "ONE\nTWO\nthree\n");
-    assert_eq!(std::fs::read_to_string(out.join("other")).unwrap(), "2\n");
-
-    // A merge: two diverged copies of main, combined as one node.
-    assert!(old(&store, &["push", s, "--as", "side"]).starts_with("Created"));
-    std::fs::write(out.join("notes"), "ONE\nTWO\nTHREE\n").unwrap();
-    old(&store, &["commit", out.to_str().unwrap(), "-H", "side"]);
-    std::fs::write(out.join("notes"), "one\nTWO\nthree\n").unwrap();
-    old(&store, &["commit", out.to_str().unwrap()]);
-    assert!(old(&store, &["merge", "side"]).starts_with("Done"));
-    std::fs::remove_dir_all(&out).unwrap();
-    old(&store, &["checkout", out.to_str().unwrap()]);
-    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
-
-    // Collection keeps everything reachable.
-    for _ in 0..3 {
-        old(&store, &["gc"]);
-    }
-    std::fs::remove_dir_all(&out).unwrap();
-    old(&store, &["checkout", out.to_str().unwrap(), "notes"]);
-    assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
-}
-
-#[test]
-fn last_modified_merge_base_objects_and_fsck() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
-    std::fs::create_dir_all(work.join("src")).unwrap();
-    std::fs::write(work.join("README"), "hi\n").unwrap();
-    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
-    let w = work.to_str().unwrap();
-    let first = old(&store, &["commit", w]);
-    std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
-    let second = old(&store, &["commit", w]);
-    let short = |id: &str| id.split(' ').nth(1).unwrap()[.."blake3:".len() + 12].to_string();
-    let (a, b) = (short(&first), short(&second));
-
-    assert_eq!(old(&store, &["last-modified"]), format!("{a}  README\n{b}  src\n"));
-    assert_eq!(old(&store, &["last-modified", "src"]), format!("{b}  src/lib.rs\n"));
-    assert_eq!(old(&store, &["merge-base", &a, &b]), first);
-
-    let objects = old(&store, &["objects"]);
-    assert!(objects.lines().all(|k| k.starts_with("blake3:")));
-    assert!(old(&store, &["fsck"]).ends_with(", 0 missing, 0 bad\n"));
-
-    // Lose the blob of the old src/lib.rs: fsck names it and fails.
-    let key = blake3::hash(b"fn a() {}\n").to_hex().to_string();
-    std::fs::remove_file(store.join("blobs/blake3").join(&key[..2]).join(&key)).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).arg("fsck").output().unwrap();
-    assert!(!out.status.success());
-    assert!(String::from_utf8(out.stdout).unwrap().contains(&format!("missing blake3:{key}")));
-}
-
-#[test]
 fn status_reset_clean_and_stash() {
     let tmp = tempfile::tempdir().unwrap();
     let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
@@ -269,22 +172,6 @@ fn a_sparse_checkout_commits_only_its_paths() {
     old(&store, &["commit", p]);
     assert!(old(&store, &["ls"]).contains("README"));
     assert_eq!(old(&store, &["status", p]), "");
-}
-
-#[test]
-fn diff_and_merge_base_with_the_ancestry_gc_records() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
-    std::fs::create_dir_all(&work).unwrap();
-    std::fs::write(work.join("a"), "1\n").unwrap();
-    let w = work.to_str().unwrap();
-    let first = old(&store, &["commit", w]);
-    std::fs::write(work.join("a"), "2\n").unwrap();
-    let second = old(&store, &["commit", w]);
-    let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
-    old(&store, &["gc"]);
-    assert_eq!(old(&store, &["diff"]).trim(), "raw      -> raw      a");
-    assert_eq!(old(&store, &["merge-base", &short(&first), &short(&second)]), first);
 }
 
 /// A history of commits (spec/formats/commit.md): `directory` versions,
@@ -333,15 +220,9 @@ fn a_history_of_commits() {
     assert_eq!(std::fs::read_to_string(out.join("src/lib.rs")).unwrap(), "fn a() {}\n");
     assert_eq!(cas(&store, &["status", w]), "");
     assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
-
-    // A commit history has no tags of its own: a release names a version.
-    let o = Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["tag", "v1"]).output().unwrap();
-    assert!(!o.status.success());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("publish --tag"));
 }
 
-/// The rest of the daily commands on a history of commits, which a new
-/// history is unless `--nodes` asks otherwise.
+/// The rest of the daily commands on a history of commits.
 #[test]
 fn commit_histories_stash_notes_summary_and_last_modified() {
     let tmp = tempfile::tempdir().unwrap();

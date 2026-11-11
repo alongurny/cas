@@ -6,7 +6,9 @@ use cas_core::mem::MemBackend;
 use cas_core::server::Server;
 use cas_core::{AllowAll, CoreStore, Error as CoreError, Expect, Op, Policy, Span, Store, Who};
 use cas_version::access::{self, Access, Grant, Rules};
-use cas_version::{Error, Node, Path, build, formats, history, put, sync};
+use cas_version::{Error, Node, Path, build, formats, put, sync};
+
+mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -27,7 +29,7 @@ fn local_branch() -> Arc<dyn Store> {
     let f = put(&*s, b3(), "raw", b"hello\n").unwrap();
     let m = BTreeMap::from([(Path::new("a").unwrap(), Node::File(f))]);
     let v = build(&*s, b3(), formats::by_alias("dir").unwrap(), &m).unwrap();
-    history::commit(&*s, b3(), "main", &v, history::Step::default(), None).unwrap();
+    common::commit(&*s, "main", &v);
     s
 }
 
@@ -101,7 +103,8 @@ fn served_store_enforces_the_policy_from_its_meta_store() {
     let as_alice = client().with_token(&alice);
     assert_eq!(sync::push(&*local, &as_alice, "main", "main").unwrap().0, sync::Outcome::Created);
     // Anyone may read what alice pushed.
-    assert_eq!(history::load(&anon, "main").unwrap().1.log().len(), 1);
+    let tip = cas_version::commits::tip(&anon, "main").unwrap().unwrap();
+    assert_eq!(cas_version::commits::log(&anon, &tip).unwrap().len(), 1);
     // A wrong token is just anonymous.
     let guess = client().with_token("0123");
     assert_eq!(guess.write("main", b"x", &Expect::Absent), Err(CoreError::Denied));

@@ -37,7 +37,6 @@ There is no commit message. A commit says why through notes: --notes takes the d
 - `--author <name>`: who makes the commit (default $CAS_AUTHOR, else $USER)
 - `--notes <file>`: notes for the step: what `status <dir> --diff` prints, with `# note` lines added
 - `--annotate <path>=<file>`: notes on the file <path> as it is: its lines as `| line`, with `# note` lines
-- `--nodes`: start a history in the earlier format, which the forge still keeps
 
 ### status
 
@@ -297,16 +296,6 @@ cas -H releases compatible <from> <to>
 Whether upgrading from release <from> to <to> is safe.
 
 Prints compatible or breaking, from the kinds of change between the two.
-
-### tag
-
-```
-cas tag <name>
-```
-
-Name a node of a history in the earlier format.
-
-A history of commits has no tags of its own: `publish --tag` names a release.
 
 ### import-git
 

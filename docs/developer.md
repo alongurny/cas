@@ -69,10 +69,10 @@ formats: to it a blob is bytes and a variable is a name that holds a view.
 - `annotated.rs`, `stepnotes.rs`: line diffs and the notes on them.
 - `merge.rs`, `sync.rs`, `gc.rs`, `fsck.rs`, `access.rs`: what their names say,
   each with a specification of the same name.
-- `history.rs`, `htree.rs`, `graph.rs`, `ancestry.rs`, `derived.rs`: the
-  earlier history format, which the forge still keeps. New work goes on
-  commits; these go when the forge has moved over.
-- `git.rs`, `gitobj.rs`, `git_notes.rs`: reading git repositories.
+- `derived.rs`, `proofs.rs`: functions whose results are kept, and the
+  manifests and proofs of commits.
+- `gitobj.rs`, `gitcommits.rs`: git's objects in the store, and git commits
+  to and from commits.
 
 ### cas-cli
 
@@ -80,7 +80,7 @@ formats: to it a blob is bytes and a variable is a name that holds a view.
   manual page, [commands.md](commands.md) and the completions are printed
   from it.
 - `commits.rs` runs the commands on histories of commits and release
-  histories, `main.rs` the commands on a store and on the earlier format, and
+  histories, `main.rs` the commands on a store, and
   `forge.rs` the commands that talk to a forge.
 
 ## The rule every format follows

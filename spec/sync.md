@@ -18,16 +18,16 @@ form the source keeps them, wire.md "Stored forms") on the
 source, so a clone costs round trips in proportion to the depth of its trees, not their size
 (Thesis: 32,145 blobs in about a dozen rounds).
 
-- **Children come from formats.** A directory's children are its entries. A `history`'s are its
-  nodes' versions. File formats and unknown formats have none, so their blobs are copied
+- **Children come from formats.** A directory's children are its entries. A commit's are its
+  version, author, notes and parents. File formats and unknown formats have none, so their blobs are copied
   without being followed.
 - **Children before parents.** A blob is written only after everything it refers to. This keeps
   the **closure invariant**: if a store holds a blob, it holds everything reachable from it.
   Files (which refer to nothing) are written in batches as they arrive; directories and
   histories are held until the walk ends and written in post-order from the root.
 - **Stop at what is there.** Because of the invariant, the walk stops descending at the first blob
-  the destination already has. Copying one new node on top of a synced history costs the new blobs
-  (one per changed directory, plus files and the history), not the size of the repository.
+  the destination already has. Copying one new commit on top of a synced history costs the new blobs
+  (one per changed directory, plus files and the commit), not the size of the repository.
 - **Formats travel too.** For each format seen, its format object and spec are copied as well, so
   the destination can describe what it holds.
 - **Interruptions are safe.** An interrupted copy leaves only complete subtrees behind (often
@@ -41,11 +41,11 @@ must keep it too, or a sync may skip a subtree it believes is present.
 `push(src, dst, from, to)` makes the name `to` in `dst` hold the history
 `from` names in `src`. Fast-forward only:
 
-- If both hold the same history object, it is up to date.
+- If both hold the same commit, it is up to date.
 - If `dst` has no such name, it copies the history and creates the name
   (expect-absent).
-- If the new history extends the old one (every old node is there with the
-  same steps; tags and docs may change), it copies what is missing and
+- If the new commit reaches the old one (for a release history: the old
+  release is in the new one's log), it copies what is missing and
   moves the name by compare-and-swap from the old value.
 - Otherwise the histories have **diverged**, and nothing is overwritten.
   The same happens if `dst` moved during the copy. The caller rebases (or

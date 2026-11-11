@@ -142,7 +142,6 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("git-tree", include_str!("../../spec/formats/git-tree.md"), Kind::Leaf(crate::gitobj::check_tree)),
         format("git-commit", include_str!("../../spec/formats/git-commit.md"), Kind::Leaf(crate::gitobj::check_commit)),
         format("git-tag", include_str!("../../spec/formats/git-tag.md"), Kind::Leaf(crate::gitobj::check_tag)),
-        format("git-links", include_str!("../../spec/formats/git-links.md"), Kind::Leaf(crate::gitobj::check_links)),
         format(
             "git-commits",
             include_str!("../../spec/formats/git-commits.md"),
@@ -151,26 +150,8 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("git-tags", include_str!("../../spec/formats/git-tags.md"), Kind::Leaf(crate::gitobj::check_tags)),
         format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
         format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),
-        // Version 1 had no notes; version 2 had them on steps only;
-        // version 3 noted steps on a stored diff.
-        format_since(
-            "history",
-            include_str!("../../spec/formats/history.md"),
-            Kind::Leaf(crate::htree::check_root),
-            &[
-                include_str!("../../spec/formats/history-v1.md"),
-                include_str!("../../spec/formats/history-v2.md"),
-                include_str!("../../spec/formats/history-v3.md"),
-            ],
-        ),
         format("annotated", include_str!("../../spec/formats/annotated.md"), Kind::Leaf(crate::annotated::check)),
         format("diff", include_str!("../../spec/formats/diff.md"), Kind::Leaf(crate::annotated::check_diff)),
-        format("step-notes", include_str!("../../spec/formats/step-notes.md"), Kind::Leaf(crate::stepnotes::check)),
-        format(
-            "history-part",
-            include_str!("../../spec/formats/history-part.md"),
-            Kind::Leaf(crate::htree::check_part),
-        ),
         // Formats given as types (spec/types.md).
         format_since(
             "directory",

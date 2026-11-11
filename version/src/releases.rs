@@ -71,7 +71,7 @@ pub fn is_release(v: &View) -> bool {
 /// The newest release of the release history `name`: `None` when unset,
 /// an error when the variable holds something else.
 pub fn tip(store: &dyn Store, name: &str) -> Result<Option<String>> {
-    match crate::history::head(store, name)? {
+    match crate::head(store, name)? {
         None => Ok(None),
         Some(v) if is_release(&v) => Ok(Some(v.key)),
         Some(v) => Err(Error::NotRelease(format!("{name} holds {v}"))),

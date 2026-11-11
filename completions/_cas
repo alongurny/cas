@@ -48,7 +48,6 @@ _cas() {
         'pull:fetch the history from another store'
         'publish:add the commit'\''s version to the release history as a release'
         'compatible:whether upgrading from release <from> to <to> is safe'
-        'tag:name a node of a history in the earlier format'
         'import-git:import the commits of a git repository as a new history'
         'gc:remove blobs that no history reaches'
         'fsck:check every reachable blob\: readable, valid and complete'
@@ -84,7 +83,7 @@ _cas() {
         command) _describe command commands ;;
         rest)
             case $line[1] in
-                commit) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '--notes[notes for the step\: what `status <dir> --diff` prints, with `# note` lines added]:<file>:_files' '--annotate[notes on the file <path> as it is\: its lines as `| line`, with `# note` lines]:<path>=<file>:_files' '--nodes[start a history in the earlier format, which the forge still keeps]' '*: :_files' ;;
+                commit) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '--notes[notes for the step\: what `status <dir> --diff` prints, with `# note` lines added]:<file>:_files' '--annotate[notes on the file <path> as it is\: its lines as `| line`, with `# note` lines]:<path>=<file>:_files' '*: :_files' ;;
                 status) _arguments $general '--diff[print the line diff, ready to add notes to]' '*: :_files' ;;
                 reset) _arguments $general '*: :_files' ;;
                 clean) _arguments $general '*: :_files' ;;
@@ -113,7 +112,7 @@ _cas() {
                 issue) _arguments $general '1: :(list open show comment edit close reopen label)' ;;
                 release) _arguments $general '1: :(list publish archive)' ;;
                 mirror) _arguments $general '1: :(add pull)' ;;
-                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible tag import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
+                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
                 completions) _arguments $general '1: :(fish bash zsh)' ;;
             esac ;;
     esac

@@ -87,8 +87,8 @@ are `malformed(key, reason)`. A root, or a file being checked out, in an unknown
 
 ## 4. Not in this format
 
-Order, changelogs, compatibility, tags and docs belong to histories (spec/history.md); versions
-have no parents. Ownership, timestamps
+Order, notes, authors and times belong to commits (spec/formats/commit.md), tags and changelogs to
+releases (spec/formats/release.md); versions have no parents. Ownership, timestamps
 and ACLs are left out, and would be formats of their own.
 
 ## 5. Conformance

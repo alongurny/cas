@@ -2,22 +2,22 @@
 //! variable holds a view of its newest commit, versions are `directory`
 //! trees, and notes are `annotation` trees.
 
-use crate::{Args, Res, b3, e, flush_out, node_text, short};
+use crate::{Args, Res, b3, e, flush_out, short};
 use cas_core::Store;
 use cas_core::disk::DiskBackend;
 use cas_version::commits::{self, Commit, Notes};
 use cas_version::releases;
 use cas_version::stepnotes::{self, StepNotes};
-use cas_version::{Node, Path, View, annotated, diff, formats, fs, history, object_at, read_blob, walk};
+use cas_version::{Node, Path, View, annotated, diff, formats, fs, object_at, read_blob, walk};
 use cas_version::{derived, proofs};
 use std::collections::{BTreeMap, HashMap};
 
 /// Every command this module knows, for the help table's check.
 #[cfg(test)]
-pub const COMMANDS: [&[&str]; 3] = [PORTED, RELEASE, NO_HISTORY];
+pub const COMMANDS: [&[&str]; 3] = [COMMITS, RELEASE, NO_HISTORY];
 
 /// The commands that work on a history of commits.
-const PORTED: &[&str] = &[
+const COMMITS: &[&str] = &[
     "commit",
     "status",
     "reset",
@@ -37,7 +37,6 @@ const PORTED: &[&str] = &[
     "last-modified",
     "summary",
     "notes",
-    "tag",
     "manifest",
     "prove",
     "verify",
@@ -49,36 +48,32 @@ const RELEASE: &[&str] = &["log", "ls", "checkout", "sparse", "compatible"];
 /// The commands that are not about one history.
 const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated", "push", "pull", "watch"];
 
-/// Whether the command is for this module: the history holds a commit, or
-/// it is unset (and `--nodes` does not ask for the earlier format).
+/// Whether the command is about one history, which is of commits or of
+/// releases; a command that fits neither kind is refused.
 pub fn handles(a: &Args, s: &dyn Store) -> Res<bool> {
     let Some(cmd) = a.rest.first().map(String::as_str) else { return Ok(false) };
     if NO_HISTORY.contains(&cmd) {
         return Ok(false);
     }
     let name = a.history.as_str();
-    let ours = match history::head(s, name).map_err(e)? {
+    match cas_version::head(s, name).map_err(e)? {
         Some(v) if releases::is_release(&v) => {
             if !RELEASE.contains(&cmd) {
                 return Err(format!("{cmd} is not for a release history ({name}): {}", RELEASE.join(", ")));
             }
-            true
         }
-        Some(v) => commits::is_commit(&v),
-        // A new history is one of commits, unless --nodes asks for the
-        // earlier format (which the forge still keeps).
-        None => !a.nodes,
-    };
-    if a.nodes && ours {
-        return Err(format!("history {name} is a history of commits; --nodes is for the earlier format"));
+        Some(v) if !commits::is_commit(&v) => return Err(format!("{name} holds {v}, which is not a history")),
+        _ => {}
     }
-    if !ours {
-        return Ok(false);
+    Ok(COMMITS.contains(&cmd) || RELEASE.contains(&cmd))
+}
+
+fn node_text(n: &Option<Node>) -> &'static str {
+    match n {
+        None => "-",
+        Some(Node::Dir) => "dir",
+        Some(Node::File(r)) => r.known_format().map_or("?", |f| f.alias),
     }
-    if !PORTED.contains(&cmd) && !RELEASE.contains(&cmd) {
-        return Err(format!("{cmd} is not yet available for a history of commits ({name})"));
-    }
-    Ok(true)
 }
 
 /// A time as `YYYY-MM-DD HH:MM` (UTC).
@@ -109,7 +104,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
         a.rest.get(i).cloned().ok_or_else(|| format!("missing {what}\n{}", crate::help::usage(&a.rest[0])))
     };
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
-    if history::head(s, name).map_err(e)?.is_some_and(|v| releases::is_release(&v)) {
+    if cas_version::head(s, name).map_err(e)?.is_some_and(|v| releases::is_release(&v)) {
         return run_release(a, s);
     }
     let tip = commits::tip(s, name).map_err(e)?;
@@ -377,9 +372,6 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             }
             out!("{} blobs, {} bytes, manifest {}", m.blobs.len(), m.bytes(), view.key());
         }
-        "tag" => {
-            return Err("a history of commits has no tags: publish --tag <version> names a release".into());
-        }
         "log" => {
             let Some(tip) = &tip else { return Ok(()) };
             let mut authors: HashMap<String, String> = HashMap::new();
@@ -517,7 +509,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             let repo = arg(1, "<repo>")?;
             let rev = a.rest.get(2).cloned().unwrap_or_else(|| "HEAD".into());
             let start = std::time::Instant::now();
-            let (key, n) = commits::import_git(s, b3(), repo.as_ref(), &rev).map_err(e)?;
+            let (key, links) = cas_version::gitcommits::import(s, b3(), repo.as_ref(), &rev).map_err(e)?;
             formats::publish(s).map_err(e)?;
             commits::advance(s, name, None, &key).map_err(|x| format!("{name}: {x}"))?;
             if !a.store.starts_with("http://")
@@ -526,16 +518,9 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             {
                 disk.seal_packs().map_err(e)?;
             }
-            out!(
-                "{} commits, {} files, {} submodules skipped in {:.1}s; newest {}",
-                n.commits,
-                n.files,
-                n.skipped,
-                start.elapsed().as_secs_f64(),
-                short(&key)
-            );
+            out!("{} commits in {:.1}s; newest {}", links.len(), start.elapsed().as_secs_f64(), short(&key));
         }
-        _ => unreachable!("handles() lets only ported commands through"),
+        _ => unreachable!("handles() lets only these commands through"),
     }
     Ok(())
 }

@@ -1,5 +1,9 @@
 # Performance design
 
+> These measurements were made on the earlier history format, which was
+> removed on 2026-11-11 in favour of histories of commits. They are kept as
+> a record; some commands and functions they name no longer exist.
+
 Alon asked for this design on 2026-11-08. The starting point is
 [bench-git.md](bench-git.md), on Thesis (4,532 commits, 671 files):
 

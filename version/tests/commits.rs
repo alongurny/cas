@@ -1,11 +1,10 @@
 //! Histories of commits: `directory` as a working directory format,
-//! commits and their notes, and the rewrite of an earlier history.
+//! commits and their notes.
 
 use cas_core::algo::{self, Algorithm};
 use cas_core::mem::MemBackend;
 use cas_core::{AllowAll, CoreStore, Policy, Session, Store, Who};
 use cas_version::commits::{self, Commit, Converter, Notes};
-use cas_version::history::{History, Step};
 use cas_version::stepnotes::PathNotes;
 use cas_version::{Node, Path, View, build, by_alias, diff, fs, put, walk};
 use std::collections::BTreeMap;
@@ -182,45 +181,10 @@ fn commits_make_a_history() {
     assert_eq!(commits::resolve(&s, &k4, "latest").unwrap(), Some(k4.clone()));
     assert_eq!(commits::resolve(&s, &k4, &k1[7..19]).unwrap(), Some(k1.clone()));
     assert_eq!(commits::resolve(&s, &k4, "ffffffffffff").unwrap(), None);
-    // A history of the earlier format is not read as commits.
-    let mut h = History::default();
-    h.append(&tree(&s, "tree", &[("a.tex", "raw", "one\n")]), Step::default(), None).unwrap();
-    cas_version::history::save(&s, b3(), "old", None, &h).unwrap();
+    // A variable that holds something else is not read as a history.
+    let other = tree(&s, "tree", &[("a.tex", "raw", "one\n")]);
+    s.write("old", other.to_string().as_bytes(), &cas_core::Expect::Absent).unwrap();
     assert!(commits::tip(&s, "old").is_err());
-}
-
-#[test]
-fn an_earlier_history_becomes_commits() {
-    let s = store();
-    let o1 = tree(&s, "tree", &[("a.tex", "raw", "one\n"), ("run", "exec", "#!/bin/sh\n")]);
-    let o2 = tree(&s, "tree", &[("a.tex", "raw", "one\ntwo\n"), ("run", "exec", "#!/bin/sh\n")]);
-    let mut h = History::default();
-    let n1 = h.append(&o1, Step::default(), Some("the first\nversion".into())).unwrap();
-    let sn = cas_version::stepnotes::StepNotes {
-        before: Some(o1.clone()),
-        after: o2.clone(),
-        note: "add a line".into(),
-        paths: BTreeMap::from([(
-            "a.tex".to_string(),
-            PathNotes { note: String::new(), old: None, new: Some(vec![(1, String::new()), (1, "add a line".into())]) },
-        )]),
-    };
-    let step =
-        Step { changelog: None, compatible: false, notes: Some(cas_version::stepnotes::write(&s, b3(), &sn).unwrap()) };
-    let n2 = h.append(&o2, step, None).unwrap();
-    let made = Converter::new(&s, b3()).history(&h, &|id| ("Dana".into(), if *id == n1 { 100 } else { 200 })).unwrap();
-    let c2 = commits::read(&s, &made[&n2]).unwrap();
-    assert_eq!(c2.time, 200);
-    assert_eq!(commits::text(&s, &c2.author).unwrap(), "Dana");
-    assert_eq!(c2.parents.keys().collect::<Vec<_>>(), [&made[&n1]]);
-    assert_eq!(paths(&s, &c2.version()), ["a.tex:raw", "run:exec"]);
-    let step = c2.parents[&made[&n1]].clone().unwrap();
-    let n = commits::read_notes(&s, &step).unwrap();
-    assert_eq!((n.note.as_str(), &n.paths), ("add a line", &sn.paths));
-    let c1 = commits::read(&s, &made[&n1]).unwrap();
-    commits::fits(&s, &n, Some(&c1.version()), &c2.version()).unwrap();
-    assert_eq!(commits::line(&s, &c1).unwrap(), "the first / version");
-    assert_eq!(commits::line(&s, &c2).unwrap(), "add a line");
 }
 
 #[test]
