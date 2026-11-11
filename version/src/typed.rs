@@ -302,6 +302,9 @@ fn maybe(name: &'static str, targets: &'static [&'static str]) -> KeyF {
     KeyF { name, targets, optional: true }
 }
 
+/// The types a proof can cover, in the tag order of a manifest.
+pub const PROVEN: &[&str] = &["directory", "commit", "annotation", "lines", "runs", "release", "note", "author"];
+
 /// The kinds of change between two releases, in tag order.
 pub const CHANGES: &[&str] = &["breaking", "feature", "patch", "security"];
 
@@ -401,6 +404,21 @@ static TYPES: LazyLock<Vec<Type>> = LazyLock::new(|| {
             )),
             nonempty: false,
         },
+        // manifest = sorted<{ blob: key<...>, length: integer }> by blob
+        Type {
+            alias: "manifest",
+            head: None,
+            list: Some((
+                Rec {
+                    keys: vec![key("blob", PROVEN)],
+                    choices: vec![],
+                    ints: vec![IntF { name: "length", positive: false }],
+                    name: false,
+                },
+                Order::Sorted,
+            )),
+            nonempty: true,
+        },
     ]
 });
 
@@ -430,4 +448,7 @@ pub fn check_runs(b: &[u8]) -> Result<(), String> {
 }
 pub fn check_release(b: &[u8]) -> Result<(), String> {
     of("release").check(b)
+}
+pub fn check_manifest(b: &[u8]) -> Result<(), String> {
+    of("manifest").check(b)
 }

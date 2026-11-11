@@ -61,8 +61,8 @@ formats: to it a blob is bytes and a variable is a name that holds a view.
 - `formats.rs`: the list of formats. A format's id is the key of its format
   object, which names its specification ([../spec/metaformat.md](../spec/metaformat.md)).
 - `typed.rs`: the formats given as types ([../spec/types.md](../spec/types.md)):
-  `directory`, `commit`, `annotation`, `lines`, `runs`, `release` and the
-  texts. One generic parser and printer serve all of them.
+  `directory`, `commit`, `annotation`, `lines`, `runs`, `release`, `manifest`
+  and the texts. One generic parser and printer serve all of them.
 - `dir.rs`, `tree.rs`, `fs.rs`, `index.rs`, `watch.rs`: directories, the walk
   and diff of versions, and moving a version to and from a real directory.
 - `commits.rs`, `releases.rs`: histories of commits and release histories.
@@ -141,6 +141,9 @@ feature `bench-insecure`.
 ## Proofs
 
 The typed formats are laid out so that validity is cheap to prove: 64-byte
-blocks, fixed places, one encoding. The circuits that prove them are
-generated from the same `Type` values. That work is not in this repository
-yet.
+blocks, fixed places, one encoding. `version/src/proofs.rs` has the manifest
+of a commit (what one proof covers) and the two derived functions, `manifest`
+and `proof`. The prover is `prove/`, a crate outside the workspace because
+it builds Flock; its circuits are generated from the same `Type` values.
+[proofs.md](proofs.md) says how to build it and what a proof does and does
+not say.

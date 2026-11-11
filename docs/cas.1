@@ -117,6 +117,31 @@ The notes of the commit.
 .IP
 Without <path>, the noted paths. With <path>, its note and the file's lines with the note on each, in the form `commit \-\-annotate` takes.
 .TP
+\fBcas\fR manifest
+What a proof of the commit covers.
+.IP
+Lists each blob the commit brings that is not a file: its type, its key and its length. A proof for this list says that each of them is valid. The last line gives the totals and the key of the manifest, which is what a proof is named by.
+.TP
+\fBcas\fR prove [\-\-all] [\-\-quiet]
+Make a proof that what the commit brings is valid.
+.IP
+The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With \-\-all, every commit the commit reaches that has no proof yet gets one, oldest first. A server runs this after a push.
+.IP
+Proving is done by the program cas\-prove, built from prove/ (docs/proofs.md).
+.IP
+\fB\-\-all\fR : every commit the commit reaches, not only the commit itself
+.IP
+\fB\-\-quiet\fR : print the outcome only, not a line for each proof
+.TP
+\fBcas\fR verify [\-\-all] [\-\-quiet]
+Check the proof of the commit.
+.IP
+Checks the proof kept for the manifest of the commit, or with \-\-all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. Fails when a commit has no proof or a proof does not verify.
+.IP
+\fB\-\-all\fR : every commit the commit reaches, not only the commit itself
+.IP
+\fB\-\-quiet\fR : print the outcome only, not a line for each proof
+.TP
 \fBcas\fR summary
 How many directories and files the commit's version has.
 .TP

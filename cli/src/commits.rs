@@ -9,6 +9,7 @@ use cas_version::commits::{self, Commit, Notes};
 use cas_version::releases;
 use cas_version::stepnotes::{self, StepNotes};
 use cas_version::{Node, Path, View, annotated, diff, formats, fs, history, object_at, read_blob, walk};
+use cas_version::{derived, proofs};
 use std::collections::{BTreeMap, HashMap};
 
 /// Every command this module knows, for the help table's check.
@@ -37,6 +38,9 @@ const PORTED: &[&str] = &[
     "summary",
     "notes",
     "tag",
+    "manifest",
+    "prove",
+    "verify",
 ];
 
 /// The commands that work on a release history.
@@ -297,6 +301,64 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 }
             }
         }
+        cmd @ ("prove" | "verify") => {
+            // The prover is a program of its own (prove/): it builds Flock.
+            if a.store.contains("://") {
+                return Err(format!("{cmd} works on a store directory: run it where the store is"));
+            }
+            let (k, _) = at()?;
+            // Oldest first, so that what is proven is always a history's start.
+            let mut commits: Vec<String> =
+                if a.all { commits::log(s, &k).map_err(e)?.into_iter().map(|(k, _)| k).collect() } else { vec![k] };
+            commits.reverse();
+            let mut manifests = Vec::new();
+            let mut blobs = 0;
+            for k in &commits {
+                let view = derived::derive(s, b3(), &proofs::MANIFEST, &commits::view("commit", k)).map_err(e)?;
+                let proven = derived::cached(s, &proofs::PROOF, &view).map_err(e)?.is_some();
+                if cmd == "verify" && !proven {
+                    return Err(format!("commit {} has no proof: cas prove makes one", short(k)));
+                }
+                if cmd == "verify" || !proven {
+                    blobs += proofs::read(s, view.key()).map_err(e)?.blobs.len();
+                    manifests.push(view.key().to_string());
+                }
+            }
+            if manifests.is_empty() {
+                out!("{} commits, all proven already", commits.len());
+                return Ok(());
+            }
+            flush_out();
+            let program = prover()?;
+            for part in manifests.chunks(256) {
+                let status = std::process::Command::new(&program)
+                    .arg(cmd)
+                    .arg("--store")
+                    .arg(&a.store)
+                    .args(part)
+                    .stdout(if a.quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
+                    .status()
+                    .map_err(|x| format!("{}: {x}", program.display()))?;
+                if !status.success() {
+                    return Err(format!(
+                        "{cmd} failed{}",
+                        if a.quiet { "; run it without --quiet to see where" } else { "" }
+                    ));
+                }
+            }
+            let done = if cmd == "prove" { "proven" } else { "verified" };
+            out!("{} commits {done}: {blobs} blobs valid", manifests.len());
+        }
+        "manifest" => {
+            // Kept as derived data, so it is worked out once for a commit.
+            let (k, _) = at()?;
+            let view = derived::derive(s, b3(), &proofs::MANIFEST, &commits::view("commit", &k)).map_err(e)?;
+            let m = proofs::read(s, view.key()).map_err(e)?;
+            for (key, (alias, len)) in &m.blobs {
+                out!("{alias:10} {} {len}", cas_version::typed::key_text(key));
+            }
+            out!("{} blobs, {} bytes, manifest {}", m.blobs.len(), m.bytes(), view.key());
+        }
         "tag" => {
             return Err("a history of commits has no tags: publish --tag <version> names a release".into());
         }
@@ -458,6 +520,19 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
         _ => unreachable!("handles() lets only ported commands through"),
     }
     Ok(())
+}
+
+/// The prover program: next to this one, else on the path.
+fn prover() -> Res<std::path::PathBuf> {
+    let name = "cas-prove";
+    let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name)));
+    let on_path = std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+        .map(|d| d.join(name));
+    beside.into_iter().chain(on_path).find(|p| p.is_file()).ok_or_else(|| {
+        "the prover is not installed: build it from prove/ (docs/proofs.md) and put cas-prove on the path".to_string()
+    })
 }
 
 /// The notes of a commit and the version they start from: those of the

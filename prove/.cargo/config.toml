@@ -1,0 +1,3 @@
+# Flock's field arithmetic uses the instructions of the machine it is built on.
+[build]
+rustflags = ["-C", "target-cpu=native"]

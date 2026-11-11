@@ -514,3 +514,47 @@ fn releases_have_tags_and_typed_changes() {
     assert!(fails(&["-H", "releases", "commit", w]).contains("not for a release history"));
     assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
 }
+
+#[test]
+fn a_commit_has_a_manifest_and_needs_the_prover_for_a_proof() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let w = work.to_str().unwrap();
+    let first = cas(&store, &["commit", w, "--author", "Dana"]);
+    std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
+    let second = cas(&store, &["commit", w, "--author", "Dana"]);
+
+    // The first commit brings itself, its author and both directories.
+    let m = cas(&store, &["-n", first.trim(), "manifest"]);
+    let kinds: Vec<&str> = m.lines().filter_map(|l| l.split_whitespace().next()).collect();
+    assert_eq!(kinds.iter().filter(|k| **k == "commit").count(), 1, "{m}");
+    assert_eq!(kinds.iter().filter(|k| **k == "directory").count(), 2, "{m}");
+    assert_eq!(kinds.iter().filter(|k| **k == "author").count(), 1, "{m}");
+    assert!(m.lines().all(|l| l.contains("blake3:")), "{m}");
+    assert!(m.lines().any(|l| l.contains(first.trim())), "{m}");
+    // The second brings no author again, and asking twice gives the same.
+    let m2 = cas(&store, &["manifest"]);
+    assert!(!m2.contains("author"), "{m2}");
+    assert!(m2.lines().any(|l| l.contains(second.trim())), "{m2}");
+    assert_eq!(m2, cas(&store, &["manifest"]));
+
+    // Without the prover on the path, verify and prove say what is missing.
+    let run = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_cas"))
+            .env("PATH", "")
+            .arg("--store")
+            .arg(&store)
+            .args(args)
+            .output()
+            .unwrap();
+        (out.status.code(), String::from_utf8(out.stderr).unwrap())
+    };
+    let (code, err) = run(&["verify", "--all"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("has no proof: cas prove makes one"), "{err}");
+    let (code, err) = run(&["prove"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert!(err.contains("the prover is not installed"), "{err}");
+}

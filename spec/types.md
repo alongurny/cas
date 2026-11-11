@@ -3,7 +3,7 @@
 Some formats are not described byte by byte. Each is a type, built from
 the parts below, and its parser, its printer, its validity check and the
 views it holds all follow from the type. The formats are `directory`,
-`commit`, `annotation`, `lines`, `runs` and `release`, with the text formats
+`commit`, `annotation`, `lines`, `runs`, `release` and `manifest`, with the text formats
 `note`, `author` and `tag` (see each in [formats/](formats/)).
 
 They are designed so that a proof of validity is cheap: a blob is a whole

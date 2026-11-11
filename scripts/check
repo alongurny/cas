@@ -19,4 +19,10 @@ fi
 cargo fmt --all --check
 cargo clippy --release --workspace --all-targets --all-features -- -D warnings
 cargo test --release --workspace --all-features
+# The prover builds Flock, which is a checkout beside this one (docs/proofs.md).
+if [ -d ../flock/crates/flock-prover ]; then
+    (cd prove && cargo fmt --check && cargo clippy --release --all-targets -- -D warnings && cargo test --release)
+else
+    echo "prove/ not checked: no ../flock"
+fi
 echo "all checks pass"

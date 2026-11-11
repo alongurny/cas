@@ -35,6 +35,9 @@ _cas() {
         'ls:the paths of the commit'\''s version'
         'diff:what the commit changed'
         'notes:the notes of the commit'
+        'manifest:what a proof of the commit covers'
+        'prove:make a proof that what the commit brings is valid'
+        'verify:check the proof of the commit'
         'summary:how many directories and files the commit'\''s version has'
         'path-log:the commits that changed <path>'
         'last-modified:each entry under <prefix> with the commit that last changed it'
@@ -90,6 +93,8 @@ _cas() {
                 checkout) _arguments $general '*: :_files' ;;
                 sparse) _arguments $general '*: :_files' ;;
                 diff) _arguments $general '--annotated[print the line diff with the notes of the step]' ;;
+                prove) _arguments $general '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' ;;
+                verify) _arguments $general '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' ;;
                 merge) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '1: :_cas_histories' ;;
                 rebase) _arguments $general '1: :_cas_histories' ;;
                 push) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
@@ -108,7 +113,7 @@ _cas() {
                 issue) _arguments $general '1: :(list open show comment edit close reopen label)' ;;
                 release) _arguments $general '1: :(list publish archive)' ;;
                 mirror) _arguments $general '1: :(add pull)' ;;
-                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes summary path-log last-modified merge-base merge rebase push pull publish compatible tag import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
+                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible tag import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
                 completions) _arguments $general '1: :(fish bash zsh)' ;;
             esac ;;
     esac

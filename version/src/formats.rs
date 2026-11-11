@@ -180,6 +180,7 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("note", include_str!("../../spec/formats/note.md"), Kind::Leaf(crate::typed::check_text)),
         format("author", include_str!("../../spec/formats/author.md"), Kind::Leaf(crate::typed::check_text)),
         format("tag", include_str!("../../spec/formats/tag.md"), Kind::Leaf(crate::typed::check_semver)),
+        format("manifest", include_str!("../../spec/formats/manifest.md"), Kind::Leaf(crate::typed::check_manifest)),
     ]
 });
 

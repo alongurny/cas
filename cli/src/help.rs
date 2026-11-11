@@ -74,6 +74,8 @@ pub const OPTIONS: &[Opt] = &[
         values: &["breaking", "feature", "patch", "security"],
     },
     opt("--changelog", "<file>", "the text that says what the release changes"),
+    opt("--all", "", "every commit the commit reaches, not only the commit itself"),
+    opt("--quiet", "", "print the outcome only, not a line for each proof"),
     opt("--full", "", "walk the whole store, not only what came since the last full run"),
     opt("--cert", "<file>", "the PEM certificate chain to serve with"),
     opt("--key", "<file>", "the PEM private key to serve with"),
@@ -215,6 +217,40 @@ pub const COMMANDS: &[Cmd] = &[
         "Without <path>, the noted paths. With <path>, its note and the file's lines with the \
          note on each, in the form `commit --annotate` takes.",
     ),
+    cmd(
+        "manifest",
+        READ,
+        &["manifest"],
+        "what a proof of the commit covers",
+        "Lists each blob the commit brings that is not a file: its type, its key and its length. \
+         A proof for this list says that each of them is valid. The last line gives the totals \
+         and the key of the manifest, which is what a proof is named by.",
+    ),
+    Cmd {
+        opts: &["--all", "--quiet"],
+        ..cmd(
+            "prove",
+            READ,
+            &["prove [--all] [--quiet]"],
+            "make a proof that what the commit brings is valid",
+            "The proof covers the manifest of the commit (`cas manifest`) and is kept in the store \
+             beside it. With --all, every commit the commit reaches that has no proof yet gets \
+             one, oldest first. A server runs this after a push.\n\n\
+             Proving is done by the program cas-prove, built from prove/ (docs/proofs.md).",
+        )
+    },
+    Cmd {
+        opts: &["--all", "--quiet"],
+        ..cmd(
+            "verify",
+            READ,
+            &["verify [--all] [--quiet]"],
+            "check the proof of the commit",
+            "Checks the proof kept for the manifest of the commit, or with --all of every commit \
+             it reaches. A proof is checked against the manifest alone: no listed blob is read. \
+             Fails when a commit has no proof or a proof does not verify.",
+        )
+    },
     cmd("summary", READ, &["summary"], "how many directories and files the commit's version has", ""),
     cmd("path-log", READ, &["path-log <path>"], "the commits that changed <path>", ""),
     cmd(

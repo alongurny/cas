@@ -176,6 +176,9 @@ becomes the note of its step.
   that its hash is right and that it is valid in its format.
 - `cas gc` removes blobs nothing reaches. A blob goes only after two runs in
   a row found it unreachable.
+- `cas prove` makes a proof that what a commit brought is valid, and
+  `cas verify` checks it; `--all` does the whole history. They need the
+  prover, a program of its own: see [proofs.md](proofs.md).
 
 ## When something goes wrong
 

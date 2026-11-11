@@ -25,6 +25,7 @@ pub mod history;
 mod htree;
 pub mod index;
 pub mod merge;
+pub mod proofs;
 pub mod releases;
 pub mod stepnotes;
 pub mod sync;

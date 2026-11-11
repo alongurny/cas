@@ -30,6 +30,8 @@ completions of all three shells.
 - [docs/guide.md](docs/guide.md): using cas, from the first commit to a release.
 - [docs/commands.md](docs/commands.md): every command and option. The same
   text is `cas help <command>` and the manual page [docs/cas.1](docs/cas.1).
+- [docs/proofs.md](docs/proofs.md): proofs that the blobs of a commit are valid,
+  and how to build the prover.
 - [docs/developer.md](docs/developer.md): the layout of the code, how to add
   a format or a command, and the checks before a push.
 - [spec/](spec/): what the store, the wire, the formats and the forge are

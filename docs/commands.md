@@ -156,6 +156,44 @@ The notes of the commit.
 
 Without <path>, the noted paths. With <path>, its note and the file's lines with the note on each, in the form `commit --annotate` takes.
 
+### manifest
+
+```
+cas manifest
+```
+
+What a proof of the commit covers.
+
+Lists each blob the commit brings that is not a file: its type, its key and its length. A proof for this list says that each of them is valid. The last line gives the totals and the key of the manifest, which is what a proof is named by.
+
+### prove
+
+```
+cas prove [--all] [--quiet]
+```
+
+Make a proof that what the commit brings is valid.
+
+The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With --all, every commit the commit reaches that has no proof yet gets one, oldest first. A server runs this after a push.
+
+Proving is done by the program cas-prove, built from prove/ (docs/proofs.md).
+
+- `--all`: every commit the commit reaches, not only the commit itself
+- `--quiet`: print the outcome only, not a line for each proof
+
+### verify
+
+```
+cas verify [--all] [--quiet]
+```
+
+Check the proof of the commit.
+
+Checks the proof kept for the manifest of the commit, or with --all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. Fails when a commit has no proof or a proof does not verify.
+
+- `--all`: every commit the commit reaches, not only the commit itself
+- `--quiet`: print the outcome only, not a line for each proof
+
 ### summary
 
 ```

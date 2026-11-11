@@ -1,0 +1,28 @@
+# The prover of cas: proofs that the blobs of a manifest are valid
+# (spec/functions/proof.md). It is not a member of the workspace: it builds
+# Flock, which is large and comes from another repository, so the rest of
+# cas builds without it. `cas prove` and `cas verify` run this program.
+[package]
+name = "cas-prove"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "cas-prove"
+path = "src/main.rs"
+
+[dependencies]
+cas-core = { path = ".." }
+cas-version = { path = "../version" }
+# Flock with the cas circuits: clone alon/flock (branch cas) next to cas.
+flock-prover = { path = "../../flock/crates/flock-prover" }
+bincode = "1.3"
+blake3 = "1.8.7"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+opt-level = 3
+
+[workspace]
