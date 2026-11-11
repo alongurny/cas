@@ -316,7 +316,7 @@ static TYPES: LazyLock<Vec<Type>> = LazyLock::new(|| {
             head: None,
             list: Some((
                 Rec {
-                    keys: vec![key("child", &["raw", "symlink", "directory"])],
+                    keys: vec![key("child", &["raw", "symlink", "directory", "exec"])],
                     choices: vec![],
                     ints: vec![],
                     name: true,

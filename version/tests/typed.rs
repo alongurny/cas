@@ -151,7 +151,8 @@ fn what_is_refused() {
     let bad = |list: Vec<RecV>| dir.check(&dir.print(&Value { head: None, list })).is_err();
     assert!(bad(vec![entry(k(1), 1, "b"), entry(k(2), 1, "a")]), "out of order");
     assert!(bad(vec![entry(k(1), 1, "a"), entry(k(2), 1, "a")]), "a name twice");
-    assert!(bad(vec![entry(k(1), 4, "a")]), "a fourth kind");
+    assert!(!bad(vec![entry(k(1), 4, "a")]), "a file that may be run");
+    assert!(bad(vec![entry(k(1), 5, "a")]), "a fifth kind");
     assert!(bad(vec![entry(k(1), 1, "..")]));
     assert!(bad(vec![entry(k(1), 1, "a/b")]));
     assert!(bad(vec![entry(NONE, 1, "a")]), "a child is not optional");

@@ -215,8 +215,14 @@ impl Scan<'_> {
             }
             let stat = Stat::of(meta);
             let cached = self.old.and_then(|o| o.fresh(path.as_str(), &stat));
-            // A cache written for another directory format may hold `exec`.
-            let cached = cached.filter(|v| self.exec || v.known_format().is_none_or(|f| f.alias != "exec"));
+            // A cache written when the format had no `exec` holds `raw` for a
+            // file that may be run: what is cached must say what the mode says.
+            let runs = meta.permissions().mode() & 0o111 != 0;
+            let cached = cached.filter(|v| match v.known_format().map(|f| f.alias) {
+                Some("exec") => self.exec && runs,
+                Some("raw") => !(self.exec && runs),
+                _ => true,
+            });
             let r = match cached {
                 Some(v) => {
                     self.reused.push((path.clone(), file.to_path_buf()));
@@ -517,6 +523,7 @@ pub fn reset(
     Ok(done)
 }
 
-fn has_exec(format: &Format) -> bool {
-    format.alias != "directory"
+/// Every directory format tells a file that may be run from one that may not.
+fn has_exec(_: &Format) -> bool {
+    true
 }

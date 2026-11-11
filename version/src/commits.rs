@@ -475,8 +475,7 @@ impl<'a> Converter<'a> {
         Converter { store, alg, dirs: HashMap::new() }
     }
 
-    /// The `directory` holding what the directory `v` holds. An `exec`
-    /// file becomes `raw`: its bytes, and so its key, stay.
+    /// The `directory` holding what the directory `v` holds.
     pub fn directory(&mut self, v: &View) -> Result<String> {
         if v.known_format().is_some_and(|f| f.alias == "directory") {
             return Ok(v.key.clone());
@@ -489,8 +488,7 @@ impl<'a> Converter<'a> {
             let alias = i.child.known_format().map_or("?", |f| f.alias);
             i.child = match alias {
                 _ if i.child.is_dir() => view("directory", &self.directory(&i.child)?),
-                "raw" | "exec" => view("raw", &i.child.key),
-                "symlink" => i.child.clone(),
+                "raw" | "exec" | "symlink" => i.child.clone(),
                 other => return Err(Error::UnknownFormat(format!("a directory cannot hold {other} ({})", i.name))),
             };
         }

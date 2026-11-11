@@ -56,10 +56,14 @@ fn a_directory_is_a_working_directory_format() {
     let v2 = cas_version::update(&s, b3(), &v, &edit).unwrap();
     let changes: Vec<String> = diff(&s, &v, &v2, None).unwrap().iter().map(|c| c.path.to_string()).collect();
     assert_eq!(changes, ["src/c.rs"]);
-    // What a directory cannot hold is refused, not written.
+    // A file that may be run is a kind of its own.
     let exec =
         BTreeMap::from([(Path::new("run").unwrap(), Node::File(put(&s, b3(), "exec", b"#!/bin/sh\n").unwrap()))]);
-    assert!(build(&s, b3(), by_alias("directory").unwrap(), &exec).is_err());
+    let e = build(&s, b3(), by_alias("directory").unwrap(), &exec).unwrap();
+    assert_eq!(paths(&s, &e), ["run:exec"]);
+    // What a directory cannot hold is refused, not written.
+    let odd = BTreeMap::from([(Path::new("caf\u{e9}").unwrap(), Node::File(put(&s, b3(), "raw", b"").unwrap()))]);
+    assert!(build(&s, b3(), by_alias("directory").unwrap(), &odd).is_err());
     let long = BTreeMap::from([(Path::new("n".repeat(256)).unwrap(), Node::File(put(&s, b3(), "raw", b"").unwrap()))]);
     assert!(build(&s, b3(), by_alias("directory").unwrap(), &long).is_err());
     let fits = BTreeMap::from([(Path::new("n".repeat(255)).unwrap(), Node::File(put(&s, b3(), "raw", b"").unwrap()))]);
@@ -67,7 +71,7 @@ fn a_directory_is_a_working_directory_format() {
 }
 
 #[test]
-fn a_directory_goes_to_disk_and_back_with_no_exec() {
+fn a_directory_goes_to_disk_and_back() {
     let s = store();
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("bin")).unwrap();
@@ -76,9 +80,10 @@ fn a_directory_goes_to_disk_and_back_with_no_exec() {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir.path().join("bin/run"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let v = fs::import(&s, b3(), by_alias("directory").unwrap(), dir.path()).unwrap();
-    assert_eq!(paths(&s, &v), ["a.tex:raw", "bin/", "bin/run:raw"]);
+    assert_eq!(paths(&s, &v), ["a.tex:raw", "bin/", "bin/run:exec"]);
     let out = tempfile::tempdir().unwrap();
     fs::checkout(&s, &v, None, out.path()).unwrap();
+    assert_eq!(std::fs::metadata(out.path().join("bin/run")).unwrap().permissions().mode() & 0o111, 0o111);
     assert_eq!(std::fs::read(out.path().join("bin/run")).unwrap(), b"#!/bin/sh\n");
     assert_eq!(fs::import(&s, b3(), by_alias("directory").unwrap(), out.path()).unwrap(), v);
 }
@@ -204,7 +209,7 @@ fn an_earlier_history_becomes_commits() {
     assert_eq!(c2.time, 200);
     assert_eq!(commits::text(&s, &c2.author).unwrap(), "Dana");
     assert_eq!(c2.parents.keys().collect::<Vec<_>>(), [&made[&n1]]);
-    assert_eq!(paths(&s, &c2.version()), ["a.tex:raw", "run:raw"]);
+    assert_eq!(paths(&s, &c2.version()), ["a.tex:raw", "run:exec"]);
     let step = c2.parents[&made[&n1]].clone().unwrap();
     let n = commits::read_notes(&s, &step).unwrap();
     assert_eq!((n.note.as_str(), &n.paths), ("add a line", &sn.paths));

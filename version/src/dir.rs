@@ -1021,21 +1021,21 @@ impl Dir {
 // and written by the type's parser and printer.
 
 /// What a `directory` entry may be, in tag order.
-const DIRECTORY_KINDS: [&str; 3] = ["raw", "symlink", "directory"];
+const DIRECTORY_KINDS: [&str; 4] = ["raw", "symlink", "directory", "exec"];
 
 fn directory_type() -> &'static crate::typed::Type {
     crate::typed::by_type("directory").unwrap()
 }
 
-fn directory_kind_ids() -> &'static [String; 3] {
-    static IDS: std::sync::LazyLock<[String; 3]> =
+fn directory_kind_ids() -> &'static [String; 4] {
+    static IDS: std::sync::LazyLock<[String; 4]> =
         std::sync::LazyLock::new(|| DIRECTORY_KINDS.map(|a| crate::by_alias(a).unwrap().id().to_string()));
     &IDS
 }
 
 impl Dir {
     /// Whether a directory of this format can hold `items`: a `directory`
-    /// holds only files, links and directories of its own format, by
+    /// holds only files, executables, links and directories of its own format, by
     /// blake3 keys, under names of at most 255 bytes.
     pub fn fits(&self, items: &[Item]) -> std::result::Result<(), String> {
         let Dir::Directory = self else { return Ok(()) };
@@ -1048,7 +1048,7 @@ impl Dir {
             }
             if !directory_kind_ids().iter().any(|f| f == i.child.format()) {
                 let alias = i.child.known_format().map_or("an unknown format", |f| f.alias);
-                return Err(format!("a directory holds raw, symlink and directory, not {alias} ({})", i.name));
+                return Err(format!("a directory holds raw, exec, symlink and directory, not {alias} ({})", i.name));
             }
             if crate::typed::key_bytes(i.child.key()).is_none() {
                 return Err(format!("a directory holds blake3 keys, not {}", i.child.key()));
