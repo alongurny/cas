@@ -116,7 +116,9 @@ impl Forge {
             if links.len() != before {
                 self.save_links(p, &target, lv, &links)?;
             }
-            if self.replace_history(user, p, &target, &h)? {
+            // Other branches follow the remote even when it rewrote them (a force-push): they are
+            // the remote's working branches. The default branch never drops nodes.
+            if self.replace_history(user, p, &target, &h, b != default)? {
                 out.moved.push(target);
             }
         }
@@ -168,14 +170,14 @@ impl Forge {
     }
 
     /// Move history `var` to `h` when `h` extends what it holds (or it is
-    /// unset); refuse to drop nodes. Whether it moved.
-    fn replace_history(&self, user: &str, p: &ProjectId, var: &str, h: &History) -> Result<bool> {
+    /// unset); refuse to drop nodes unless `rewrite`. Whether it moved.
+    fn replace_history(&self, user: &str, p: &ProjectId, var: &str, h: &History, rewrite: bool) -> Result<bool> {
         let cur = self.history(p, var)?;
         if let Some((_, old)) = &cur {
             if **old == *h {
                 return Ok(false);
             }
-            if !h.extends(old) {
+            if !rewrite && !h.extends(old) {
                 return Err(Error::conflict(format!("the mirror rewrote {var}; it would drop nodes")));
             }
         }
@@ -212,7 +214,7 @@ impl Forge {
             public.tags.insert(tag.clone(), tip);
         }
         if public != before {
-            self.replace_history(user, p, RELEASE, &public)?;
+            self.replace_history(user, p, RELEASE, &public, false)?;
         }
         Ok(())
     }

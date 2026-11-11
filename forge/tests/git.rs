@@ -281,4 +281,15 @@ fn a_mirrored_repository_keeps_its_commit_ids() {
     s.ok("POST", "projects/alice/m/mirrors/up/pull", Some(&alice), None);
     s.must(&c, &["pull", "-q", "--ff-only"]);
     assert_eq!(s.must(&c, &["rev-parse", "HEAD"]), s.must(&up, &["rev-parse", "main"]));
+
+    // A force-pushed side branch is followed; the default branch is not rewritten.
+    s.must(&up, &["checkout", "-q", "side"]);
+    s.must(&up, &["reset", "-q", "--hard", "HEAD~1"]);
+    std::fs::write(up.join("b"), "other\n").unwrap();
+    s.must(&up, &["add", "b"]);
+    s.must(&up, &["commit", "-q", "-m", "side redone"]);
+    s.must(&up, &["checkout", "-q", "main"]);
+    s.ok("POST", "projects/alice/m/mirrors/up/pull", Some(&alice), None);
+    s.must(&c, &["fetch", "-q", "origin"]);
+    assert_eq!(s.must(&c, &["rev-parse", "origin/u/alice/side"]), s.must(&up, &["rev-parse", "side"]));
 }
