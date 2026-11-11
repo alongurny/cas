@@ -24,7 +24,7 @@
 					<a class="mono" href="/{base}/step{qs({ history, node: e.id })}">{short(e.id)}</a>
 					{#each e.tags as t (t)}<span class="tag">{t}</span>{/each}
 					{#if e.after.length > 1}<span class="tag">merge</span>{/if}
-					<span class="grow">{e.line || '(no notes)'}</span>
+					<span class="grow clamp">{e.line || '(no notes)'}</span>
 					<a href="/{base}/tree{qs({ history, node: e.id })}">files</a>
 				</div>
 			</li>
