@@ -203,14 +203,11 @@ impl Ancestry {
         if n > 0 && a.first(0) != 0 {
             return Err("predecessor lists out of place".into());
         }
-        let col32 =
-            |at: usize| a.bytes[at..at + 4 * n].chunks_exact(4).map(|c| u32::from_be_bytes(c.try_into().unwrap()));
+        let col32 = |at: usize| a.bytes[at..at + 4 * n].as_chunks::<4>().0.iter().map(|c| u32::from_be_bytes(*c));
         let gens: Vec<u32> = col32(gen_at).collect();
         let firsts: Vec<usize> = col32(first_at).map(|f| f as usize).chain([ne]).collect();
-        let edges: Vec<u32> = a.bytes[edges_at..edges_at + 4 * ne]
-            .chunks_exact(4)
-            .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
-            .collect();
+        let edges: Vec<u32> =
+            a.bytes[edges_at..edges_at + 4 * ne].as_chunks::<4>().0.iter().map(|c| u32::from_be_bytes(*c)).collect();
         let kinds_col = &a.bytes[kind_at..kind_at + 2 * n];
         for (i, occ) in col32(occ_at).enumerate() {
             let k = usize::from(u16::from_be_bytes([kinds_col[2 * i], kinds_col[2 * i + 1]]));

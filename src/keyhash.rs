@@ -152,8 +152,8 @@ impl DigestSet {
         let digests = rest.get(4..4 + 32 * n)?;
         let mut s = DigestSet::default();
         s.b3.reserve(n);
-        for c in digests.chunks_exact(32) {
-            s.b3.insert(Digest(c.try_into().ok()?));
+        for c in digests.as_chunks::<32>().0 {
+            s.b3.insert(Digest(*c));
         }
         let tail = std::str::from_utf8(&rest[4 + 32 * n..]).ok()?;
         if !tail.is_empty() && !tail.ends_with('\n') {

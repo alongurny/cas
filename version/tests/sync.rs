@@ -42,8 +42,16 @@ impl Store for Flaky {
         self.inner.read(key)
     }
     fn write(&self, key: &str, value: &[u8], expect: &Expect) -> cas_core::Result<()> {
-        if self.budget.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |b| b.checked_sub(1)).is_err() {
-            return Err(cas_core::Error::Unavailable("connection dropped".into()));
+        // Take one from the budget, unless it is spent.
+        let mut left = self.budget.load(Ordering::SeqCst);
+        loop {
+            if left == 0 {
+                return Err(cas_core::Error::Unavailable("connection dropped".into()));
+            }
+            match self.budget.compare_exchange(left, left - 1, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(now) => left = now,
+            }
         }
         self.inner.write(key, value, expect)
     }

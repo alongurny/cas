@@ -528,7 +528,7 @@ fn put_key(out: &mut Vec<u8>, algs: &[&str], key: &str) {
     varint(out, algs.binary_search(&alg).unwrap() as u64);
     let h = hex.as_bytes();
     let val = |c: u8| if c <= b'9' { c - b'0' } else { (c | 0x20) - b'a' + 10 };
-    out.extend(h.chunks_exact(2).map(|p| (val(p[0]) << 4) | val(p[1])));
+    out.extend(h.as_chunks::<2>().0.iter().map(|p| (val(p[0]) << 4) | val(p[1])));
 }
 
 fn get_key(r: &mut Reader, algs: &[&'static Algorithm], used: &mut [bool]) -> std::result::Result<String, String> {
