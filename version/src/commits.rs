@@ -485,6 +485,8 @@ impl<'a> Converter<'a> {
         }
         let mut items = crate::tree::load(self.store, v)?;
         for i in &mut items {
+            // A name that does not fit is held escaped.
+            i.name = crate::typed::stored_name(i.name.as_bytes()).ok_or_else(|| Error::BadPath(i.name.clone()))?;
             let alias = i.child.known_format().map_or("?", |f| f.alias);
             i.child = match alias {
                 _ if i.child.is_dir() => view("directory", &self.directory(&i.child)?),
@@ -492,6 +494,7 @@ impl<'a> Converter<'a> {
                 other => return Err(Error::UnknownFormat(format!("a directory cannot hold {other} ({})", i.name))),
             };
         }
+        items.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
         crate::dir::DIRECTORY.fits(&items).map_err(Error::UnknownFormat)?;
         let (top, blobs) = crate::dir::DIRECTORY.blobs(self.alg, &items);
         let puts: Vec<Put> = blobs.into_iter().map(|(k, b)| Put::blob(k, b)).collect();

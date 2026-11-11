@@ -70,3 +70,26 @@ versioned and A is the type of its notes. The layout does not depend on the
 parameters, only the types that the keys must name. The formats here are
 the instances for directories: `commit` is `commit<directory, annotation>`
 and `release` is `release<directory>`.
+
+## Names from outside
+
+A file system or a git tree may have a name that is not a **name** as
+above, such as `+page.svelte`. Whatever brings such a file into a
+`directory` (a commit of a real directory, a git import, a git push) holds
+it under an escaped name, and whatever takes it out again (a checkout, a
+git fetch) gives it its name back. The format itself knows nothing of
+this: to it the escaped name is a name like any other.
+
+The escaped name is the name with each of these written as `_x` and the
+two hex digits of the byte, in capitals:
+
+- a byte a name may not hold;
+- a `.` that follows a `.`, and a `.` that is the whole name;
+- a `_` that starts what would itself read as an escape (`_x` and two hex
+  digits in capitals).
+
+So `+page.svelte` is held as `_x2Bpage.svelte`, `a..b` as `a._x2Eb` and a
+file really called `_x2B` as `_x5Fx2B`. A name that needs none of these is
+held as it is. Reading back replaces every escape by its byte, so two
+different names outside are never held as one. A name whose escaped form
+is longer than 255 bytes is refused.

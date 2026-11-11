@@ -52,6 +52,7 @@ fn repo(r: &std::path::Path) {
     git(r, &["init", "-q", "-b", "main"], None);
     std::fs::create_dir_all(r.join("src")).unwrap();
     std::fs::write(r.join("README"), "hi\n").unwrap();
+    std::fs::write(r.join("src/+page.svelte"), "a page\n").unwrap();
     std::fs::write(r.join("src/run.sh"), "#!/bin/sh\necho run\n").unwrap();
     std::fs::set_permissions(r.join("src/run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
     std::os::unix::fs::symlink("README", r.join("link")).unwrap();
@@ -123,6 +124,12 @@ fn git_commits_become_commits_and_keep_their_ids() {
     git(&out, &["fsck", "--strict", "--no-dangling"], None);
     assert_eq!(text(git(&out, &["rev-parse", "main~1"], None)), head);
     assert_eq!(text(git(&out, &["show", "main:README"], None)), "changed in cas");
+    // In a commit made here, a name that does not fit and a file that may
+    // be run are to git what they were.
+    let tree = text(git(&out, &["ls-tree", "-r", "main"], None));
+    assert!(tree.contains("\tsrc/+page.svelte"), "{tree}");
+    assert!(tree.lines().any(|l| l.starts_with("100755 ") && l.ends_with("\tsrc/run.sh")), "{tree}");
+    assert_eq!(text(git(&out, &["rev-parse", "main:src"], None)), text(git(&r, &["rev-parse", "HEAD:src"], None)));
     assert_eq!(
         text(git(&out, &["log", "-1", "--format=%an <%ae>|%ct|%s", "main"], None)),
         "Noa <>|1800000000|(no notes)"

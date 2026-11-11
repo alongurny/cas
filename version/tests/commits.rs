@@ -75,16 +75,20 @@ fn a_directory_goes_to_disk_and_back() {
     let s = store();
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(dir.path().join("bin")).unwrap();
+    // Names that do not fit are held escaped and written back as they were.
+    std::fs::create_dir(dir.path().join("[id]")).unwrap();
+    std::fs::write(dir.path().join("[id]/+page.svelte"), "page\n").unwrap();
     std::fs::write(dir.path().join("bin/run"), "#!/bin/sh\n").unwrap();
     std::fs::write(dir.path().join("a.tex"), "one\n").unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir.path().join("bin/run"), std::fs::Permissions::from_mode(0o755)).unwrap();
     let v = fs::import(&s, b3(), by_alias("directory").unwrap(), dir.path()).unwrap();
-    assert_eq!(paths(&s, &v), ["a.tex:raw", "bin/", "bin/run:exec"]);
+    assert_eq!(paths(&s, &v), ["_x5Bid_x5D/", "_x5Bid_x5D/_x2Bpage.svelte:raw", "a.tex:raw", "bin/", "bin/run:exec"]);
     let out = tempfile::tempdir().unwrap();
     fs::checkout(&s, &v, None, out.path()).unwrap();
     assert_eq!(std::fs::metadata(out.path().join("bin/run")).unwrap().permissions().mode() & 0o111, 0o111);
     assert_eq!(std::fs::read(out.path().join("bin/run")).unwrap(), b"#!/bin/sh\n");
+    assert_eq!(std::fs::read(out.path().join("[id]/+page.svelte")).unwrap(), b"page\n");
     assert_eq!(fs::import(&s, b3(), by_alias("directory").unwrap(), out.path()).unwrap(), v);
 }
 
