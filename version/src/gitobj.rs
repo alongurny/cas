@@ -509,58 +509,40 @@ pub fn pack(store: &dyn Store, ids: &[String]) -> Result<Vec<u8>> {
             }
         }
     }
-    let mut offsets: HashMap<&str, usize> = HashMap::new();
-    // Recent bodies, for the deltas on them.
-    let mut bodies: HashMap<&str, Vec<u8>> = HashMap::new();
-    let mut uses: HashMap<&str, usize> = HashMap::new();
-    for b in hints.values() {
-        *uses.entry(b.as_str()).or_default() += 1;
-    }
-    for id in order {
+    // Each object made ready on every core: its base, if a delta, and its
+    // deflated data; then laid out in order, bases by offset.
+    let ready = parallel(&order, |id| -> Result<(Option<&str>, u8, usize, Vec<u8>)> {
         let (kind, lo) = get(store, id)?;
-        let body = split(&lo).unwrap().1.to_vec();
-        let ty = TYPES.iter().find(|t| t.0 == kind).unwrap().2;
-        let start = out.len();
-        let mut written = false;
-        if let Some(b) = hints.get(id) {
-            let base = match bodies.get(b.as_str()) {
-                Some(x) => Some(x.clone()),
-                None => Some(split(&get(store, b)?.1).unwrap().1.to_vec()),
-            };
-            if let Some(base) = base
-                && let Some(d) = delta(&base, &body)
+        let body = split(&lo).unwrap().1;
+        if let Some(b) = hints.get(*id) {
+            let (_, blo) = get(store, b)?;
+            if let Some(d) = delta(split(&blo).unwrap().1, body)
                 && d.len() < body.len() / 2
             {
-                let at = offsets[b.as_str()];
-                obj_header(&mut out, 6, d.len());
-                let mut off = start - at;
-                let mut enc = vec![(off & 0x7f) as u8];
+                return Ok((Some(b.as_str()), 6, d.len(), deflate(&d)?));
+            }
+        }
+        let ty = TYPES.iter().find(|t| t.0 == kind).unwrap().2;
+        Ok((None, ty, body.len(), deflate(body)?))
+    })?;
+    let mut offsets: HashMap<&str, usize> = HashMap::new();
+    for (id, (base, ty, len, z)) in order.iter().zip(ready) {
+        let start = out.len();
+        obj_header(&mut out, ty, len);
+        if let Some(b) = base {
+            let mut off = start - offsets[b];
+            let mut enc = vec![(off & 0x7f) as u8];
+            off >>= 7;
+            while off > 0 {
+                off -= 1;
+                enc.push(0x80 | (off & 0x7f) as u8);
                 off >>= 7;
-                while off > 0 {
-                    off -= 1;
-                    enc.push(0x80 | (off & 0x7f) as u8);
-                    off >>= 7;
-                }
-                enc.reverse();
-                out.extend_from_slice(&enc);
-                deflate(&mut out, &d)?;
-                written = true;
             }
-            if let Some(n) = uses.get_mut(b.as_str()) {
-                *n -= 1;
-                if *n == 0 {
-                    bodies.remove(b.as_str());
-                }
-            }
+            enc.reverse();
+            out.extend_from_slice(&enc);
         }
-        if !written {
-            obj_header(&mut out, ty, body.len());
-            deflate(&mut out, &body)?;
-        }
+        out.extend_from_slice(&z);
         offsets.insert(id, start);
-        if uses.get(id).is_some_and(|n| *n > 0) {
-            bodies.insert(id, body);
-        }
     }
     let sum = sha1().hash(&out);
     out.extend_from_slice(&sum);
@@ -582,29 +564,66 @@ fn obj_header(out: &mut Vec<u8>, ty: u8, len: usize) {
     out.push(c);
 }
 
-fn deflate(out: &mut Vec<u8>, data: &[u8]) -> Result<()> {
-    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+fn deflate(data: &[u8]) -> Result<Vec<u8>> {
+    let mut z = flate2::write::ZlibEncoder::new(Vec::with_capacity(data.len() / 2), flate2::Compression::default());
     z.write_all(data)?;
-    out.extend_from_slice(&z.finish()?);
-    Ok(())
+    Ok(z.finish()?)
+}
+
+/// `f` of each item, on every core, in order.
+fn parallel<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> Result<U> + Sync) -> Result<Vec<U>> {
+    let threads = cas_core::threads::get().min(items.len()).max(1);
+    if threads == 1 {
+        return items.iter().map(f).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let parts: Vec<Vec<(usize, Result<U>)>> = std::thread::scope(|s| {
+        let hs: Vec<_> = (0..threads)
+            .map(|_| {
+                s.spawn(|| {
+                    let mut mine = Vec::new();
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= items.len() {
+                            return mine;
+                        }
+                        mine.push((i, f(&items[i])));
+                    }
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let mut out: Vec<Option<U>> = (0..items.len()).map(|_| None).collect();
+    for (i, r) in parts.into_iter().flatten() {
+        out[i] = Some(r?);
+    }
+    Ok(out.into_iter().map(Option::unwrap).collect())
 }
 
 /// A likely delta base in `set` for objects of `ids`: each tree and blob a
 /// commit changed, the same path's object in its first parent's tree.
 fn delta_bases(store: &dyn Store, ids: &[String], set: &HashSet<&str>) -> Result<HashMap<String, String>> {
-    let mut hints = HashMap::new();
-    let mut walked = HashSet::new();
-    for id in ids {
-        let Ok(("commit", lo)) = get(store, id) else { continue };
+    let commits: Vec<&String> = ids.iter().collect();
+    // Each commit's pairs on every core, then merged in order: the first
+    // commit to change an object picks its base.
+    let pairs = parallel(&commits, |id| -> Result<Vec<(String, String)>> {
+        let mut hints = Vec::new();
+        let Ok(("commit", lo)) = get(store, id) else { return Ok(hints) };
         let hs = headers(split(&lo).unwrap().1);
         let tree = hs.iter().find(|x| x.0 == "tree").map(|x| x.1.to_string());
         let parent = hs.iter().find(|x| x.0 == "parent").map(|x| x.1.to_string());
-        let (Some(tree), Some(parent)) = (tree, parent) else { continue };
-        let Ok(("commit", plo)) = get(store, &parent) else { continue };
+        let (Some(tree), Some(parent)) = (tree, parent) else { return Ok(hints) };
+        let Ok(("commit", plo)) = get(store, &parent) else { return Ok(hints) };
         let Some(old) = headers(split(&plo).unwrap().1).iter().find(|x| x.0 == "tree").map(|x| x.1.to_string()) else {
-            continue;
+            return Ok(hints);
         };
-        pair_trees(store, &old, &tree, set, &mut hints, &mut walked)?;
+        pair_trees(store, &old, &tree, set, &mut hints, &mut HashSet::new())?;
+        Ok(hints)
+    })?;
+    let mut hints = HashMap::new();
+    for (n, o) in pairs.into_iter().flatten() {
+        hints.entry(n).or_insert(o);
     }
     Ok(hints)
 }
@@ -614,14 +633,14 @@ fn pair_trees(
     old: &str,
     new: &str,
     set: &HashSet<&str>,
-    hints: &mut HashMap<String, String>,
+    hints: &mut Vec<(String, String)>,
     walked: &mut HashSet<String>,
 ) -> Result<()> {
     if old == new || !walked.insert(new.to_string()) {
         return Ok(());
     }
     if set.contains(old) && set.contains(new) {
-        hints.entry(new.to_string()).or_insert_with(|| old.to_string());
+        hints.push((new.to_string(), old.to_string()));
     }
     let (Ok(("tree", olo)), Ok(("tree", nlo))) = (get(store, old), get(store, new)) else { return Ok(()) };
     let olds: HashMap<&[u8], (bool, String)> = tree_entries(split(&olo).unwrap().1)
@@ -638,7 +657,7 @@ fn pair_trees(
         if dir {
             pair_trees(store, oid, &id, set, hints, walked)?;
         } else if set.contains(id.as_str()) && set.contains(oid.as_str()) && walked.insert(id.clone()) {
-            hints.entry(id).or_insert_with(|| oid.clone());
+            hints.push((id, oid.clone()));
         }
     }
     Ok(())

@@ -47,7 +47,7 @@ pub fn router(forge: Arc<Forge>, opts: Options) -> Arc<Router> {
             return Some(Route::Reply(api(&forge, &opts, req, rest, query)));
         }
         if let Some((p, what)) = crate::git::route(path) {
-            return Some(Route::Reply(forge.git(req, &p, what, query)));
+            return Some(Route::Reply(forge.git(req, &p, what, query, &opts.cache)));
         }
         if wire_path(path.trim_start_matches('/')) {
             return None;

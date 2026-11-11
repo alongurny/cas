@@ -48,7 +48,12 @@ may ask only for what the refs name and the commits the project's links
 hold. Shallow and partial clones are not served. A pack's trees and blobs are
 deltas, where that is less than half the size, on the object at the same
 path in the first parent's tree (chains at most 50 long, as git's), and
-name their bases by offset.
+name their bases by offset. Objects are made ready on every core. The
+forge keeps the packs it sent of at least 1 MiB in its cache directory
+(`--cache`, under `git-packs/`), named by what was asked (the wants, the
+haves and `include-tag`), the newest four of each project: objects never
+change, so the same request is answered with the same pack, without making
+it again. A kept pack whose checksum is wrong is made again.
 
 ## Push
 

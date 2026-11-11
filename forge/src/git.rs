@@ -190,7 +190,7 @@ impl Forge {
     }
 
     /// Answer git request `what` for project `p`.
-    pub fn git(&self, req: &Request, p: &ProjectId, what: &str, query: &str) -> Response {
+    pub fn git(&self, req: &Request, p: &ProjectId, what: &str, query: &str, cache: &std::path::Path) -> Response {
         let r = (|| {
             let c = self.git_caller(req)?;
             let service = query.split('&').find_map(|q| q.strip_prefix("service="));
@@ -208,7 +208,7 @@ impl Forge {
                 }
                 ("POST", "git-upload-pack", _) => {
                     self.require(c.as_ref(), p, Role::Read)?;
-                    self.upload_pack(p, &body(req)?)
+                    self.upload_pack(p, &body(req)?, cache)
                 }
                 ("POST", "git-receive-pack", _) => {
                     let Some(c) = c else { return Err(Error::unauthorized()) };
@@ -307,6 +307,9 @@ impl Forge {
     fn link_all(&self, p: &ProjectId) -> Result<Vec<Linked>> {
         let mut all = self.linked(p)?;
         for i in 0..all.len() {
+            if all[i].h.nodes.keys().all(|n| all[i].links.contains_key(n)) {
+                continue;
+            }
             let mut links = std::mem::take(&mut all[i].links);
             let others: Vec<gitobj::Other<'_>> =
                 all.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, l)| (&*l.h, &l.links)).collect();
@@ -388,7 +391,7 @@ impl Forge {
         Ok(out)
     }
 
-    fn upload_pack(&self, p: &ProjectId, body: &[u8]) -> Result<Response> {
+    fn upload_pack(&self, p: &ProjectId, body: &[u8], cache: &std::path::Path) -> Result<Response> {
         let mut ps = Pkts::new(body);
         let mut command = String::new();
         while let Some(Pkt::Data(d)) = ps.next()? {
@@ -403,14 +406,14 @@ impl Forge {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let out = match command.as_str() {
             "ls-refs" => self.ls_refs(p, &args)?,
-            "fetch" => self.fetch(p, &args)?,
+            "fetch" => self.fetch(p, &args, cache)?,
             "" => return Err(Error::bad("no command")),
             c => return Err(Error::bad(format!("command {c} is not spoken here"))),
         };
         Ok(answer(200, "application/x-git-upload-pack-result", out))
     }
 
-    fn fetch(&self, p: &ProjectId, args: &[&str]) -> Result<Vec<u8>> {
+    fn fetch(&self, p: &ProjectId, args: &[&str], cache: &std::path::Path) -> Result<Vec<u8>> {
         if args.iter().any(|a| a.starts_with("deepen") || a.starts_with("shallow ") || a.starts_with("filter ")) {
             return Err(Error::bad("shallow and partial clones are not served; clone in full"));
         }
@@ -448,19 +451,30 @@ impl Forge {
             pkt_str(&mut out, "ready\n");
             out.extend_from_slice(DELIM);
         }
-        let mut ids = gitobj::closure(&*self.store, &wants, &haves)?;
-        if args.contains(&"include-tag") {
-            let have: BTreeSet<String> = ids.iter().cloned().collect();
-            for c in refs.values() {
-                if !have.contains(c)
-                    && let Ok(("tag", b)) = gitobj::get(&*self.store, c)
-                    && gitobj::split(&b).and_then(|(_, b)| peeled(b)).is_some_and(|t| have.contains(&t))
-                {
-                    ids.push(c.clone());
+        // The same request gives the same pack: kept, it is sent again
+        // without being made again.
+        let include_tag = args.contains(&"include-tag");
+        let packs = PackCache::new(cache, p, &wants, &haves, include_tag);
+        let pack = match packs.get() {
+            Some(pack) => pack,
+            None => {
+                let mut ids = gitobj::closure(&*self.store, &wants, &haves)?;
+                if include_tag {
+                    let have: BTreeSet<String> = ids.iter().cloned().collect();
+                    for c in refs.values() {
+                        if !have.contains(c)
+                            && let Ok(("tag", b)) = gitobj::get(&*self.store, c)
+                            && gitobj::split(&b).and_then(|(_, b)| peeled(b)).is_some_and(|t| have.contains(&t))
+                        {
+                            ids.push(c.clone());
+                        }
+                    }
                 }
+                let pack = gitobj::pack(&*self.store, &ids)?;
+                packs.put(&pack);
+                pack
             }
-        }
-        let pack = gitobj::pack(&*self.store, &ids)?;
+        };
         pkt_str(&mut out, "packfile\n");
         sideband(&mut out, 1, &pack);
         out.extend_from_slice(FLUSH);
@@ -594,6 +608,73 @@ impl Forge {
         self.save_links(p, &var, lv, &links)?;
         as_actor(Some(&c.user), || history::save(&*self.store, self.alg, &p.var(&var), old_view.as_ref(), &h2))?;
         Ok(())
+    }
+}
+
+/// Packs lately sent, by what was asked: files in the forge's cache
+/// directory, a few per project, the newest kept. Objects never change, so
+/// a pack for the same wants and haves is the same pack.
+struct PackCache {
+    dir: std::path::PathBuf,
+    prefix: String,
+    file: std::path::PathBuf,
+}
+
+/// How many packs a project keeps, and the least size worth keeping.
+const PACKS_KEPT: usize = 4;
+const PACK_WORTH_KEEPING: usize = 1 << 20;
+
+impl PackCache {
+    fn new(cache: &std::path::Path, p: &ProjectId, wants: &[String], haves: &[String], tags: bool) -> PackCache {
+        let (mut w, mut h) = (wants.to_vec(), haves.to_vec());
+        w.sort();
+        h.sort();
+        let key = format!("v1\n{}\n-\n{}\n{tags}", w.join("\n"), h.join("\n"));
+        let hash = hex::encode(&gitobj::sha1().hash(key.as_bytes())[..16]);
+        let dir = cache.join("git-packs");
+        let prefix = format!("{}-{}-", p.owner, p.name);
+        let file = dir.join(format!("{prefix}{hash}.pack"));
+        PackCache { dir, prefix, file }
+    }
+
+    fn get(&self) -> Option<Vec<u8>> {
+        let b = std::fs::read(&self.file).ok()?;
+        // A pack ends in the sha1 of what precedes it: a cut file is not one.
+        let ok = b.len() >= 32 && gitobj::sha1().hash(&b[..b.len() - 20]) == b[b.len() - 20..];
+        ok.then(|| {
+            // Touched, so it stays among the newest.
+            let _ = std::fs::File::options()
+                .append(true)
+                .open(&self.file)
+                .and_then(|f| f.set_modified(std::time::SystemTime::now()));
+            b
+        })
+    }
+
+    fn put(&self, pack: &[u8]) {
+        if pack.len() < PACK_WORTH_KEEPING || std::fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        let tmp = self.file.with_extension(format!("tmp{}", std::process::id()));
+        if std::fs::write(&tmp, pack).and_then(|_| std::fs::rename(&tmp, &self.file)).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        // Only the newest few of the project's.
+        let Ok(rd) = std::fs::read_dir(&self.dir) else { return };
+        let mut mine: Vec<(std::time::SystemTime, std::path::PathBuf)> = rd
+            .flatten()
+            .filter(|e| {
+                e.file_name().to_string_lossy().starts_with(&self.prefix)
+                    && e.file_name().to_string_lossy().ends_with(".pack")
+            })
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        mine.sort();
+        mine.reverse();
+        for (_, f) in mine.into_iter().skip(PACKS_KEPT) {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
