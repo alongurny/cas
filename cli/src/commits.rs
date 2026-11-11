@@ -2,13 +2,13 @@
 //! variable holds a view of its newest commit, versions are `directory`
 //! trees, and notes are `annotation` trees.
 
-use crate::{Args, Res, b3, e, node_text, short};
+use crate::{Args, Res, b3, e, flush_out, node_text, short};
 use cas_core::Store;
 use cas_core::disk::DiskBackend;
 use cas_version::commits::{self, Commit, Notes};
 use cas_version::releases;
 use cas_version::stepnotes::{self, StepNotes};
-use cas_version::{Path, View, annotated, diff, formats, fs, history, object_at, walk};
+use cas_version::{Node, Path, View, annotated, diff, formats, fs, history, object_at, read_blob, walk};
 use std::collections::{BTreeMap, HashMap};
 
 /// The commands that work on a history of commits.
@@ -28,16 +28,21 @@ const PORTED: &[&str] = &[
     "merge-base",
     "path-log",
     "publish",
+    "stash",
+    "last-modified",
+    "summary",
+    "notes",
+    "tag",
 ];
 
 /// The commands that work on a release history.
 const RELEASE: &[&str] = &["log", "ls", "checkout", "sparse", "compatible"];
 
 /// The commands that are not about one history.
-const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated", "push", "pull"];
+const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated", "push", "pull", "watch"];
 
 /// Whether the command is for this module: the history holds a commit, or
-/// it is unset and `--commits` asks for one.
+/// it is unset (and `--nodes` does not ask for the earlier format).
 pub fn handles(a: &Args, s: &dyn Store) -> Res<bool> {
     let Some(cmd) = a.rest.first().map(String::as_str) else { return Ok(false) };
     if NO_HISTORY.contains(&cmd) {
@@ -52,12 +57,14 @@ pub fn handles(a: &Args, s: &dyn Store) -> Res<bool> {
             true
         }
         Some(v) => commits::is_commit(&v),
-        None => a.commits,
+        // A new history is one of commits, unless --nodes asks for the
+        // earlier format (which the forge still keeps).
+        None => !a.nodes,
     };
+    if a.nodes && ours {
+        return Err(format!("history {name} is a history of commits; --nodes is for the earlier format"));
+    }
     if !ours {
-        if a.commits {
-            return Err(format!("history {name} is in the earlier format; --commits starts a new history"));
-        }
         return Ok(false);
     }
     if !PORTED.contains(&cmd) && !RELEASE.contains(&cmd) {
@@ -107,35 +114,50 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
     match a.rest[0].as_str() {
         "commit" => {
             let dir = arg(1, "<dir>")?;
-            if !a.annotate.is_empty() {
-                return Err("commit --annotate is not yet available for a history of commits".into());
-            }
             let head = match &tip {
                 Some(t) => Some(commits::read(s, t).map_err(e)?.version()),
                 None => None,
             };
             let root = fs::import_worktree(s, b3(), dirf, dir.as_ref(), Some(&a.store), head.as_ref()).map_err(e)?;
             formats::publish(s).map_err(e)?;
-            let mut notes = None;
+            let mut n = Notes::default();
             if let Some(file) = &a.notes {
                 // Written on the diff from the tip to this version, which
                 // the file's text must be exactly.
                 let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
                 let sn = stepnotes::from_form(s, head.as_ref(), &root, &form).map_err(|x| format!("{file}: {x}"))?;
                 if let Some(sn) = sn {
-                    let n = Notes { note: sn.note, paths: sn.paths };
+                    n = Notes { note: sn.note, paths: sn.paths };
                     commits::fits(s, &n, head.as_ref(), &root).map_err(|x| format!("{file}: {x}"))?;
-                    let is_dir = |p: &str| -> cas_version::Result<bool> {
-                        let path = Path::new(p)?;
-                        for v in [Some(&root), head.as_ref()].into_iter().flatten() {
-                            if let Some(o) = object_at(s, v, &path)? {
-                                return Ok(o.is_dir_view());
-                            }
-                        }
-                        Ok(false)
-                    };
-                    notes = commits::write_notes(s, b3(), &n, &is_dir).map_err(e)?;
                 }
+            }
+            // Notes on a file as it is in this version: one for each line.
+            for spec in &a.annotate {
+                let (p, file) = spec.rsplit_once('=').ok_or(format!("--annotate {spec}: <path>=<file>"))?;
+                let path = Path::new(p).map_err(e)?;
+                let form = std::fs::read(file).map_err(|x| format!("{file}: {x}"))?;
+                let (text, lines) = annotated::parse(&form).map_err(|x| format!("{file}: {x}"))?;
+                let Some(target) = object_at(s, &root, &path).map_err(e)?.filter(|v| !v.is_dir_view()) else {
+                    return Err(format!("--annotate {p}: no such file in {dir}"));
+                };
+                if text != read_blob(s, target.key()).map_err(e)? {
+                    return Err(format!("{file}: its text is not {p} as committed"));
+                }
+                n.paths.entry(path.to_string()).or_default().new = stepnotes::runs_of(&lines);
+            }
+            let mut notes = None;
+            if !n.is_empty() {
+                commits::fits(s, &n, head.as_ref(), &root).map_err(e)?;
+                let is_dir = |p: &str| -> cas_version::Result<bool> {
+                    let path = Path::new(p)?;
+                    for v in [Some(&root), head.as_ref()].into_iter().flatten() {
+                        if let Some(o) = object_at(s, v, &path)? {
+                            return Ok(o.is_dir_view());
+                        }
+                    }
+                    Ok(false)
+                };
+                notes = commits::write_notes(s, b3(), &n, &is_dir).map_err(e)?;
             }
             let author = commits::put_text(s, b3(), "author", &commits::one_line(&author(a)?)).map_err(e)?;
             let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(e)?.as_secs();
@@ -183,6 +205,95 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 out!("{} paths {}", n.len(), if cmd == "clean" { "removed" } else { "restored" });
             }
         }
+        "stash" => {
+            // Kept as commits of their own in history stash/<history>:
+            // each stash after the one before it.
+            let pop = a.rest.get(1).is_some_and(|x| x == "pop");
+            let dir = arg(if pop { 2 } else { 1 }, "<dir>")?;
+            let stash = format!("stash/{name}");
+            let kept = commits::tip(s, &stash).map_err(e)?;
+            let base = at()?.1.version();
+            if pop {
+                let top = kept.ok_or(format!("nothing stashed in {stash}"))?;
+                if !fs::status(s, b3(), dirf, dir.as_ref(), Some(&a.store), &base).map_err(e)?.is_empty() {
+                    return Err(format!("{dir} has changes; commit, stash or reset them first"));
+                }
+                let c = commits::read(s, &top).map_err(e)?;
+                fs::reset(s, b3(), dirf, dir.as_ref(), Some(&a.store), &c.version(), false).map_err(e)?;
+                match c.parents.keys().next() {
+                    Some(below) => commits::advance(s, &stash, Some(&top), below),
+                    None => commits::drop(s, &stash, &top),
+                }
+                .map_err(|x| format!("{stash}: {x}"))?;
+                out!("{top}");
+            } else {
+                let root = fs::import_worktree(s, b3(), dirf, dir.as_ref(), Some(&a.store), Some(&base)).map_err(e)?;
+                formats::publish(s).map_err(e)?;
+                let author = commits::put_text(s, b3(), "author", &commits::one_line(&author(a)?)).map_err(e)?;
+                let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(e)?.as_secs();
+                let parents = kept.iter().map(|k| (k.clone(), None)).collect();
+                let c = Commit { version: root.key().to_string(), author, notes: None, time, parents };
+                let key = commits::write(s, b3(), &c).map_err(e)?;
+                commits::advance(s, &stash, kept.as_deref(), &key).map_err(|x| format!("{stash}: {x}"))?;
+                fs::reset(s, b3(), dirf, dir.as_ref(), Some(&a.store), &base, false).map_err(e)?;
+                out!("{key}");
+            }
+        }
+        "last-modified" => {
+            let dir = prefix(1)?;
+            let (k, c) = at()?;
+            let mut entries = Vec::new();
+            for item in walk(s, &c.version(), dir.as_ref()) {
+                let (p, _) = item.map_err(e)?;
+                if p.parent() == dir {
+                    entries.push(p);
+                }
+            }
+            for (p, last) in entries.iter().zip(commits::last_changes(s, &k, &entries).map_err(e)?) {
+                match last {
+                    Some(k) => out!("{}  {p}", short(&k)),
+                    None => out!("-  {p}"),
+                }
+            }
+        }
+        "summary" => {
+            let (mut dirs, mut files) = (0u64, 0u64);
+            for item in walk(s, &at()?.1.version(), None) {
+                match item.map_err(e)?.1 {
+                    Node::Dir => dirs += 1,
+                    Node::File(_) => files += 1,
+                }
+            }
+            out!("{dirs} directories, {files} files");
+        }
+        "notes" => {
+            let (_, c) = at()?;
+            let (_, n) = step_notes(s, &c)?;
+            match a.rest.get(1) {
+                None => {
+                    for (p, pn) in &n.paths {
+                        out!("{p}  {}", pn.note.lines().next().unwrap_or(""));
+                    }
+                }
+                Some(p) => {
+                    let path = Path::new(p.as_str()).map_err(e)?;
+                    let pn = n.paths.get(&path.to_string()).ok_or(format!("no notes on {p} in this commit"))?;
+                    if !pn.note.is_empty() {
+                        out!("{}", pn.note);
+                    }
+                    if let Some(runs) = &pn.new {
+                        let file = object_at(s, &c.version(), &path).map_err(e)?.ok_or(format!("no file {p}"))?;
+                        let text = read_blob(s, file.key()).map_err(e)?;
+                        flush_out();
+                        let form = annotated::render(&text, &stepnotes::expand(runs));
+                        std::io::Write::write_all(&mut std::io::stdout(), &form).map_err(e)?;
+                    }
+                }
+            }
+        }
+        "tag" => {
+            return Err("a history of commits has no tags: publish --tag <version> names a release".into());
+        }
         "log" => {
             let Some(tip) = &tip else { return Ok(()) };
             let mut authors: HashMap<String, String> = HashMap::new();
@@ -207,15 +318,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             if a.annotated {
                 // The step with notes, else any step; a first commit's
                 // notes are on its version.
-                let step = c.parents.iter().find(|(_, s)| s.is_some()).or(c.parents.iter().next());
-                let (before, notes): (Option<View>, Option<&String>) = match step {
-                    Some((p, n)) => (Some(commits::read(s, p).map_err(e)?.version()), n.as_ref()),
-                    None => (None, c.notes.as_ref()),
-                };
-                let n = match notes {
-                    Some(k) => commits::read_notes(s, k).map_err(e)?,
-                    None => Notes::default(),
-                };
+                let (before, n) = step_notes(s, &c)?;
                 commits::fits(s, &n, before.as_ref(), &after).map_err(e)?;
                 let d = annotated::diff(s, before.as_ref(), &after).map_err(e)?;
                 let sn = StepNotes { before, after, note: n.note, paths: n.paths };
@@ -349,6 +452,21 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
         _ => unreachable!("handles() lets only ported commands through"),
     }
     Ok(())
+}
+
+/// The notes of a commit and the version they start from: those of the
+/// step with notes, else of any step; a first commit's are on its version.
+fn step_notes(s: &dyn Store, c: &Commit) -> Res<(Option<View>, Notes)> {
+    let step = c.parents.iter().find(|(_, s)| s.is_some()).or(c.parents.iter().next());
+    let (before, notes): (Option<View>, Option<&String>) = match step {
+        Some((p, n)) => (Some(commits::read(s, p).map_err(e)?.version()), n.as_ref()),
+        None => (None, c.notes.as_ref()),
+    };
+    let n = match notes {
+        Some(k) => commits::read_notes(s, k).map_err(e)?,
+        None => Notes::default(),
+    };
+    Ok((before, n))
 }
 
 /// Commands on a release history (spec/formats/release.md).

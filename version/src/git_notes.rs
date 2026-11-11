@@ -176,8 +176,11 @@ pub fn annotate(
         let i = i as usize;
         let k = order[i].version();
         let k = k.key();
-        let short = k.split_once(':').map_or(k, |(_, d)| &d[..12.min(d.len())]);
-        if subj[i].is_empty() { short.to_string() } else { format!("{short} {}", subj[i]) }
+        let short = match k.split_once(':') {
+            Some((alg, d)) => format!("{alg}:{}", &d[..12.min(d.len())]),
+            None => k.to_string(),
+        };
+        if subj[i].is_empty() { short } else { format!("{short} {}", subj[i]) }
     };
     for t in tips {
         let Some(state) = tip_states.remove(&t) else { continue };

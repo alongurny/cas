@@ -270,11 +270,13 @@ fn arr(j: &J) -> Vec<J> {
     j.as_array().cloned().unwrap_or_default()
 }
 
-/// The first part of a node id's or view's key, as the web shows it.
+/// The name of the hash and the first part of a node id's or view's key, as the web shows it.
 fn short(id: &str) -> String {
     let last = id.rsplit(' ').next().unwrap_or(id);
-    let hex = last.split_once(':').map_or(last, |(_, h)| h);
-    hex.chars().take(12).collect()
+    match last.split_once(':') {
+        Some((alg, h)) => format!("{alg}:{}", h.chars().take(12).collect::<String>()),
+        None => last.chars().take(12).collect(),
+    }
 }
 
 fn when(t: &str) -> String {

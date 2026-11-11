@@ -48,6 +48,7 @@ impl Site {
         let tok = self.dir.path().join(format!("{who}.token"));
         let mut c = Command::new(env!("CARGO_BIN_EXE_cas"))
             .current_dir(self.dir.path())
+            .arg("--nodes")
             .args(["--ca", &self.ca, "--store", &format!("{}{at}", self.url), "--token-file", tok.to_str().unwrap()])
             .args(args)
             .stdin(Stdio::piped())

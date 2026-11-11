@@ -30,7 +30,7 @@ pub struct StepNotes {
     pub paths: BTreeMap<String, PathNotes>,
 }
 
-fn runs_of<N: AsRef<str>>(notes: &[N]) -> Option<Runs> {
+pub fn runs_of<N: AsRef<str>>(notes: &[N]) -> Option<Runs> {
     if notes.iter().all(|n| n.as_ref().is_empty()) {
         return None;
     }

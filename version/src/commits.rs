@@ -761,3 +761,43 @@ pub fn path_log(store: &dyn Store, tip: &str, path: &crate::Path) -> Result<Vec<
         .filter(|(k, c)| if c.parents.is_empty() { at[k].is_some() } else { c.parents.keys().all(|p| at[p] != at[k]) })
         .collect())
 }
+
+/// For each path, the newest commit of the history ending at `tip` whose
+/// version differs from every parent's there (a first commit: has the
+/// path), or none.
+pub fn last_changes(store: &dyn Store, tip: &str, paths: &[crate::Path]) -> Result<Vec<Option<String>>> {
+    let all = log(store, tip)?;
+    let index: HashMap<&str, usize> = all.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
+    let mut memo = crate::dir::FindMemo::new();
+    let mut found = Vec::new();
+    for path in paths {
+        // What each commit has at the path, read only as far as the walk goes.
+        let mut at: Vec<Option<Option<View>>> = vec![None; all.len()];
+        let mut see = |i: usize| -> Result<Option<View>> {
+            if at[i].is_none() {
+                at[i] = Some(crate::tree::object_at_memo(store, &all[i].1.version(), path, &mut memo)?);
+            }
+            Ok(at[i].clone().unwrap())
+        };
+        let mut last = None;
+        for (i, (k, c)) in all.iter().enumerate() {
+            let here = see(i)?;
+            let mut changed = !c.parents.is_empty() || here.is_some();
+            for p in c.parents.keys() {
+                changed = changed && see(index[p.as_str()])? != here;
+            }
+            if changed {
+                last = Some(k.clone());
+                break;
+            }
+        }
+        found.push(last);
+    }
+    Ok(found)
+}
+
+/// Remove history `name`, only if it still holds `old`.
+pub fn drop(store: &dyn Store, name: &str, old: &str) -> Result<()> {
+    store.remove(name, &Expect::Value(view("commit", old).to_string().into_bytes()))?;
+    Ok(())
+}

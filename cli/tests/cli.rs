@@ -10,6 +10,14 @@ fn cas(store: &Path, args: &[&str]) -> String {
     text
 }
 
+/// As `cas`, on a history in the earlier format (the forge still keeps it):
+/// `--nodes` starts one.
+fn old(store: &Path, args: &[&str]) -> String {
+    let mut all = vec!["--nodes"];
+    all.extend(args);
+    cas(store, &all)
+}
+
 #[test]
 fn commit_log_diff_checkout_and_sync() {
     let tmp = tempfile::tempdir().unwrap();
@@ -20,43 +28,43 @@ fn commit_log_diff_checkout_and_sync() {
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
 
-    cas(&store, &["commit", w]);
+    old(&store, &["commit", w]);
     std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
-    cas(&store, &["commit", w]);
+    old(&store, &["commit", w]);
 
-    let log = cas(&store, &["log"]);
+    let log = old(&store, &["log"]);
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 2);
 
-    assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      src/lib.rs");
-    assert_eq!(cas(&store, &["summary"]).trim(), "{'dirs': '2', 'files': '2'}");
-    assert_eq!(cas(&store, &["path-log", "src"]).lines().count(), 2);
-    assert_eq!(cas(&store, &["path-log", "README"]).lines().count(), 1);
-    assert!(cas(&store, &["ls"]).contains("dir      empty"));
+    assert_eq!(old(&store, &["diff"]).trim(), "raw      -> raw      src/lib.rs");
+    assert_eq!(old(&store, &["summary"]).trim(), "{'dirs': '2', 'files': '2'}");
+    assert_eq!(old(&store, &["path-log", "src"]).lines().count(), 2);
+    assert_eq!(old(&store, &["path-log", "README"]).lines().count(), 1);
+    assert!(old(&store, &["ls"]).contains("dir      empty"));
 
     let out = tmp.path().join("out");
-    cas(&store, &["checkout", out.to_str().unwrap(), "src"]);
+    old(&store, &["checkout", out.to_str().unwrap(), "src"]);
     assert_eq!(std::fs::read_to_string(out.join("src/lib.rs")).unwrap(), "fn b() {}\n");
     assert!(!out.join("README").exists());
 
     // Sync to a second store directory, then over HTTPS to a third.
-    assert!(cas(&store, &["push", other.to_str().unwrap()]).starts_with("Created"));
-    assert!(cas(&store, &["push", other.to_str().unwrap()]).starts_with("UpToDate"));
-    assert_eq!(cas(&other, &["log"]), log);
+    assert!(old(&store, &["push", other.to_str().unwrap()]).starts_with("Created"));
+    assert!(old(&store, &["push", other.to_str().unwrap()]).starts_with("UpToDate"));
+    assert_eq!(old(&other, &["log"]), log);
 
     // Serve a third store under an access policy: anyone reads, alice writes.
     let (served, meta) = (tmp.path().join("served"), tmp.path().join("meta"));
     let m = meta.to_str().unwrap();
-    let token = cas(&served, &["--meta", m, "access", "user", "alice"]);
+    let token = old(&served, &["--meta", m, "access", "user", "alice"]);
     let token_file = tmp.path().join("alice.token");
     std::fs::write(&token_file, token.trim()).unwrap();
     for g in ["read blobs", "list blobs", "read var:main"] {
-        cas(&served, &["--meta", m, "access", "grant", "*", g]);
+        old(&served, &["--meta", m, "access", "grant", "*", g]);
     }
     for g in ["write blobs", "write var:main"] {
-        cas(&served, &["--meta", m, "access", "grant", "alice", g]);
+        old(&served, &["--meta", m, "access", "grant", "alice", g]);
     }
-    let shown = cas(&served, &["--meta", m, "access", "show"]);
+    let shown = old(&served, &["--meta", m, "access", "show"]);
     assert!(shown.contains("user  alice") && shown.contains("grant alice: write blobs, write var:main"), "{shown}");
     assert!(!shown.contains(token.trim()));
     let addr = "127.0.0.1:47391";
@@ -104,7 +112,7 @@ fn commit_log_diff_checkout_and_sync() {
     assert!(pushed.unwrap().starts_with("Created"));
     // Without the token the same push is denied.
     std::fs::write(work.join("README"), "changed\n").unwrap();
-    cas(&store, &["commit", w]);
+    old(&store, &["commit", w]);
     let anon = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
         .arg(&store)
@@ -128,21 +136,21 @@ fn private_history_rebase_publish_merge_and_gc() {
     let s = store.to_str().unwrap();
     std::fs::write(work.join("notes"), "one\ntwo\nthree\n").unwrap();
     std::fs::write(work.join("other"), "1\n").unwrap();
-    cas(&store, &["commit", w]);
-    cas(&store, &["tag", "v1"]);
+    old(&store, &["commit", w]);
+    old(&store, &["tag", "v1"]);
     // A private history starts as a copy of main.
-    assert!(cas(&store, &["push", s, "--as", "alon"]).starts_with("Created"));
+    assert!(old(&store, &["push", s, "--as", "alon"]).starts_with("Created"));
     std::fs::write(work.join("notes"), "ONE\ntwo\nthree\n").unwrap();
-    cas(&store, &["commit", w, "-H", "alon"]);
+    old(&store, &["commit", w, "-H", "alon"]);
     std::fs::write(work.join("notes"), "ONE\nTWO\nthree\n").unwrap();
-    cas(&store, &["commit", w, "-H", "alon"]);
-    assert_eq!(cas(&store, &["log", "-H", "alon"]).lines().count(), 3);
+    old(&store, &["commit", w, "-H", "alon"]);
+    assert_eq!(old(&store, &["log", "-H", "alon"]).lines().count(), 3);
 
     // Main moves meanwhile: publishing needs a rebase first.
     let main_work = tmp.path().join("main-work");
-    cas(&store, &["checkout", main_work.to_str().unwrap()]);
+    old(&store, &["checkout", main_work.to_str().unwrap()]);
     std::fs::write(main_work.join("other"), "2\n").unwrap();
-    cas(&store, &["commit", main_work.to_str().unwrap(), "--compatible"]);
+    old(&store, &["commit", main_work.to_str().unwrap(), "--compatible"]);
     let no = Command::new(env!("CARGO_BIN_EXE_cas"))
         .arg("--store")
         .arg(&store)
@@ -150,38 +158,38 @@ fn private_history_rebase_publish_merge_and_gc() {
         .output()
         .unwrap();
     assert!(!no.status.success());
-    assert!(cas(&store, &["rebase", "main", "-H", "alon"]).starts_with("Done"));
+    assert!(old(&store, &["rebase", "main", "-H", "alon"]).starts_with("Done"));
     let changelog = tmp.path().join("changelog");
     std::fs::write(&changelog, "notes: upper case\n").unwrap();
     let c = changelog.to_str().unwrap();
-    assert!(cas(&store, &["publish", "--as", "main", "-H", "alon", "--changelog", c]).starts_with("Done"));
-    let log = cas(&store, &["log"]);
+    assert!(old(&store, &["publish", "--as", "main", "-H", "alon", "--changelog", c]).starts_with("Done"));
+    let log = old(&store, &["log"]);
     assert_eq!(log.lines().count(), 3, "{log}");
     assert!(log.lines().next().unwrap().contains("notes: upper case") && log.contains("(v1)"), "{log}");
-    assert_eq!(cas(&store, &["compatible", "v1", "latest"]).trim(), "breaking");
-    assert_eq!(cas(&store, &["path-log", "notes"]).lines().count(), 2);
+    assert_eq!(old(&store, &["compatible", "v1", "latest"]).trim(), "breaking");
+    assert_eq!(old(&store, &["path-log", "notes"]).lines().count(), 2);
     let out = tmp.path().join("out");
-    cas(&store, &["checkout", out.to_str().unwrap()]);
+    old(&store, &["checkout", out.to_str().unwrap()]);
     assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "ONE\nTWO\nthree\n");
     assert_eq!(std::fs::read_to_string(out.join("other")).unwrap(), "2\n");
 
     // A merge: two diverged copies of main, combined as one node.
-    assert!(cas(&store, &["push", s, "--as", "side"]).starts_with("Created"));
+    assert!(old(&store, &["push", s, "--as", "side"]).starts_with("Created"));
     std::fs::write(out.join("notes"), "ONE\nTWO\nTHREE\n").unwrap();
-    cas(&store, &["commit", out.to_str().unwrap(), "-H", "side"]);
+    old(&store, &["commit", out.to_str().unwrap(), "-H", "side"]);
     std::fs::write(out.join("notes"), "one\nTWO\nthree\n").unwrap();
-    cas(&store, &["commit", out.to_str().unwrap()]);
-    assert!(cas(&store, &["merge", "side"]).starts_with("Done"));
+    old(&store, &["commit", out.to_str().unwrap()]);
+    assert!(old(&store, &["merge", "side"]).starts_with("Done"));
     std::fs::remove_dir_all(&out).unwrap();
-    cas(&store, &["checkout", out.to_str().unwrap()]);
+    old(&store, &["checkout", out.to_str().unwrap()]);
     assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
 
     // Collection keeps everything reachable.
     for _ in 0..3 {
-        cas(&store, &["gc"]);
+        old(&store, &["gc"]);
     }
     std::fs::remove_dir_all(&out).unwrap();
-    cas(&store, &["checkout", out.to_str().unwrap(), "notes"]);
+    old(&store, &["checkout", out.to_str().unwrap(), "notes"]);
     assert_eq!(std::fs::read_to_string(out.join("notes")).unwrap(), "one\nTWO\nTHREE\n");
 }
 
@@ -193,19 +201,19 @@ fn last_modified_merge_base_objects_and_fsck() {
     std::fs::write(work.join("README"), "hi\n").unwrap();
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
-    let first = cas(&store, &["commit", w]);
+    let first = old(&store, &["commit", w]);
     std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
-    let second = cas(&store, &["commit", w]);
-    let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
+    let second = old(&store, &["commit", w]);
+    let short = |id: &str| id.split(' ').nth(1).unwrap()[.."blake3:".len() + 12].to_string();
     let (a, b) = (short(&first), short(&second));
 
-    assert_eq!(cas(&store, &["last-modified"]), format!("{a}  README\n{b}  src\n"));
-    assert_eq!(cas(&store, &["last-modified", "src"]), format!("{b}  src/lib.rs\n"));
-    assert_eq!(cas(&store, &["merge-base", &a, &b]), first);
+    assert_eq!(old(&store, &["last-modified"]), format!("{a}  README\n{b}  src\n"));
+    assert_eq!(old(&store, &["last-modified", "src"]), format!("{b}  src/lib.rs\n"));
+    assert_eq!(old(&store, &["merge-base", &a, &b]), first);
 
-    let objects = cas(&store, &["objects"]);
+    let objects = old(&store, &["objects"]);
     assert!(objects.lines().all(|k| k.starts_with("blake3:")));
-    assert!(cas(&store, &["fsck"]).ends_with(", 0 missing, 0 bad\n"));
+    assert!(old(&store, &["fsck"]).ends_with(", 0 missing, 0 bad\n"));
 
     // Lose the blob of the old src/lib.rs: fsck names it and fails.
     let key = blake3::hash(b"fn a() {}\n").to_hex().to_string();
@@ -223,25 +231,25 @@ fn status_reset_clean_and_stash() {
     std::fs::write(work.join("README"), "hi\n").unwrap();
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
-    cas(&store, &["commit", w]);
-    assert_eq!(cas(&store, &["status", w]), "");
+    old(&store, &["commit", w]);
+    assert_eq!(old(&store, &["status", w]), "");
 
     std::fs::write(work.join("src/lib.rs"), "fn b() {}\n").unwrap();
     std::fs::write(work.join("junk"), "junk\n").unwrap();
     std::fs::remove_file(work.join("README")).unwrap();
-    assert_eq!(cas(&store, &["status", w]), "deleted  README\nadded    junk\nchanged  src/lib.rs\n");
+    assert_eq!(old(&store, &["status", w]), "deleted  README\nadded    junk\nchanged  src/lib.rs\n");
 
-    cas(&store, &["clean", w]);
-    assert_eq!(cas(&store, &["status", w]), "deleted  README\nchanged  src/lib.rs\n");
+    old(&store, &["clean", w]);
+    assert_eq!(old(&store, &["status", w]), "deleted  README\nchanged  src/lib.rs\n");
 
-    cas(&store, &["stash", w]);
-    assert_eq!(cas(&store, &["status", w]), "");
+    old(&store, &["stash", w]);
+    assert_eq!(old(&store, &["status", w]), "");
     assert_eq!(std::fs::read_to_string(work.join("README")).unwrap(), "hi\n");
-    cas(&store, &["stash", "pop", w]);
-    assert_eq!(cas(&store, &["status", w]), "deleted  README\nchanged  src/lib.rs\n");
+    old(&store, &["stash", "pop", w]);
+    assert_eq!(old(&store, &["status", w]), "deleted  README\nchanged  src/lib.rs\n");
 
-    cas(&store, &["reset", w]);
-    assert_eq!(cas(&store, &["status", w]), "");
+    old(&store, &["reset", w]);
+    assert_eq!(old(&store, &["status", w]), "");
     assert_eq!(std::fs::read_to_string(work.join("src/lib.rs")).unwrap(), "fn a() {}\n");
 }
 
@@ -252,15 +260,15 @@ fn a_sparse_checkout_commits_only_its_paths() {
     std::fs::create_dir_all(work.join("src")).unwrap();
     std::fs::write(work.join("README"), "hi\n").unwrap();
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
-    cas(&store, &["commit", work.to_str().unwrap()]);
+    old(&store, &["commit", work.to_str().unwrap()]);
     let p = part.to_str().unwrap();
-    cas(&store, &["sparse", p, "src"]);
+    old(&store, &["sparse", p, "src"]);
     assert!(!part.join("README").exists());
     std::fs::write(part.join("src/lib.rs"), "fn b() {}\n").unwrap();
-    assert_eq!(cas(&store, &["status", p]), "changed  src/lib.rs\n");
-    cas(&store, &["commit", p]);
-    assert!(cas(&store, &["ls"]).contains("README"));
-    assert_eq!(cas(&store, &["status", p]), "");
+    assert_eq!(old(&store, &["status", p]), "changed  src/lib.rs\n");
+    old(&store, &["commit", p]);
+    assert!(old(&store, &["ls"]).contains("README"));
+    assert_eq!(old(&store, &["status", p]), "");
 }
 
 #[test]
@@ -270,13 +278,13 @@ fn diff_and_merge_base_with_the_ancestry_gc_records() {
     std::fs::create_dir_all(&work).unwrap();
     std::fs::write(work.join("a"), "1\n").unwrap();
     let w = work.to_str().unwrap();
-    let first = cas(&store, &["commit", w]);
+    let first = old(&store, &["commit", w]);
     std::fs::write(work.join("a"), "2\n").unwrap();
-    let second = cas(&store, &["commit", w]);
+    let second = old(&store, &["commit", w]);
     let short = |id: &str| id.split(' ').nth(1).unwrap()["blake3:".len().."blake3:".len() + 12].to_string();
-    cas(&store, &["gc"]);
-    assert_eq!(cas(&store, &["diff"]).trim(), "raw      -> raw      a");
-    assert_eq!(cas(&store, &["merge-base", &short(&first), &short(&second)]), first);
+    old(&store, &["gc"]);
+    assert_eq!(old(&store, &["diff"]).trim(), "raw      -> raw      a");
+    assert_eq!(old(&store, &["merge-base", &short(&first), &short(&second)]), first);
 }
 
 /// A history of commits (spec/formats/commit.md): `directory` versions,
@@ -290,7 +298,7 @@ fn a_history_of_commits() {
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
     let w = work.to_str().unwrap();
 
-    let first = cas(&store, &["--commits", "--author", "Dana", "commit", w]);
+    let first = cas(&store, &["--author", "Dana", "commit", w]);
     assert!(first.starts_with("blake3:"));
     std::fs::write(work.join("src/lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
     assert_eq!(cas(&store, &["status", w]), "changed  src/lib.rs\n");
@@ -326,10 +334,68 @@ fn a_history_of_commits() {
     assert_eq!(cas(&store, &["status", w]), "");
     assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
 
-    // Commands not moved over yet say so.
+    // A commit history has no tags of its own: a release names a version.
     let o = Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["tag", "v1"]).output().unwrap();
     assert!(!o.status.success());
-    assert!(String::from_utf8_lossy(&o.stderr).contains("not yet available for a history of commits"));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("publish --tag"));
+}
+
+/// The rest of the daily commands on a history of commits, which a new
+/// history is unless `--nodes` asks otherwise.
+#[test]
+fn commit_histories_stash_notes_summary_and_last_modified() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store) = (tmp.path().join("work"), tmp.path().join("store"));
+    std::fs::create_dir_all(work.join("src")).unwrap();
+    std::fs::write(work.join("README"), "hi\n").unwrap();
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\n").unwrap();
+    let w = work.to_str().unwrap();
+    let first = cas(&store, &["--author", "Dana", "commit", w]);
+    std::fs::write(work.join("src/lib.rs"), "fn a() {}\nfn b() {}\n").unwrap();
+
+    // Notes on a file as it is: one note for each line.
+    let form = tmp.path().join("lib.notes");
+    std::fs::write(&form, "# the start\n| fn a() {}\n# added later\n| fn b() {}\n").unwrap();
+    let annotate = format!("src/lib.rs={}", form.to_str().unwrap());
+    let second = cas(&store, &["--author", "Dana", "commit", w, "--annotate", &annotate]);
+    assert_eq!(cas(&store, &["notes"]), "src/lib.rs  \n");
+    assert_eq!(cas(&store, &["notes", "src/lib.rs"]), std::fs::read_to_string(&form).unwrap());
+    // A form whose text is not the file is refused.
+    std::fs::write(&form, "| fn c() {}\n").unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_cas"))
+        .arg("--store")
+        .arg(&store)
+        .args(["--author", "Dana", "commit", w, "--annotate", &annotate])
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("its text is not src/lib.rs as committed"));
+
+    // Every hash is shown with the name of its hash directly before it.
+    let short = |k: &str| k.trim()[.."blake3:".len() + 12].to_string();
+    let (a, b) = (short(&first), short(&second));
+    assert_eq!(cas(&store, &["last-modified"]), format!("{a}  README\n{b}  src\n"));
+    assert_eq!(cas(&store, &["last-modified", "src"]), format!("{b}  src/lib.rs\n"));
+    assert!(cas(&store, &["log"]).starts_with(&format!("{b}  [{a}]  ")));
+    assert_eq!(cas(&store, &["summary"]), "1 directories, 2 files\n");
+
+    // Two stashes, put back newest first; the last pop removes stash/main.
+    std::fs::remove_file(work.join("README")).unwrap();
+    cas(&store, &["--author", "Dana", "stash", w]);
+    assert_eq!(cas(&store, &["status", w]), "");
+    std::fs::write(work.join("junk"), "junk\n").unwrap();
+    cas(&store, &["--author", "Dana", "stash", w]);
+    assert_eq!(cas(&store, &["status", w]), "");
+    cas(&store, &["stash", "pop", w]);
+    assert_eq!(cas(&store, &["status", w]), "added    junk\n");
+    cas(&store, &["clean", w]);
+    cas(&store, &["stash", "pop", w]);
+    assert_eq!(cas(&store, &["status", w]), "deleted  README\n");
+    let o =
+        Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["stash", "pop", w]).output().unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("nothing stashed in stash/main"));
+    assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
 }
 
 /// Commit histories sync fast-forward only, and merge or rebase what
@@ -343,7 +409,7 @@ fn commit_histories_push_pull_merge_and_rebase() {
     std::fs::write(work.join("b"), "1\n").unwrap();
     let (w, o) = (work.to_str().unwrap(), other.to_str().unwrap());
 
-    cas(&store, &["--commits", "--author", "Dana", "commit", w]);
+    cas(&store, &["--author", "Dana", "commit", w]);
     assert!(cas(&store, &["push", o]).starts_with("Created"));
     assert!(cas(&store, &["push", o]).starts_with("UpToDate"));
 
@@ -382,7 +448,7 @@ fn commit_histories_push_pull_merge_and_rebase() {
     let side = tmp.path().join("side");
     cas(&store, &["-n", &before.lines().nth(1).unwrap()[..12], "checkout", side.to_str().unwrap()]);
     let third = tmp.path().join("third");
-    cas(&third, &["--commits", "--author", "Dana", "commit", side.to_str().unwrap()]);
+    cas(&third, &["--author", "Dana", "commit", side.to_str().unwrap()]);
     std::fs::write(side.join("c"), "new\n").unwrap();
     cas(&third, &["--author", "Fay", "commit", side.to_str().unwrap()]);
     let conflict = Command::new(env!("CARGO_BIN_EXE_cas"))
@@ -420,7 +486,7 @@ fn releases_have_tags_and_typed_changes() {
         String::from_utf8_lossy(&o.stderr).to_string()
     };
 
-    cas(&store, &["--commits", "--author", "Dana", "commit", w]);
+    cas(&store, &["--author", "Dana", "commit", w]);
     assert!(fails(&["publish"]).contains("--tag"));
     assert!(fails(&["publish", "--tag", "v1"]).contains("semantic version"));
     assert!(cas(&store, &["publish", "--tag", "1.0.0"]).starts_with("1.0.0 "));

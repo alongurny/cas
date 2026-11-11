@@ -63,10 +63,11 @@ History options: -H <history> (default main), -n <node> (a tag, `latest`, or a k
 prefix; default latest), --compatible. There is no commit
 message: a step says why through its notes (commit --notes), and a release
 through its changelog (publish --changelog).
-With --commits, commit and import-git start a history of commits (spec/formats/commit.md:
-versions as `directory`, notes as `annotation`, an author and a time on each commit;
---author <name>, default $CAS_AUTHOR or $USER). On such a history commit, status, reset,
-clean, log, ls, diff, checkout, sparse, path-log, merge-base, merge <other>, rebase <onto>,\npush and pull work; stash, last-modified and summary are being moved over. From such a history\npublish --tag <semantic version> [--change breaking|feature|patch|security --changelog <file>]\nadds its tip to the release history (default releases; --as <name>): a first release has no\nchange, a later one says its change from the one before. On a release history (-H releases)\nlog, ls, checkout, sparse (-n <tag>) and compatible <from> <to> work.
+A history is one of commits (spec/formats/commit.md: versions as `directory`, notes as
+`annotation`, an author and a time on each commit; --author <name>, default $CAS_AUTHOR or
+$USER). Every hash is shown with the name of its hash directly before it, as blake3:<digits>.
+--nodes starts a history in the earlier format instead, which the forge still keeps; tag,
+compatible and publish --changelog alone are for that format. From a history of commits\npublish --tag <semantic version> [--change breaking|feature|patch|security --changelog <file>]\nadds its tip to the release history (default releases; --as <name>): a first release has no\nchange, a later one says its change from the one before. On a release history (-H releases)\nlog, ls, checkout, sparse (-n <tag>) and compatible <from> <to> work.
   commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
                                   caches stat data, so unchanged files are not rehashed)
   commit <dir> --notes <file>     ... with a note on each line of the step's diff
@@ -185,7 +186,7 @@ struct Args {
     author: Option<String>,
     tag: Option<String>,
     change: Option<String>,
-    commits: bool,
+    nodes: bool,
     remote: Option<String>,
     token_file: Option<String>,
     ca: Option<String>,
@@ -208,7 +209,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         author: None,
         tag: None,
         change: None,
-        commits: false,
+        nodes: false,
         remote: None,
         token_file: None,
         ca: None,
@@ -237,7 +238,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--author" => a.author = Some(value("--author")?),
             "--tag" => a.tag = Some(value("--tag")?),
             "--change" => a.change = Some(value("--change")?),
-            "--commits" => a.commits = true,
+            "--nodes" => a.nodes = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
             "--ca" => a.ca = Some(value("--ca")?),
@@ -954,7 +955,10 @@ fn run(a: Args) -> Res<()> {
 }
 
 fn short(key: &str) -> String {
-    key.split_once(':').map_or(key, |(_, d)| &d[..12.min(d.len())]).to_string()
+    match key.split_once(':') {
+        Some((alg, d)) => format!("{alg}:{}", &d[..12.min(d.len())]),
+        None => key.to_string(),
+    }
 }
 
 fn main() -> ExitCode {

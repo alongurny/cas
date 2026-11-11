@@ -45,9 +45,10 @@ export function qs(o: Record<string, string | number | undefined | null>): strin
 export function short(id: string | null | undefined): string {
 	if (!id) return '';
 	const key = id.split(' ').pop() ?? id;
-	const hex = key.includes(':') ? key.split(':')[1] : key;
+	// The name of the hash stays directly before its digits.
+	const [alg, hex] = key.includes(':') ? [key.split(':')[0] + ':', key.split(':')[1]] : ['', key];
 	const occ = id.includes('#') ? '#' + id.split('#').pop() : '';
-	return hex.slice(0, 10) + occ;
+	return alg + hex.slice(0, 10) + occ;
 }
 
 export function when(t: string | number | undefined): string {
