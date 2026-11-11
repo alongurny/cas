@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { api, setToken, forget } from '$lib/api';
+	import { api, setToken, forget } from '#lib/api.ts';
 	let name = $state('');
 	let password = $state('');
 	let err = $state('');

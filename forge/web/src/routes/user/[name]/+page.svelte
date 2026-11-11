@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, api, user, when } from '$lib/api';
+	import { get, api, user, when } from '#lib/api.ts';
 	let account = $state<any>(null);
 	let me = $state<any>(null);
 	let tokens = $state<any[]>([]);

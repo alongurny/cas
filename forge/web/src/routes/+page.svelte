@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { get, api, user } from '$lib/api';
+	import { get, api, user } from '#lib/api.ts';
 	import { goto } from '$app/navigation';
 	let projects = $state<any[]>([]);
 	let me = $state<any>(null);

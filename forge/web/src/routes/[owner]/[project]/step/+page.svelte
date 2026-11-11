@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, qs, short } from '$lib/api';
-	import Diff from '$lib/Diff.svelte';
+	import { get, qs, short } from '#lib/api.ts';
+	import Diff from '#lib/Diff.svelte';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let sp = $derived(page.url.searchParams);
 	let history = $derived(sp.get('history') ?? 'h/dev');

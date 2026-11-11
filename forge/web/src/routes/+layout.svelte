@@ -1,6 +1,6 @@
 <script lang="ts">
 	import '../app.css';
-	import { user, setToken, forget, api } from '$lib/api';
+	import { user, setToken, forget, api } from '#lib/api.ts';
 	let { children } = $props();
 	let me = $state<any>(null);
 	$effect(() => {

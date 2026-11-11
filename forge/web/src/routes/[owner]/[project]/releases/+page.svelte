@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, api, short } from '$lib/api';
+	import { get, api, short } from '#lib/api.ts';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let list = $state<any[]>([]);
 	let tag = $state('');

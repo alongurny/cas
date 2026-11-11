@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { api } from '$lib/api';
+	import { api } from '#lib/api.ts';
 	import { goto } from '$app/navigation';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let title = $state('');

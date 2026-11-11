@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, qs, short } from '$lib/api';
+	import { get, qs, short } from '#lib/api.ts';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let sp = $derived(page.url.searchParams);
 	let history = $derived(sp.get('history') ?? 'h/dev');

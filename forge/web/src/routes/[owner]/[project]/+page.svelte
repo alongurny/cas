@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, short, ApiError } from '$lib/api';
+	import { get, short, ApiError } from '#lib/api.ts';
 	let p = $state<any>(null);
 	let err = $state('');
 	let base = $derived(`${page.params.owner}/${page.params.project}`);

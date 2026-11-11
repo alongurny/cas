@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, api, when } from '$lib/api';
+	import { get, api, when } from '#lib/api.ts';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let n = $derived(page.params.n);
 	let i = $state<any>(null);

@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, qs, when } from '$lib/api';
+	import { get, qs, when } from '#lib/api.ts';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let sp = $derived(page.url.searchParams);
 	let state_ = $derived(sp.get('state') ?? 'open');

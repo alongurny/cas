@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get, api, when, short, user } from '$lib/api';
-	import Diff from '$lib/Diff.svelte';
+	import { get, api, when, short, user } from '#lib/api.ts';
+	import Diff from '#lib/Diff.svelte';
 	let base = $derived(`${page.params.owner}/${page.params.project}`);
 	let n = $derived(page.params.n);
 	let p = $state<any>(null);

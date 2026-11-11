@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { get } from '$lib/api';
+	import { get } from '#lib/api.ts';
 	let projects = $state<any[]>([]);
 	let account = $state<any>(null);
 	$effect(() => {
