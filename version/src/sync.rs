@@ -45,6 +45,9 @@ pub fn children(store: &dyn Store, r: &View) -> Result<Vec<View>> {
         Some((_, "git-tree" | "git-commit" | "git-tag")) => Ok(crate::gitobj::children(&read_blob(store, r.key())?)),
         Some((_, "git-links")) => Ok(crate::gitobj::links_children(&read_blob(store, r.key())?)),
         Some((_, "git-tags")) => Ok(crate::gitobj::tags_children(&read_blob(store, r.key())?)),
+        Some((_, a)) if crate::typed::by_type(a).is_some() => {
+            Ok(children_of(r, &read_blob(store, r.key())?)?.unwrap_or_default())
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -118,6 +121,10 @@ fn children_of_light(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<
         }
         Some((_, "git-tags")) => {
             Ok(Some(crate::gitobj::tags_children(bytes).into_iter().filter(|v| !skip.contains(v.key())).collect()))
+        }
+        Some((_, a)) if crate::typed::by_type(a).is_some() => {
+            let kids = crate::typed::by_type(a).unwrap().children(bytes).map_err(|e| crate::malformed(r.key(), e))?;
+            Ok(Some(kids.into_iter().filter(|v| !skip.contains(v.key())).collect()))
         }
         _ => Ok(None),
     }

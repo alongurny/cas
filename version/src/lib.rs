@@ -27,6 +27,7 @@ pub mod merge;
 pub mod stepnotes;
 pub mod sync;
 mod tree;
+pub mod typed;
 pub mod uni;
 pub mod watch;
 

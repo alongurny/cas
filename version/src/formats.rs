@@ -166,6 +166,20 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
             include_str!("../../spec/formats/history-part.md"),
             Kind::Leaf(crate::htree::check_part),
         ),
+        // Formats given as types (spec/types.md).
+        format("directory", include_str!("../../spec/formats/directory.md"), Kind::Leaf(crate::typed::check_directory)),
+        format("commit", include_str!("../../spec/formats/commit.md"), Kind::Leaf(crate::typed::check_commit)),
+        format(
+            "annotation",
+            include_str!("../../spec/formats/annotation.md"),
+            Kind::Leaf(crate::typed::check_annotation),
+        ),
+        format("lines", include_str!("../../spec/formats/lines.md"), Kind::Leaf(crate::typed::check_lines)),
+        format("runs", include_str!("../../spec/formats/runs.md"), Kind::Leaf(crate::typed::check_runs)),
+        format("release", include_str!("../../spec/formats/release.md"), Kind::Leaf(crate::typed::check_release)),
+        format("note", include_str!("../../spec/formats/note.md"), Kind::Leaf(crate::typed::check_text)),
+        format("author", include_str!("../../spec/formats/author.md"), Kind::Leaf(crate::typed::check_text)),
+        format("tag", include_str!("../../spec/formats/tag.md"), Kind::Leaf(crate::typed::check_semver)),
     ]
 });
 
