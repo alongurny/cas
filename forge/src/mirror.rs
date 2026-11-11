@@ -61,7 +61,9 @@ impl Forge {
         let dir = cache.join(format!("{}-{}-{name}.git", p.owner, p.name));
         if !dir.exists() {
             std::fs::create_dir_all(cache).map_err(|e| Error::new(500, e.to_string()))?;
-            git(cache, &["init", "--bare", "-q", dir.to_str().unwrap()])?;
+            // Named from inside `cache`, which may itself be a relative path.
+            let name = dir.file_name().and_then(|n| n.to_str()).expect("just joined");
+            git(cache, &["init", "--bare", "-q", name])?;
         }
         git(&dir, &["fetch", "-q", "--prune", "--tags", &url, "+refs/heads/*:refs/heads/*"])?;
         let head = String::from_utf8_lossy(&git(&dir, &["ls-remote", "--symref", &url, "HEAD"])?).into_owned();

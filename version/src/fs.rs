@@ -58,15 +58,8 @@ pub fn import_indexed(
     };
     let mut entries = BTreeMap::new();
     let mut reused = Vec::new();
-    let mut scan = Scan {
-        store,
-        alg,
-        exec: has_exec(format),
-        escape: escapes(format),
-        old: old.as_ref(),
-        new: new.as_mut(),
-        reused: &mut reused,
-    };
+    let mut scan =
+        Scan { store, alg, exec: has_exec(format), old: old.as_ref(), new: new.as_mut(), reused: &mut reused };
     let mut edits = None;
     match &base {
         Some((changed, o, _)) => edits = Some(scan.watched(dir, o, changed, &mut entries)?),
@@ -130,8 +123,6 @@ struct Scan<'a> {
     store: &'a dyn Store,
     alg: &'static Algorithm,
     exec: bool,
-    /// Whether names that do not fit the format are held escaped.
-    escape: bool,
     old: Option<&'a Index>,
     new: Option<&'a mut Index>,
     /// Files whose view came from the cache, to check against the store.
@@ -151,14 +142,6 @@ impl Scan<'_> {
         entries: &mut BTreeMap<Path, Node>,
     ) -> Result<BTreeMap<Path, Edit>> {
         use crate::watch::touched;
-        // The watcher names paths as the disk has them.
-        let held: BTreeSet<String>;
-        let changed = if self.escape {
-            held = changed.iter().filter_map(|p| crate::typed::stored_path(p)).collect();
-            &held
-        } else {
-            changed
-        };
         if let Some(n) = self.new.as_deref_mut() {
             n.dirs.extend(old.dirs.iter().filter(|d| !touched(d, changed)).cloned());
             n.files.extend(old.files.iter().filter(|(p, _)| !touched(p, changed)).map(|(p, e)| (p.clone(), e.clone())));
@@ -172,9 +155,8 @@ impl Scan<'_> {
                 continue;
             }
             let path = Path::new(p.clone())?;
-            let file = dir.join(on_disk(p, self.escape));
-            let parent_ok =
-                above.is_none_or(|a| fs::symlink_metadata(dir.join(on_disk(a, self.escape))).is_ok_and(|m| m.is_dir()));
+            let file = dir.join(p);
+            let parent_ok = above.is_none_or(|a| fs::symlink_metadata(dir.join(a)).is_ok_and(|m| m.is_dir()));
             match fs::symlink_metadata(&file) {
                 Ok(meta) if parent_ok => self.one(&file, path.clone(), &meta, entries)?,
                 _ => {}
@@ -204,10 +186,6 @@ impl Scan<'_> {
             if at.is_none() && crate::watch::own_name(&name) {
                 continue;
             }
-            let name = match self.escape {
-                true => crate::typed::stored_name(name.as_bytes()).ok_or(Error::BadPath(name))?,
-                false => name,
-            };
             let path = Path::new(match at {
                 Some(d) => format!("{d}/{name}"),
                 None => name,
@@ -299,12 +277,11 @@ fn write_walk(
     cache: Option<&mut Index>,
 ) -> Result<usize> {
     // Directories as the walk meets them; the files after, on every thread.
-    let escape = root.known_format().is_some_and(escapes);
     let mut n = 0;
     let mut files = Vec::new();
     for item in walk(store, root, prefix) {
         let (path, node) = item?;
-        let target = dest.join(on_disk(path.as_str(), escape));
+        let target = dest.join(path.as_str());
         match node {
             Node::Dir => fs::create_dir_all(&target)?,
             Node::File(r) => {
@@ -514,7 +491,7 @@ pub fn reset(
         if keep_changes && c.old.is_some() {
             continue;
         }
-        let target = dir.join(on_disk(c.path.as_str(), escapes(format)));
+        let target = dir.join(c.path.as_str());
         if c.new.is_some() {
             match fs::symlink_metadata(&target) {
                 Ok(m) if m.is_dir() => {
@@ -544,17 +521,6 @@ pub fn reset(
         import_indexed(&Overlay::new(store), alg, format, dir, scope)?;
     }
     Ok(done)
-}
-
-/// Whether a directory of `format` holds names that do not fit it escaped
-/// ([`crate::typed::stored_name`]).
-fn escapes(format: &Format) -> bool {
-    format.alias == "directory"
-}
-
-/// The path on disk of what a directory holds as `path`.
-fn on_disk(path: &str, escape: bool) -> String {
-    if escape { crate::typed::real_path(path) } else { path.to_string() }
 }
 
 /// Every directory format tells a file that may be run from one that may not.

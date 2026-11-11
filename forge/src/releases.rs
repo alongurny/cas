@@ -114,8 +114,7 @@ impl Forge {
         let io = |e: std::io::Error| Error::new(500, e.to_string());
         for item in walk(&*self.store, version, None) {
             let (path, node) = item?;
-            // A name the directory holds escaped is written as it is outside.
-            let full = format!("{top}/{}", cas_version::typed::real_path(path.as_str()));
+            let full = format!("{top}/{path}");
             let mut header = tar::Header::new_gnu();
             header.set_mtime(0);
             match node {

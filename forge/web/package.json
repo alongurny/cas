@@ -7,9 +7,10 @@
     "#lib/*": "./src/lib/*"
   },
   "scripts": {
-    "dev": "vite dev",
-    "build": "vite build",
-    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
+    "routes": "node routes.js",
+    "dev": "node routes.js && vite dev",
+    "build": "node routes.js && vite build",
+    "check": "node routes.js && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json"
   },
   "devDependencies": {
     "@sveltejs/adapter-static": "^4.0.1",

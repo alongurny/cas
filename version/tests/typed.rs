@@ -241,32 +241,3 @@ fn names_are_a_short_list_of_bytes() {
         assert!(!name_fits(bad.as_bytes()), "{bad}");
     }
 }
-
-#[test]
-fn a_name_that_does_not_fit_is_held_escaped_and_read_back() {
-    use cas_version::typed::{name_fits, real_name, stored_name};
-    // What fits is held as it is.
-    for same in ["a", "main.tex", ".gitignore", "a b", "A-b_9.tar.gz", "_x", "_x2", "_xzz", "_x2b"] {
-        assert_eq!(stored_name(same.as_bytes()).as_deref(), Some(same));
-    }
-    let held = |real: &str| stored_name(real.as_bytes()).unwrap();
-    assert_eq!(held("+page.svelte"), "_x2Bpage.svelte");
-    assert_eq!(held("a..b"), "a._x2Eb");
-    assert_eq!(held("caf\u{e9}"), "caf_xC3_xA9");
-    // What would read as an escape has its underscore escaped.
-    assert_eq!(held("_x2B"), "_x5Fx2B");
-    // Every name comes back, and what is held fits.
-    let mut names: Vec<Vec<u8>> = (1..=255u8).filter(|c| *c != b'/').map(|c| vec![b'a', c, b'.', c]).collect();
-    names.extend(["...", "_x_x41", "__x41", "a_x5Fx41", "x.", ".x", "_", "_x4"].map(|s| s.as_bytes().to_vec()));
-    let mut seen = std::collections::BTreeSet::new();
-    for real in names {
-        let s = stored_name(&real).unwrap();
-        assert!(name_fits(s.as_bytes()), "{s}");
-        assert_eq!(real_name(&s), real, "{s}");
-        assert!(seen.insert(s), "two names held as one");
-    }
-    // Too long once escaped, or empty: not held.
-    assert_eq!(stored_name(&[b'+'; 64]), None);
-    assert_eq!(stored_name(b""), None);
-    assert_eq!(stored_name(&[b'+'; 63]).unwrap().len(), 252);
-}

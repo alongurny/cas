@@ -203,6 +203,8 @@ pub enum Error {
     },
     /// A format this crate cannot read, where it has to.
     UnknownFormat(String),
+    /// Something a `directory` does not hold: a name or a kind of child.
+    NotHeld(String),
     BadPath(String),
     BadKey(String),
     /// The edits would put something under a file.
@@ -225,6 +227,7 @@ impl fmt::Display for Error {
             Error::Missing(k) => write!(f, "missing blob {k}"),
             Error::Malformed { key, reason } => write!(f, "malformed blob {key}: {reason}"),
             Error::UnknownFormat(s) => write!(f, "unknown format {s}"),
+            Error::NotHeld(s) => write!(f, "{s}"),
             Error::BadPath(p) => write!(f, "bad path {p:?}"),
             Error::BadKey(k) => write!(f, "not a blob key: {k:?}"),
             Error::PathConflict(p) => write!(f, "{p} is a file, so nothing can go under it"),

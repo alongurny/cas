@@ -25,7 +25,7 @@ const USAGE: &str = "usage:
   cas-forge pull <store> <owner>/<project> <mirror> [--cache <dir>]
       pull a mirror now
   cas-forge export <store> <owner>/<project> <history> <git-repo> [<branch>]
-      write a history to a git repository, one commit per node
+      write a history to a git repository, with its releases as tags
   cas-forge password <store> <name>
       set a user's password (read from standard input), as for accounts a migration made
   cas-forge runner <url> --token-file <file> [--ca <file>] [--once]

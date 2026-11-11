@@ -58,10 +58,6 @@ $ cas commit site
 ```
 
 `status` compares the directory with the newest commit and stores nothing.
-A file whose name has a character a directory does not take (anything but
-letters, digits, `.`, `-`, `_` and spaces) is held under an escaped name:
-`+page.svelte` shows in `cas ls` as `_x2Bpage.svelte`. A checkout, and git,
-get the real name back.
 `reset site` throws the changes away, `clean site` removes files the commit
 does not have, and `stash site` sets the changes aside (`stash pop site`
 brings them back).

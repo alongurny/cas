@@ -1022,7 +1022,7 @@ impl Dir {
         for i in items {
             if !crate::typed::name_fits(i.name.as_bytes()) {
                 return Err(format!(
-                    "a directory holds names of 1 to 255 letters, digits, `.`, `-`, `_` and spaces, not `.` alone and with no `..`, not {:?}",
+                    "{:?} is not a name a directory holds: a name is 1 to 255 letters, digits, `.`, `-`, `_` and spaces, not `.` alone and with no `..`; rename it",
                     i.name
                 ));
             }

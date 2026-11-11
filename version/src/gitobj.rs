@@ -982,9 +982,6 @@ impl<'a> TreeWriter<'a> {
             return Ok(t.clone());
         }
         let mut entries: Vec<(Vec<u8>, String, [u8; 20])> = Vec::new();
-        // A `directory` holds names that do not fit it escaped; git gets
-        // the names as they are outside.
-        let escaped = dir.known_format().is_some_and(|f| f.alias == "directory");
         for it in crate::tree::load(self.store, dir)? {
             let (mode, id) = if it.child.is_dir() {
                 ("40000", self.tree(&it.child)?)
@@ -997,8 +994,7 @@ impl<'a> TreeWriter<'a> {
             for (k, b) in raw.iter_mut().enumerate() {
                 *b = u8::from_str_radix(&id[2 * k..2 * k + 2], 16).unwrap();
             }
-            let name = if escaped { crate::typed::real_name(&it.name) } else { it.name.into_bytes() };
-            entries.push((name, mode.to_string(), raw));
+            entries.push((it.name.into_bytes(), mode.to_string(), raw));
         }
         // Git's order: a tree's name sorts as if it ended in `/`.
         entries.sort_by(|a, b| {

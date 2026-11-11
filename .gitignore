@@ -2,4 +2,5 @@ target/
 forge/web/node_modules/
 forge/web/.svelte-kit/
 forge/web/build/
+forge/web/src/routes/
 result

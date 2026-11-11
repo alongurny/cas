@@ -14,7 +14,7 @@ the way a forge makes one of a commit pushed to it ([forge/git](forge/git.md)).
 | file, mode 100755 | `exec` |
 | symlink, mode 120000 | `symlink` |
 | submodule, mode 160000 | left out |
-| a name the name rule refuses | held escaped ([types](types.md), "Names from outside") |
+| a name the name rule refuses | the import is refused, naming it ([types](types.md)) |
 | commit | a commit of its tree, after the commits of its parents |
 | author | the commit's author, `Name <email>` |
 | committer's time | the commit's time |

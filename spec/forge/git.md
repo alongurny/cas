@@ -70,8 +70,8 @@ bodies may be gzipped and chunked. A push is checked by the wire's rules
 (releases make tags: `cas release publish`), and so is a push to
 `release`. An update must be a fast forward: each new git commit becomes
 a commit after the history's tip, with git's author and time, its tree a
-version (a `directory`; a name that does not fit the name rule is held
-escaped, [types](../types.md)), its message the note of the step from its
+version (a `directory`; a tree with a name that does not fit the name
+rule is refused, [types](../types.md)), its message the note of the step from its
 first parent (lines joined with ` / `), a root commit's message its own
 note. A git commit another history of the project already links brings
 that commit, and what precedes it, along, with its links. Deleting a branch removes
