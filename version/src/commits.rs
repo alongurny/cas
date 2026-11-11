@@ -603,3 +603,161 @@ pub fn import_git(
     };
     Ok((tip, n))
 }
+
+// Sync, merge and rebase.
+
+/// Whether `old` is `tip` or one of the commits before it.
+pub fn reaches(store: &dyn Store, tip: &str, old: &str) -> Result<bool> {
+    Ok(tip == old || log(store, tip)?.iter().any(|(k, _)| k == old))
+}
+
+/// [`crate::sync::push`] for a history of commits: `to` in `dst` moves to
+/// the commit `from` holds in `src` when it is unset or holds a commit
+/// that one reaches.
+pub fn push(
+    src: &dyn Store,
+    dst: &dyn Store,
+    from: &str,
+    to: &str,
+) -> Result<(crate::sync::Outcome, crate::sync::Copied)> {
+    use crate::sync::{Copied, Outcome};
+    let head = tip(src, from)?.ok_or_else(|| Error::Missing(format!("history {from} in the source")))?;
+    let theirs = tip(dst, to)?;
+    if theirs.as_deref() == Some(head.as_str()) {
+        return Ok((Outcome::UpToDate, Copied::default()));
+    }
+    if let Some(t) = &theirs {
+        // Their commit is in the source when ours comes after it.
+        if !src.has_many(std::slice::from_ref(t))?[0] || !reaches(src, &head, t)? {
+            return Err(Error::Diverged(to.to_string()));
+        }
+    }
+    let copied = crate::sync::copy(src, dst, &view("commit", &head))?;
+    match advance(dst, to, theirs.as_deref(), &head) {
+        Ok(()) => Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied)),
+        Err(Error::Store(cas_core::Error::Conflict)) => Err(Error::Diverged(to.to_string())),
+        Err(e) => Err(e),
+    }
+}
+
+/// The newest commit both `a` and `b` reach, if any.
+pub fn merge_base(store: &dyn Store, a: &str, b: &str) -> Result<Option<String>> {
+    let theirs: std::collections::HashSet<String> = log(store, b)?.into_iter().map(|(k, _)| k).collect();
+    // Newest first: the first of ours that is also theirs.
+    Ok(log(store, a)?.into_iter().map(|(k, _)| k).find(|k| theirs.contains(k)))
+}
+
+/// What a merge or a rebase did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    UpToDate,
+    /// The history moved to a commit that was already there.
+    FastForward(String),
+    /// A new commit (the last of a rebase).
+    Done(String),
+    /// Nothing recorded: the conflicts.
+    Conflicts(crate::merge::Merged),
+}
+
+/// Merge the commit `theirs` into the commit `ours`: the commit to move the
+/// history to. The merge commit has both as parents, with no step notes.
+pub fn merge(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    ours: &str,
+    theirs: &str,
+    author: &str,
+    time: u64,
+) -> Result<Outcome> {
+    if reaches(store, ours, theirs)? {
+        return Ok(Outcome::UpToDate);
+    }
+    if reaches(store, theirs, ours)? {
+        return Ok(Outcome::FastForward(theirs.to_string()));
+    }
+    let base = merge_base(store, ours, theirs)?
+        .ok_or_else(|| Error::Diverged("the two histories share no commit".to_string()))?;
+    let (b, o, t) = (read(store, &base)?, read(store, ours)?, read(store, theirs)?);
+    let m = crate::merge::merge_versions(store, alg, &b.version(), &o.version(), &t.version())?;
+    if !m.conflicts.is_empty() {
+        return Ok(Outcome::Conflicts(m));
+    }
+    let c = Commit {
+        version: m.version.key.clone(),
+        author: put_text(store, alg, "author", &one_line(author))?,
+        notes: None,
+        time,
+        parents: BTreeMap::from([(ours.to_string(), None), (theirs.to_string(), None)]),
+    };
+    Ok(Outcome::Done(write(store, alg, &c)?))
+}
+
+/// Replay the commits `ours` has and `onto` lacks on top of `onto`, oldest
+/// first. They must be a chain (no merges among them). A step keeps its
+/// annotation where its line runs still fit the files, else its notes
+/// without the runs. Authors and times stay.
+pub fn rebase(store: &dyn Store, alg: &'static Algorithm, ours: &str, onto: &str) -> Result<Outcome> {
+    if reaches(store, onto, ours)? {
+        return Ok(Outcome::FastForward(onto.to_string()));
+    }
+    if reaches(store, ours, onto)? {
+        return Ok(Outcome::UpToDate);
+    }
+    let base = merge_base(store, ours, onto)?
+        .ok_or_else(|| Error::Diverged("the two histories share no commit".to_string()))?;
+    let mut chain = Vec::new();
+    let mut at = ours.to_string();
+    while at != base {
+        let c = read(store, &at)?;
+        let mut parents = c.parents.keys();
+        let (Some(p), None) = (parents.next().cloned(), parents.next()) else {
+            return Err(Error::Diverged("a merge is among the commits to replay; merge instead".to_string()));
+        };
+        chain.push((c, p.clone()));
+        at = p;
+    }
+    let mut tip = onto.to_string();
+    for (c, parent) in chain.into_iter().rev() {
+        let (was, new_parent) = (read(store, &parent)?, read(store, &tip)?);
+        let m = crate::merge::merge_versions(store, alg, &was.version(), &new_parent.version(), &c.version())?;
+        if !m.conflicts.is_empty() {
+            return Ok(Outcome::Conflicts(m));
+        }
+        let step = match &c.parents[&parent] {
+            None => None,
+            Some(k) => {
+                let mut n = read_notes(store, k)?;
+                if fits(store, &n, Some(&new_parent.version()), &m.version).is_ok() {
+                    Some(k.clone())
+                } else {
+                    for p in n.paths.values_mut() {
+                        (p.old, p.new) = (None, None);
+                    }
+                    n.paths.retain(|_, p| !p.note.is_empty());
+                    let is_dir = |p: &str| -> Result<bool> {
+                        Ok(crate::object_at(store, &m.version, &crate::Path::new(p)?)?.is_some_and(|v| v.is_dir()))
+                    };
+                    write_notes(store, alg, &n, &is_dir)?
+                }
+            }
+        };
+        let new = Commit { version: m.version.key.clone(), parents: BTreeMap::from([(tip.clone(), step)]), ..c };
+        tip = write(store, alg, &new)?;
+    }
+    Ok(Outcome::Done(tip))
+}
+
+/// The commits of the history ending at `tip` whose version differs from
+/// every parent's at `path` (a first commit: has the path), newest first.
+pub fn path_log(store: &dyn Store, tip: &str, path: &crate::Path) -> Result<Vec<(String, Commit)>> {
+    let all = log(store, tip)?;
+    let mut memo = crate::dir::FindMemo::new();
+    let mut at: HashMap<String, Option<View>> = HashMap::new();
+    for (k, c) in &all {
+        at.insert(k.clone(), crate::tree::object_at_memo(store, &c.version(), path, &mut memo)?);
+    }
+    Ok(all
+        .into_iter()
+        .filter(|(k, c)| if c.parents.is_empty() { at[k].is_some() } else { c.parents.keys().all(|p| at[p] != at[k]) })
+        .collect())
+}

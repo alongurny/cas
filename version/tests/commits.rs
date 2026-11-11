@@ -213,3 +213,56 @@ fn an_earlier_history_becomes_commits() {
     assert_eq!(commits::line(&s, &c1).unwrap(), "the first / version");
     assert_eq!(commits::line(&s, &c2).unwrap(), "add a line");
 }
+
+#[test]
+fn a_rebase_replays_a_chain_and_a_merge_joins_two() {
+    let s = store();
+    let author = commits::put_text(&s, b3(), "author", "Dana").unwrap();
+    let commit = |files: &[(&str, &str, &str)], time: u64, parent: Option<(&str, Option<String>)>| {
+        let c = Commit {
+            version: tree(&s, "directory", files).key().into(),
+            author: author.clone(),
+            notes: None,
+            time,
+            parents: parent.into_iter().map(|(p, n)| (p.to_string(), n)).collect(),
+        };
+        commits::write(&s, b3(), &c).unwrap()
+    };
+    let base = commit(&[("a", "raw", "1\n")], 1, None);
+    let onto = commit(&[("a", "raw", "1\n"), ("c", "raw", "c\n")], 2, Some((&base, None)));
+    let n = Notes {
+        note: "add b".into(),
+        paths: BTreeMap::from([(
+            "b".to_string(),
+            PathNotes { note: String::new(), old: None, new: Some(vec![(1, "new".into())]) },
+        )]),
+    };
+    let step = commits::write_notes(&s, b3(), &n, &|_| Ok(false)).unwrap();
+    let mine = commit(&[("a", "raw", "1\n"), ("b", "raw", "b\n")], 3, Some((&base, step.clone())));
+    let mine2 = commit(&[("a", "raw", "1\n"), ("b", "raw", "b\nb\n")], 4, Some((&mine, None)));
+
+    let commits::Outcome::Done(tip) = commits::rebase(&s, b3(), &mine2, &onto).unwrap() else { panic!("not done") };
+    let log = commits::log(&s, &tip).unwrap();
+    assert_eq!(log.len(), 4);
+    assert_eq!(log.iter().map(|(_, c)| c.time).collect::<Vec<_>>(), [4, 3, 2, 1]);
+    assert_eq!(log[2].0, onto);
+    assert_eq!(paths(&s, &log[0].1.version()), ["a:raw", "b:raw", "c:raw"]);
+    // The step's notes still fit, so the annotation is the same blob.
+    assert_eq!(log[1].1.parents[&onto], step);
+    assert_eq!(commits::rebase(&s, b3(), &tip, &onto).unwrap(), commits::Outcome::UpToDate);
+    assert_eq!(commits::rebase(&s, b3(), &onto, &tip).unwrap(), commits::Outcome::FastForward(tip.clone()));
+
+    // A merge of the two sides gives the same version, with both as parents.
+    let commits::Outcome::Done(m) = commits::merge(&s, b3(), &mine2, &onto, "Dana", 9).unwrap() else {
+        panic!("not done")
+    };
+    let mc = commits::read(&s, &m).unwrap();
+    assert_eq!(mc.version, log[0].1.version);
+    assert_eq!(mc.parents.len(), 2);
+    assert_eq!(commits::merge_base(&s, &mine2, &onto).unwrap(), Some(base.clone()));
+    // Both sides changing one file differently is a conflict; nothing is written.
+    let clash = commit(&[("a", "raw", "2\n")], 5, Some((&base, None)));
+    let other = commit(&[("a", "raw", "3\n")], 6, Some((&base, None)));
+    assert!(matches!(commits::merge(&s, b3(), &clash, &other, "Dana", 9).unwrap(), commits::Outcome::Conflicts(_)));
+    assert!(matches!(commits::rebase(&s, b3(), &clash, &other).unwrap(), commits::Outcome::Conflicts(_)));
+}

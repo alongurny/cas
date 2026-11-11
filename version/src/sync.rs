@@ -519,6 +519,9 @@ pub enum Outcome {
 /// or merge is the caller's choice.
 pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(Outcome, Copied)> {
     let head = history::head(src, from)?.ok_or_else(|| Error::Missing(format!("history {from} in the source")))?;
+    if crate::commits::is_commit(&head) {
+        return crate::commits::push(src, dst, from, to);
+    }
     let theirs = history::head(dst, to)?;
     if theirs.as_ref() == Some(&head) {
         return Ok((Outcome::UpToDate, Copied::default()));

@@ -331,3 +331,74 @@ fn a_history_of_commits() {
     assert!(!o.status.success());
     assert!(String::from_utf8_lossy(&o.stderr).contains("not yet available for a history of commits"));
 }
+
+/// Commit histories sync fast-forward only, and merge or rebase what
+/// was made side by side.
+#[test]
+fn commit_histories_push_pull_merge_and_rebase() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store, other) = (tmp.path().join("work"), tmp.path().join("store"), tmp.path().join("other"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("a"), "1\n").unwrap();
+    std::fs::write(work.join("b"), "1\n").unwrap();
+    let (w, o) = (work.to_str().unwrap(), other.to_str().unwrap());
+
+    cas(&store, &["--commits", "--author", "Dana", "commit", w]);
+    assert!(cas(&store, &["push", o]).starts_with("Created"));
+    assert!(cas(&store, &["push", o]).starts_with("UpToDate"));
+
+    // The other store moves on; this one pulls it.
+    let work2 = tmp.path().join("work2");
+    cas(&other, &["checkout", work2.to_str().unwrap()]);
+    std::fs::write(work2.join("a"), "2\n").unwrap();
+    cas(&other, &["--author", "Eli", "commit", work2.to_str().unwrap()]);
+    assert!(cas(&store, &["pull", o]).starts_with("FastForward"));
+    assert_eq!(cas(&store, &["log"]).lines().count(), 2);
+    assert_eq!(cas(&store, &["path-log", "a"]).lines().count(), 2);
+    assert_eq!(cas(&store, &["path-log", "b"]).lines().count(), 1);
+
+    // Both move: a push is refused, a side history rebases, then merges.
+    cas(&store, &["reset", w]);
+    std::fs::write(work.join("b"), "3\n").unwrap();
+    cas(&store, &["--author", "Dana", "commit", w]);
+    std::fs::write(work2.join("a"), "4\n").unwrap();
+    cas(&other, &["--author", "Eli", "commit", work2.to_str().unwrap()]);
+    let refused =
+        Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["push", o]).output().unwrap();
+    assert!(!refused.status.success());
+    assert!(cas(&store, &["-H", "theirs", "pull", o, "--as", "main"]).starts_with("Created"));
+    let before = cas(&store, &["log"]);
+    assert!(cas(&store, &["--author", "Dana", "merge", "theirs"]).starts_with("Done"));
+    let merged = cas(&store, &["log"]);
+    assert_eq!(merged.lines().count(), 5, "{merged}");
+    cas(&store, &["reset", w]);
+    assert_eq!(std::fs::read_to_string(work.join("a")).unwrap(), "4\n");
+    assert_eq!(std::fs::read_to_string(work.join("b")).unwrap(), "3\n");
+    assert!(cas(&store, &["push", o]).starts_with("FastForward"));
+    assert!(cas(&store, &["--author", "Dana", "merge", "theirs"]).starts_with("UpToDate"));
+    assert!(!cas(&store, &["merge-base", "latest", &before.lines().next().unwrap()[..12]]).is_empty());
+
+    // A rebase replays a side history's commit on top, keeping its author.
+    let side = tmp.path().join("side");
+    cas(&store, &["-n", &before.lines().nth(1).unwrap()[..12], "checkout", side.to_str().unwrap()]);
+    let third = tmp.path().join("third");
+    cas(&third, &["--commits", "--author", "Dana", "commit", side.to_str().unwrap()]);
+    std::fs::write(side.join("c"), "new\n").unwrap();
+    cas(&third, &["--author", "Fay", "commit", side.to_str().unwrap()]);
+    let conflict = Command::new(env!("CARGO_BIN_EXE_cas"))
+        .arg("--store")
+        .arg(&store)
+        .args(["-H", "third", "pull", third.to_str().unwrap(), "--as", "main"])
+        .output()
+        .unwrap();
+    assert!(conflict.status.success());
+    // It shares no commit with main (its first commit was made anew).
+    let none = Command::new(env!("CARGO_BIN_EXE_cas"))
+        .arg("--store")
+        .arg(&store)
+        .args(["-H", "third", "rebase", "main"])
+        .output()
+        .unwrap();
+    assert!(!none.status.success());
+    assert!(cas(&store, &["fsck"]).contains("0 missing, 0 bad"));
+}

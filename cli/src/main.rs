@@ -66,7 +66,7 @@ through its changelog (publish --changelog).
 With --commits, commit and import-git start a history of commits (spec/formats/commit.md:
 versions as `directory`, notes as `annotation`, an author and a time on each commit;
 --author <name>, default $CAS_AUTHOR or $USER). On such a history commit, status, reset,
-clean, log, ls, diff, checkout and sparse work; the other commands are being moved over.
+clean, log, ls, diff, checkout, sparse, path-log, merge-base, merge <other>, rebase <onto>,\npush and pull work; tags and releases, stash and last-modified are being moved over.
   commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
                                   caches stat data, so unchanged files are not rehashed)
   commit <dir> --notes <file>     ... with a note on each line of the step's diff

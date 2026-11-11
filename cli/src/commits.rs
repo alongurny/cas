@@ -11,11 +11,25 @@ use cas_version::{Path, View, annotated, diff, formats, fs, history, object_at, 
 use std::collections::{BTreeMap, HashMap};
 
 /// The commands that work on a history of commits.
-const PORTED: &[&str] =
-    &["commit", "status", "reset", "clean", "log", "ls", "diff", "checkout", "sparse", "import-git"];
+const PORTED: &[&str] = &[
+    "commit",
+    "status",
+    "reset",
+    "clean",
+    "log",
+    "ls",
+    "diff",
+    "checkout",
+    "sparse",
+    "import-git",
+    "merge",
+    "rebase",
+    "merge-base",
+    "path-log",
+];
 
 /// The commands that are not about one history.
-const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated"];
+const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated", "push", "pull"];
 
 /// Whether the command is for this module: the history holds a commit, or
 /// it is unset and `--commits` asks for one.
@@ -222,6 +236,55 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             }
             let n = fs::checkout_sparse(s, &at()?.1.version(), &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
             out!("{n} paths written to {dest}");
+        }
+        cmd @ ("merge" | "rebase") => {
+            let other = arg(1, if cmd == "merge" { "<other>" } else { "<onto>" })?;
+            let ours = tip.clone().ok_or(format!("no history {name}"))?;
+            let theirs = commits::tip(s, &other).map_err(e)?.ok_or(format!("no history {other}"))?;
+            let outcome = if cmd == "merge" {
+                let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(e)?.as_secs();
+                commits::merge(s, b3(), &ours, &theirs, &author(a)?, time)
+            } else {
+                commits::rebase(s, b3(), &ours, &theirs)
+            }
+            .map_err(e)?;
+            match outcome {
+                commits::Outcome::UpToDate => out!("UpToDate"),
+                commits::Outcome::FastForward(k) | commits::Outcome::Done(k) => {
+                    commits::advance(s, name, Some(&ours), &k).map_err(|x| format!("{name}: {x}"))?;
+                    out!("Done {}", short(&k));
+                }
+                commits::Outcome::Conflicts(m) => {
+                    for c in &m.conflicts {
+                        out!(
+                            "conflict {:8} {:8} {:8} {}",
+                            node_text(&c.base),
+                            node_text(&c.ours),
+                            node_text(&c.theirs),
+                            c.path
+                        );
+                    }
+                    return Err(format!("{} conflicts; nothing recorded", m.conflicts.len()));
+                }
+            }
+        }
+        "merge-base" => {
+            let tip = tip.clone().ok_or(format!("no history {name}"))?;
+            let find = |what: &str| -> Res<String> {
+                commits::resolve(s, &tip, what).map_err(e)?.ok_or(format!("no commit {what} in history {name}"))
+            };
+            let (x, y) = (find(&arg(1, "<a>")?)?, find(&arg(2, "<b>")?)?);
+            if let Some(k) = commits::merge_base(s, &x, &y).map_err(e)? {
+                out!("{}", short(&k));
+            }
+        }
+        "path-log" => {
+            let p = Path::new(arg(1, "<path>")?).map_err(e)?;
+            let Some(tip) = &tip else { return Ok(()) };
+            for (k, c) in commits::path_log(s, tip, &p).map_err(e)? {
+                let line = commits::line(s, &c).map_err(e)?;
+                out!("{}  {line}", short(&k));
+            }
         }
         "import-git" => {
             if tip.is_some() {
