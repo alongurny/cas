@@ -304,6 +304,9 @@ fn entries<'a>(id: &Oid, raw: &'a [u8]) -> Result<Vec<Entry<'a>>> {
 struct Importer<'a> {
     store: &'a dyn Store,
     alg: &'static Algorithm,
+    /// The store holds git's own objects too (a mirror's): each file is
+    /// written as a delta on its git blob.
+    beside_git: bool,
     cat: Cats,
     /// Blobs not written yet, children before parents; written in batches.
     pending: Vec<Put>,
@@ -581,7 +584,11 @@ impl Importer<'_> {
                         .iter()
                         .find_map(|a| self.files.get(&(q, *a)).map(|v| v.key().to_string()))
                 });
-                let like = paired.or_else(|| self.last_at.get(&path).cloned());
+                let like = if self.beside_git {
+                    Some(format!("sha1:{}", hex(id)))
+                } else {
+                    paired.or_else(|| self.last_at.get(&path).cloned())
+                };
                 let v = self.put(alias, body, false, like)?;
                 self.files.insert((*id, alias), v.clone());
                 self.n.files += 1;
@@ -720,9 +727,12 @@ pub fn import_with_filters(
     let log =
         git(repo, &["log", "--encoding=UTF-8", "--topo-order", "--reverse", "--format=%H%x1f%P%x1f%T%x1f%B%x1e", rev])?;
     let log = String::from_utf8_lossy(&log);
+    let tip = String::from_utf8_lossy(&git(repo, &["rev-parse", &format!("{rev}^{{commit}}")])?).trim().to_string();
+    let beside_git = crate::gitobj::has(store, &tip).unwrap_or(false);
     let mut im = Importer {
         store,
         alg,
+        beside_git,
         cat: Cats::start(repo)?,
         trees: OidMap::default(),
         chunks: Default::default(),

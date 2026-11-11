@@ -195,6 +195,73 @@ fn put_loose(store: &dyn Store, bytes: &[u8]) -> Result<String> {
     Ok(key["sha1:".len()..].to_string())
 }
 
+/// Git objects written together, so the store can keep them packed, each
+/// as a delta on the blob named as its likely base.
+pub struct Batch<'a> {
+    store: &'a dyn Store,
+    puts: Vec<cas_core::store::Put>,
+    bytes: usize,
+    seen: HashSet<String>,
+}
+
+impl<'a> Batch<'a> {
+    pub fn new(store: &'a dyn Store) -> Batch<'a> {
+        Batch { store, puts: Vec::new(), bytes: 0, seen: HashSet::new() }
+    }
+
+    /// Queue the whole loose object `lo`, like blob `like`; its id.
+    pub fn loose(&mut self, lo: Vec<u8>, like: Option<String>) -> Result<String> {
+        let key = sha1().key(&lo);
+        let id = key["sha1:".len()..].to_string();
+        if self.seen.insert(key.clone()) {
+            self.bytes += lo.len();
+            let like = like.filter(|l| *l != key);
+            self.puts.push(cas_core::store::Put { like, ..cas_core::store::Put::blob(key, lo) });
+            if self.bytes >= 64 << 20 {
+                self.flush()?;
+            }
+        }
+        Ok(id)
+    }
+
+    /// Queue a `kind` object with `body`.
+    pub fn put(&mut self, kind: &str, body: &[u8], like: Option<String>) -> Result<String> {
+        self.loose(loose(kind, body), like)
+    }
+
+    /// Queue any value under its key in `alg`, like `like`.
+    pub fn value(&mut self, key: String, value: Vec<u8>, like: Option<String>) -> Result<()> {
+        if self.seen.insert(key.clone()) {
+            self.bytes += value.len();
+            let like = like.filter(|l| *l != key);
+            self.puts.push(cas_core::store::Put { like, ..cas_core::store::Put::blob(key, value) });
+            if self.bytes >= 64 << 20 {
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn flush(&mut self) -> Result<()> {
+        let puts = std::mem::take(&mut self.puts);
+        self.bytes = 0;
+        match self.store.write_many(&puts) {
+            Ok(()) => Ok(()),
+            Err((i, cas_core::Error::Conflict)) => {
+                // Written meanwhile: write the rest one by one.
+                for p in &puts[i..] {
+                    match self.store.write(&p.key, &p.value, &Expect::Absent) {
+                        Ok(()) | Err(cas_core::Error::Conflict) => {}
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+                Ok(())
+            }
+            Err((_, e)) => Err(e.into()),
+        }
+    }
+}
+
 /// Read git object `id`: its type and the whole loose object.
 pub fn get(store: &dyn Store, id: &str) -> Result<(&'static str, Vec<u8>)> {
     let key = format!("sha1:{id}");
@@ -318,6 +385,8 @@ pub fn unpack(store: &dyn Store, pack: &[u8]) -> Result<Vec<View>> {
     }
     let mut waiting: Vec<(usize, Base, Vec<u8>)> = Vec::new();
     let mut order = Vec::with_capacity(count);
+    let mut ids: HashMap<usize, String> = HashMap::new();
+    let mut batch = Batch::new(store);
     let mut i = 12;
     for _ in 0..count {
         let start = i;
@@ -359,8 +428,9 @@ pub fn unpack(store: &dyn Store, pack: &[u8]) -> Result<Vec<View>> {
             None => {
                 let kind = TYPES.iter().find(|t| t.2 == ty).unwrap().0;
                 let lo = loose(kind, &data);
-                let id = put_loose(store, &lo)?;
-                by_id.insert(id, start);
+                let id = batch.loose(lo.clone(), None)?;
+                by_id.insert(id.clone(), start);
+                ids.insert(start, id);
                 at.insert(start, (kind, lo));
             }
             Some(b) => waiting.push((start, b, data)),
@@ -374,20 +444,25 @@ pub fn unpack(store: &dyn Store, pack: &[u8]) -> Result<Vec<View>> {
         let before = waiting.len();
         let mut still = Vec::new();
         for (start, b, d) in waiting {
-            let base: Option<(&'static str, Vec<u8>)> = match &b {
-                Base::Ofs(o) => at.get(o).cloned(),
+            let base: Option<(&'static str, Vec<u8>, String)> = match &b {
+                Base::Ofs(o) => at.get(o).map(|(k, lo)| (*k, lo.clone(), ids[o].clone())),
                 Base::Ref(id) => match by_id.get(id) {
-                    Some(o) => at.get(o).cloned(),
-                    None if has(store, id)? => Some(get(store, id)?),
+                    Some(o) => at.get(o).map(|(k, lo)| (*k, lo.clone(), id.clone())),
+                    None if has(store, id)? => {
+                        let (k, lo) = get(store, id)?;
+                        Some((k, lo, id.clone()))
+                    }
                     None => None,
                 },
             };
             match base {
-                Some((kind, lo)) => {
+                Some((kind, lo, base_id)) => {
                     let body = split(&lo).unwrap().1;
                     let out = loose(kind, &apply_delta(body, &d)?);
-                    let id = put_loose(store, &out)?;
-                    by_id.insert(id, start);
+                    // Kept as git kept it: a delta on the same base.
+                    let id = batch.loose(out.clone(), Some(format!("sha1:{base_id}")))?;
+                    by_id.insert(id.clone(), start);
+                    ids.insert(start, id);
                     at.insert(start, (kind, out));
                 }
                 None => still.push((start, b, d)),
@@ -398,6 +473,7 @@ pub fn unpack(store: &dyn Store, pack: &[u8]) -> Result<Vec<View>> {
         }
         waiting = still;
     }
+    batch.flush()?;
     Ok(order
         .iter()
         .map(|o| {
@@ -409,30 +485,309 @@ pub fn unpack(store: &dyn Store, pack: &[u8]) -> Result<Vec<View>> {
 
 /// A pack (version 2) of the git objects `ids`, each whole (no deltas).
 pub fn pack(store: &dyn Store, ids: &[String]) -> Result<Vec<u8>> {
+    let set: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut hints = delta_bases(store, ids, &set)?;
+    limit_depth(&mut hints, MAX_DEPTH);
     let mut out = Vec::new();
     out.extend_from_slice(b"PACK");
     out.extend_from_slice(&2u32.to_be_bytes());
     out.extend_from_slice(&(ids.len() as u32).to_be_bytes());
+    // Bases first, so each delta can name its base by offset.
+    let mut order: Vec<&str> = Vec::with_capacity(ids.len());
+    let mut placed: HashSet<&str> = HashSet::new();
     for id in ids {
-        let (kind, lo) = get(store, id)?;
-        let body = split(&lo).unwrap().1;
-        let ty = TYPES.iter().find(|t| t.0 == kind).unwrap().2;
-        let mut n = body.len();
-        let mut c = (ty << 4) | (n & 15) as u8;
-        n >>= 4;
-        while n > 0 {
-            out.push(c | 0x80);
-            c = (n & 0x7f) as u8;
-            n >>= 7;
+        let mut chain = vec![id.as_str()];
+        while let Some(b) = hints.get(*chain.last().unwrap()) {
+            if placed.contains(b.as_str()) || chain.contains(&b.as_str()) {
+                break;
+            }
+            chain.push(b.as_str());
         }
-        out.push(c);
-        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-        z.write_all(body)?;
-        out.extend_from_slice(&z.finish()?);
+        for c in chain.into_iter().rev() {
+            if placed.insert(c) {
+                order.push(c);
+            }
+        }
+    }
+    let mut offsets: HashMap<&str, usize> = HashMap::new();
+    // Recent bodies, for the deltas on them.
+    let mut bodies: HashMap<&str, Vec<u8>> = HashMap::new();
+    let mut uses: HashMap<&str, usize> = HashMap::new();
+    for b in hints.values() {
+        *uses.entry(b.as_str()).or_default() += 1;
+    }
+    for id in order {
+        let (kind, lo) = get(store, id)?;
+        let body = split(&lo).unwrap().1.to_vec();
+        let ty = TYPES.iter().find(|t| t.0 == kind).unwrap().2;
+        let start = out.len();
+        let mut written = false;
+        if let Some(b) = hints.get(id) {
+            let base = match bodies.get(b.as_str()) {
+                Some(x) => Some(x.clone()),
+                None => Some(split(&get(store, b)?.1).unwrap().1.to_vec()),
+            };
+            if let Some(base) = base
+                && let Some(d) = delta(&base, &body)
+                && d.len() < body.len() / 2
+            {
+                let at = offsets[b.as_str()];
+                obj_header(&mut out, 6, d.len());
+                let mut off = start - at;
+                let mut enc = vec![(off & 0x7f) as u8];
+                off >>= 7;
+                while off > 0 {
+                    off -= 1;
+                    enc.push(0x80 | (off & 0x7f) as u8);
+                    off >>= 7;
+                }
+                enc.reverse();
+                out.extend_from_slice(&enc);
+                deflate(&mut out, &d)?;
+                written = true;
+            }
+            if let Some(n) = uses.get_mut(b.as_str()) {
+                *n -= 1;
+                if *n == 0 {
+                    bodies.remove(b.as_str());
+                }
+            }
+        }
+        if !written {
+            obj_header(&mut out, ty, body.len());
+            deflate(&mut out, &body)?;
+        }
+        offsets.insert(id, start);
+        if uses.get(id).is_some_and(|n| *n > 0) {
+            bodies.insert(id, body);
+        }
     }
     let sum = sha1().hash(&out);
     out.extend_from_slice(&sum);
     Ok(out)
+}
+
+/// How long a chain of deltas may grow, as git's default.
+const MAX_DEPTH: usize = 50;
+
+fn obj_header(out: &mut Vec<u8>, ty: u8, len: usize) {
+    let mut n = len;
+    let mut c = (ty << 4) | (n & 15) as u8;
+    n >>= 4;
+    while n > 0 {
+        out.push(c | 0x80);
+        c = (n & 0x7f) as u8;
+        n >>= 7;
+    }
+    out.push(c);
+}
+
+fn deflate(out: &mut Vec<u8>, data: &[u8]) -> Result<()> {
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    z.write_all(data)?;
+    out.extend_from_slice(&z.finish()?);
+    Ok(())
+}
+
+/// A likely delta base in `set` for objects of `ids`: each tree and blob a
+/// commit changed, the same path's object in its first parent's tree.
+fn delta_bases(store: &dyn Store, ids: &[String], set: &HashSet<&str>) -> Result<HashMap<String, String>> {
+    let mut hints = HashMap::new();
+    let mut walked = HashSet::new();
+    for id in ids {
+        let Ok(("commit", lo)) = get(store, id) else { continue };
+        let hs = headers(split(&lo).unwrap().1);
+        let tree = hs.iter().find(|x| x.0 == "tree").map(|x| x.1.to_string());
+        let parent = hs.iter().find(|x| x.0 == "parent").map(|x| x.1.to_string());
+        let (Some(tree), Some(parent)) = (tree, parent) else { continue };
+        let Ok(("commit", plo)) = get(store, &parent) else { continue };
+        let Some(old) = headers(split(&plo).unwrap().1).iter().find(|x| x.0 == "tree").map(|x| x.1.to_string()) else {
+            continue;
+        };
+        pair_trees(store, &old, &tree, set, &mut hints, &mut walked)?;
+    }
+    Ok(hints)
+}
+
+fn pair_trees(
+    store: &dyn Store,
+    old: &str,
+    new: &str,
+    set: &HashSet<&str>,
+    hints: &mut HashMap<String, String>,
+    walked: &mut HashSet<String>,
+) -> Result<()> {
+    if old == new || !walked.insert(new.to_string()) {
+        return Ok(());
+    }
+    if set.contains(old) && set.contains(new) {
+        hints.entry(new.to_string()).or_insert_with(|| old.to_string());
+    }
+    let (Ok(("tree", olo)), Ok(("tree", nlo))) = (get(store, old), get(store, new)) else { return Ok(()) };
+    let olds: HashMap<&[u8], (bool, String)> = tree_entries(split(&olo).unwrap().1)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(m, n, id)| (n, (m.starts_with('4'), hex(&id))))
+        .collect();
+    for (m, n, id) in tree_entries(split(&nlo).unwrap().1).unwrap_or_default() {
+        let (dir, id) = (m.starts_with('4'), hex(&id));
+        let Some((odir, oid)) = olds.get(n) else { continue };
+        if *oid == id || dir != *odir || m == "160000" {
+            continue;
+        }
+        if dir {
+            pair_trees(store, oid, &id, set, hints, walked)?;
+        } else if set.contains(id.as_str()) && set.contains(oid.as_str()) && walked.insert(id.clone()) {
+            hints.entry(id).or_insert_with(|| oid.clone());
+        }
+    }
+    Ok(())
+}
+
+/// Drop hints so no chain is longer than `max`.
+fn limit_depth(hints: &mut HashMap<String, String>, max: usize) {
+    let mut depth: HashMap<String, usize> = HashMap::new();
+    let keys: Vec<String> = hints.keys().cloned().collect();
+    for k in keys {
+        // The chain from k down to a known depth or a root.
+        let mut chain = vec![k.clone()];
+        let mut seen = HashSet::from([k.clone()]);
+        let mut d0 = 0;
+        loop {
+            let last = chain.last().unwrap();
+            if let Some(d) = depth.get(last) {
+                d0 = *d;
+                chain.pop();
+                break;
+            }
+            match hints.get(last) {
+                Some(b) if seen.insert(b.clone()) => chain.push(b.clone()),
+                Some(_) => {
+                    // A cycle: cut it here.
+                    let l = last.clone();
+                    hints.remove(&l);
+                    break;
+                }
+                None => break,
+            }
+        }
+        let mut d = d0;
+        for c in chain.into_iter().rev() {
+            if depth.contains_key(&c) {
+                continue;
+            }
+            d = if hints.contains_key(&c) { d + 1 } else { 0 };
+            if d > max {
+                hints.remove(&c);
+                d = 0;
+            }
+            depth.insert(c, d);
+        }
+    }
+}
+
+/// A git delta turning `base` into `target`, or none when it would not
+/// be smaller.
+pub fn delta(base: &[u8], target: &[u8]) -> Option<Vec<u8>> {
+    const B: usize = 16;
+    let hash = |w: &[u8]| -> u64 {
+        let x = u128::from_le_bytes(w[..B].try_into().unwrap());
+        ((x as u64) ^ ((x >> 64) as u64).rotate_left(29)).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    };
+    let mut out = Vec::new();
+    let varint = |out: &mut Vec<u8>, mut n: usize| {
+        while n >= 0x80 {
+            out.push((n as u8) | 0x80);
+            n >>= 7;
+        }
+        out.push(n as u8);
+    };
+    varint(&mut out, base.len());
+    varint(&mut out, target.len());
+    let mut index: HashMap<u64, Vec<u32>> = HashMap::new();
+    if base.len() >= B {
+        let mut i = 0;
+        while i + B <= base.len() {
+            let v = index.entry(hash(&base[i..])).or_default();
+            if v.len() < 8 {
+                v.push(i as u32);
+            }
+            i += B;
+        }
+    }
+    let mut pending: Vec<u8> = Vec::new();
+    let flush = |out: &mut Vec<u8>, pending: &mut Vec<u8>| {
+        for c in pending.chunks(127) {
+            out.push(c.len() as u8);
+            out.extend_from_slice(c);
+        }
+        pending.clear();
+    };
+    let copy = |out: &mut Vec<u8>, mut off: usize, mut len: usize| {
+        while len > 0 {
+            let n = len.min(0x10000);
+            let mut op = 0x80u8;
+            let mut args = Vec::new();
+            for k in 0..4 {
+                let b = (off >> (8 * k)) as u8;
+                if b != 0 {
+                    op |= 1 << k;
+                    args.push(b);
+                }
+            }
+            if n != 0x10000 {
+                for k in 0..3 {
+                    let b = (n >> (8 * k)) as u8;
+                    if b != 0 {
+                        op |= 0x10 << k;
+                        args.push(b);
+                    }
+                }
+            }
+            out.push(op);
+            out.extend_from_slice(&args);
+            off += n;
+            len -= n;
+        }
+    };
+    let mut i = 0;
+    while i < target.len() {
+        let mut best: Option<(usize, usize)> = None;
+        if i + B <= target.len()
+            && let Some(cands) = index.get(&hash(&target[i..]))
+        {
+            for &c in cands {
+                let c = c as usize;
+                let n = base[c..].iter().zip(&target[i..]).take_while(|(a, b)| a == b).count();
+                if n >= B && best.is_none_or(|(_, bn)| n > bn) {
+                    best = Some((c, n));
+                }
+            }
+        }
+        match best {
+            Some((mut c, mut n)) => {
+                let at = i + n;
+                // Grow the match back into what was to be inserted.
+                while c > 0 && !pending.is_empty() && base[c - 1] == *pending.last().unwrap() {
+                    pending.pop();
+                    c -= 1;
+                    n += 1;
+                }
+                flush(&mut out, &mut pending);
+                copy(&mut out, c, n);
+                i = at;
+            }
+            None => {
+                pending.push(target[i]);
+                i += 1;
+            }
+        }
+        if out.len() + pending.len() > target.len() {
+            return None;
+        }
+    }
+    flush(&mut out, &mut pending);
+    Some(out)
 }
 
 /// The objects to send someone who wants `wants` and has `haves`: commits
@@ -575,11 +930,17 @@ fn file_of(store: &dyn Store, v: &View) -> Result<(&'static str, Vec<u8>)> {
 pub struct TreeWriter<'a> {
     store: &'a dyn Store,
     trees: HashMap<String, String>,
+    batch: Batch<'a>,
 }
 
 impl<'a> TreeWriter<'a> {
     pub fn new(store: &'a dyn Store) -> TreeWriter<'a> {
-        TreeWriter { store, trees: HashMap::new() }
+        TreeWriter { store, trees: HashMap::new(), batch: Batch::new(store) }
+    }
+
+    /// Write what is queued.
+    pub fn flush(&mut self) -> Result<()> {
+        self.batch.flush()
     }
 
     /// The git tree of directory `dir`.
@@ -593,7 +954,8 @@ impl<'a> TreeWriter<'a> {
                 ("40000", self.tree(&it.child)?)
             } else {
                 let (mode, bytes) = file_of(self.store, &it.child)?;
-                (mode, put(self.store, "blob", &bytes)?)
+                // Nearly the file's own blob: a tiny delta on it.
+                (mode, self.batch.put("blob", &bytes, Some(it.child.key().to_string()))?)
             };
             let mut raw = [0u8; 20];
             for (k, b) in raw.iter_mut().enumerate() {
@@ -620,7 +982,7 @@ impl<'a> TreeWriter<'a> {
             body.push(0);
             body.extend_from_slice(id);
         }
-        let t = put(self.store, "tree", &body)?;
+        let t = self.batch.put("tree", &body, None)?;
         self.trees.insert(dir.key().to_string(), t.clone());
         Ok(t)
     }
@@ -673,9 +1035,10 @@ pub fn to_git_from(store: &dyn Store, h: &History, links: &mut Links, others: &[
         body.push_str("author cas <cas@localhost> 0 +0000\ncommitter cas <cas@localhost> 0 +0000\n\n");
         body.push_str(msg.trim_end());
         body.push('\n');
-        links.insert(id, put(store, "commit", body.as_bytes())?);
+        links.insert(id, tw.batch.put("commit", body.as_bytes(), None)?);
         made += 1;
     }
+    tw.flush()?;
     Ok(made)
 }
 
@@ -767,13 +1130,14 @@ pub fn is_git(v: &View) -> bool {
 pub struct VersionWriter<'a> {
     store: &'a dyn Store,
     alg: &'static Algorithm,
+    batch: Batch<'a>,
     files: HashMap<(String, &'static str), View>,
     versions: HashMap<String, View>,
 }
 
 impl<'a> VersionWriter<'a> {
     pub fn new(store: &'a dyn Store, alg: &'static Algorithm) -> VersionWriter<'a> {
-        VersionWriter { store, alg, files: HashMap::new(), versions: HashMap::new() }
+        VersionWriter { store, alg, batch: Batch::new(store), files: HashMap::new(), versions: HashMap::new() }
     }
 
     fn collect(
@@ -812,7 +1176,13 @@ impl<'a> VersionWriter<'a> {
                         Some(v) => v.clone(),
                         None => {
                             let (_, lo) = get(self.store, &id)?;
-                            let v = crate::put(self.store, self.alg, alias, split(&lo).unwrap().1)?;
+                            let body = split(&lo).unwrap().1;
+                            let f = by_alias(alias).unwrap();
+                            let key = self.alg.key(body);
+                            f.check(&key, body)?;
+                            // A tiny delta on git's blob of the same file.
+                            self.batch.value(key.clone(), body.to_vec(), Some(format!("sha1:{id}")))?;
+                            let v = View { format: f.id().to_string(), key };
                             self.files.insert((id, alias), v.clone());
                             v
                         }
@@ -822,6 +1192,11 @@ impl<'a> VersionWriter<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Write what is queued.
+    pub fn flush(&mut self) -> Result<()> {
+        self.batch.flush()
     }
 
     /// The version of git tree `tree`.
@@ -960,5 +1335,25 @@ pub fn extend_from(
         node_of.insert(c, (id.clone(), None));
         last = Some(id);
     }
+    vw.flush()?;
     last.ok_or_else(|| Error::Missing(format!("commit {tip}")))
+}
+
+#[cfg(test)]
+mod delta_tests {
+    #[test]
+    fn deltas_apply() {
+        let base: Vec<u8> = (0..5000u32).flat_map(|i| format!("line {i}\n").into_bytes()).collect();
+        let mut target = base.clone();
+        target.splice(1000..1010, b"changed here".iter().copied());
+        target.extend_from_slice(b"the end\n");
+        let target: Vec<u8> = b"new start\n".iter().copied().chain(target).collect();
+        let d = super::delta(&base, &target).unwrap();
+        assert!(d.len() < 200, "{}", d.len());
+        assert_eq!(super::apply_delta(&base, &d).unwrap(), target);
+        let big = vec![7u8; 300_000];
+        let d = super::delta(&big, &big).unwrap();
+        assert_eq!(super::apply_delta(&big, &d).unwrap(), big);
+        assert!(super::delta(b"abc", b"something else entirely").is_none());
+    }
 }

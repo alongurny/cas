@@ -5,7 +5,11 @@ The forge is a git server too. Each project is the git repository
 the git client clones, fetches and pushes as it would any other. Under it
 are the project's cas histories; the git objects are stored in the same
 store, in git's own formats ([git-blob, git-tree, git-commit,
-git-tag](../formats/git-commit.md)), so a commit keeps its id.
+git-tag](../formats/git-commit.md)), so a commit keeps its id. Objects are
+written to the store in batches, so a store that packs keeps them packed:
+an object that came as a delta names its git base as its likely base, and
+a file's cas blob (`raw`, `exec`, `symlink`) names its git blob, which
+holds the same bytes, so the two cost little more than one.
 
 ## Branches are histories
 
@@ -41,8 +45,10 @@ wire and change only through the forge; deleting a branch removes both.
 Protocol version 2 (`ls-refs`, `fetch`), which git speaks by default
 since 2.26; older clients are told to set `protocol.version 2`. A caller
 may ask only for what the refs name and the commits the project's links
-hold. Shallow and partial clones are not served. Packs are sent whole,
-without deltas.
+hold. Shallow and partial clones are not served. A pack's trees and blobs are
+deltas, where that is less than half the size, on the object at the same
+path in the first parent's tree (chains at most 50 long, as git's), and
+name their bases by offset.
 
 ## Push
 
