@@ -11,6 +11,10 @@ use cas_version::stepnotes::{self, StepNotes};
 use cas_version::{Node, Path, View, annotated, diff, formats, fs, history, object_at, read_blob, walk};
 use std::collections::{BTreeMap, HashMap};
 
+/// Every command this module knows, for the help table's check.
+#[cfg(test)]
+pub const COMMANDS: [&[&str]; 3] = [PORTED, RELEASE, NO_HISTORY];
+
 /// The commands that work on a history of commits.
 const PORTED: &[&str] = &[
     "commit",
@@ -97,7 +101,9 @@ fn author(a: &Args) -> Res<String> {
 pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
     let name = a.history.as_str();
     let dirf = formats::by_alias("directory").unwrap();
-    let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}"));
+    let arg = |i: usize, what: &str| {
+        a.rest.get(i).cloned().ok_or_else(|| format!("missing {what}\n{}", crate::help::usage(&a.rest[0])))
+    };
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     if history::head(s, name).map_err(e)?.is_some_and(|v| releases::is_release(&v)) {
         return run_release(a, s);
@@ -472,7 +478,9 @@ fn step_notes(s: &dyn Store, c: &Commit) -> Res<(Option<View>, Notes)> {
 /// Commands on a release history (spec/formats/release.md).
 fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
     let name = a.history.as_str();
-    let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}"));
+    let arg = |i: usize, what: &str| {
+        a.rest.get(i).cloned().ok_or_else(|| format!("missing {what}\n{}", crate::help::usage(&a.rest[0])))
+    };
     let tip = releases::tip(s, name).map_err(e)?.ok_or(format!("no history {name}"))?;
     let find = |what: &str| -> Res<String> {
         releases::resolve(s, &tip, what).map_err(e)?.ok_or(format!("no release {what} in {name}"))

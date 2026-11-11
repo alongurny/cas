@@ -536,7 +536,7 @@ pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(O
             let at: &dyn Store = if src.has_many(&[t.key().to_string()])?[0] { src } else { dst };
             let c = history::Stored::open(at, Some(t))?.changed(&mine)?;
             if c.old.iter().any(|(id, n)| c.added.get(id).is_none_or(|m| m.after != n.after)) {
-                return Err(Error::Diverged(to.to_string()));
+                return Err(Error::Behind(to.to_string()));
             }
             Some(c)
         }
@@ -573,7 +573,7 @@ pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(O
             Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied))
         }
         // The destination moved while we copied; the copy is still valid.
-        Err(CoreError::Conflict) => Err(Error::Diverged(to.to_string())),
+        Err(CoreError::Conflict) => Err(Error::Behind(to.to_string())),
         Err(e) => Err(e.into()),
     }
 }

@@ -1,0 +1,116 @@
+#compdef cas
+# Completions of cas for zsh, printed by `cas completions zsh`.
+_cas_histories() {
+    local -a names
+    names=(${(f)"$(command cas __histories 2>/dev/null)"})
+    compadd -a names
+}
+_cas_word_or_file() {
+    compadd -- "$@"
+    _files
+}
+_cas() {
+    local -a general commands
+    general=(
+        '--store[the store\: a directory (default $CAS_STORE, else .cas) or an https URL]:<dir>|<url>:_files'
+        '--token-file[the file holding the token for a store under access control]:<file>:_files'
+        '--ca[trust the CA certificates in <file> instead of the public ones]:<file>:_files'
+        '--meta[the store holding the access policy (default .cas-meta)]:<dir>:_files'
+        '-j[the most threads a command uses (default\: one for each core)]:<threads>:'
+        '-H[the history to work on (default main)]:<history>:_cas_histories'
+        '-n[a commit\: latest, a key or its start; a tag on a release history (default latest)]:<commit>:'
+        '--help[explain the command instead of running it (also -h)]'
+        '--version[print the version of cas]'
+    )
+    commands=(
+        'commit:add <dir> as a new commit after the tip'
+        'status:how <dir> differs from the commit'
+        'reset:make <dir> the commit'\''s version again'
+        'clean:remove from <dir> the paths the commit does not have'
+        'stash:set the changes in <dir> aside, or bring them back'
+        'watch:follow the changes in <dir> until stopped'
+        'checkout:write the commit'\''s version, or the part under <prefix>, to <dest>'
+        'sparse:write only the named files and directories of the commit to <dest>'
+        'log:the commits, newest first'
+        'ls:the paths of the commit'\''s version'
+        'diff:what the commit changed'
+        'notes:the notes of the commit'
+        'summary:how many directories and files the commit'\''s version has'
+        'path-log:the commits that changed <path>'
+        'last-modified:each entry under <prefix> with the commit that last changed it'
+        'merge-base:the best common ancestor of commits <a> and <b>'
+        'merge:merge history <other> into this one as one commit'
+        'rebase:replay this history'\''s own commits onto history <onto>'
+        'push:send the history to another store'
+        'pull:fetch the history from another store'
+        'publish:add the commit'\''s version to the release history as a release'
+        'compatible:whether upgrading from release <from> to <to> is safe'
+        'tag:name a node of a history in the earlier format'
+        'import-git:import the commits of a git repository as a new history'
+        'gc:remove blobs that no history reaches'
+        'fsck:check every reachable blob\: readable, valid and complete'
+        'objects:every blob key in the store'
+        'show:print a blob'
+        'annotated:store or print a text with a note on each line'
+        'serve:serve the store over HTTPS'
+        'access:the access policy of a served store'
+        'signup:make an account, sign in, or change the password'
+        'login:make an account, sign in, or change the password'
+        'whoami:make an account, sign in, or change the password'
+        'password:make an account, sign in, or change the password'
+        'account:show or edit an account'
+        'token:the tokens of the account'
+        'org:organizations and their members'
+        'projects:the projects you can read'
+        'project:make and manage a project'
+        'histories:the project'\''s histories and their tips'
+        'blame:each line of <path> with the commit that last changed it'
+        'checks:the check results of a commit'
+        'proposal:propose, review and merge a change'
+        'issue:issues of a project'
+        'release:releases of a project'
+        'mirror:mirror a git repository'
+        'events:the event log of a project'
+        'help:explain cas, or one command'
+        'completions:print the completion script for a shell'
+        'version:print the version of cas'
+    )
+    local curcontext=$curcontext state line
+    _arguments -C $general '1: :->command' '*:: :->rest' && return
+    case $state in
+        command) _describe command commands ;;
+        rest)
+            case $line[1] in
+                commit) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '--notes[notes for the step\: what `status <dir> --diff` prints, with `# note` lines added]:<file>:_files' '--annotate[notes on the file <path> as it is\: its lines as `| line`, with `# note` lines]:<path>=<file>:_files' '--nodes[start a history in the earlier format, which the forge still keeps]' '*: :_files' ;;
+                status) _arguments $general '--diff[print the line diff, ready to add notes to]' '*: :_files' ;;
+                reset) _arguments $general '*: :_files' ;;
+                clean) _arguments $general '*: :_files' ;;
+                stash) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '1: :_cas_word_or_file pop' '*: :_files' ;;
+                watch) _arguments $general '*: :_files' ;;
+                checkout) _arguments $general '*: :_files' ;;
+                sparse) _arguments $general '*: :_files' ;;
+                diff) _arguments $general '--annotated[print the line diff with the notes of the step]' ;;
+                merge) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '1: :_cas_histories' ;;
+                rebase) _arguments $general '1: :_cas_histories' ;;
+                push) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
+                pull) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
+                publish) _arguments $general '--tag[the semantic version of the release, such as 1.4.0]:<version>:' '--change[what the release changes since the one before\: breaking, feature, patch or security]:<kind>:(breaking feature patch security)' '--changelog[the text that says what the release changes]:<file>:_files' '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' ;;
+                import-git) _arguments $general '*: :_files' ;;
+                gc) _arguments $general '--full[walk the whole store, not only what came since the last full run]' ;;
+                annotated) _arguments $general '1: :_cas_word_or_file make show' '*: :_files' ;;
+                serve) _arguments $general '--cert[the PEM certificate chain to serve with]:<file>:_files' '--key[the PEM private key to serve with]:<file>:_files' '--open[serve to anyone, without an access policy]' '--max-body[the largest request body accepted (default 64 MiB)]:<bytes>:' '*: :_files' ;;
+                access) _arguments $general '1: :(show user grant revoke)' ;;
+                account) _arguments $general '1: :(edit)' ;;
+                token) _arguments $general '1: :(list make revoke)' ;;
+                org) _arguments $general '1: :(create member)' ;;
+                project) _arguments $general '1: :(create show delete fork edit member protect gate label webhook runner)' ;;
+                proposal) _arguments $general '1: :(list open show edit close reopen approve merge thread reply resolve promote)' ;;
+                issue) _arguments $general '1: :(list open show comment edit close reopen label)' ;;
+                release) _arguments $general '1: :(list publish archive)' ;;
+                mirror) _arguments $general '1: :(add pull)' ;;
+                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes summary path-log last-modified merge-base merge rebase push pull publish compatible tag import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
+                completions) _arguments $general '1: :(fish bash zsh)' ;;
+            esac ;;
+    esac
+}
+_cas "$@"

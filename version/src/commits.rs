@@ -629,13 +629,13 @@ pub fn push(
     if let Some(t) = &theirs {
         // Their commit is in the source when ours comes after it.
         if !src.has_many(std::slice::from_ref(t))?[0] || !reaches(src, &head, t)? {
-            return Err(Error::Diverged(to.to_string()));
+            return Err(Error::Behind(to.to_string()));
         }
     }
     let copied = crate::sync::copy(src, dst, &view("commit", &head))?;
     match advance(dst, to, theirs.as_deref(), &head) {
         Ok(()) => Ok((if theirs.is_some() { Outcome::FastForward } else { Outcome::Created }, copied)),
-        Err(Error::Store(cas_core::Error::Conflict)) => Err(Error::Diverged(to.to_string())),
+        Err(Error::Store(cas_core::Error::Conflict)) => Err(Error::Behind(to.to_string())),
         Err(e) => Err(e),
     }
 }
@@ -675,8 +675,9 @@ pub fn merge(
     if reaches(store, theirs, ours)? {
         return Ok(Outcome::FastForward(theirs.to_string()));
     }
-    let base = merge_base(store, ours, theirs)?
-        .ok_or_else(|| Error::Diverged("the two histories share no commit".to_string()))?;
+    let base = merge_base(store, ours, theirs)?.ok_or_else(|| {
+        Error::Diverged("the two histories share no commit, so there is nothing to merge from".to_string())
+    })?;
     let (b, o, t) = (read(store, &base)?, read(store, ours)?, read(store, theirs)?);
     let m = crate::merge::merge_versions(store, alg, &b.version(), &o.version(), &t.version())?;
     if !m.conflicts.is_empty() {
@@ -703,8 +704,9 @@ pub fn rebase(store: &dyn Store, alg: &'static Algorithm, ours: &str, onto: &str
     if reaches(store, ours, onto)? {
         return Ok(Outcome::UpToDate);
     }
-    let base = merge_base(store, ours, onto)?
-        .ok_or_else(|| Error::Diverged("the two histories share no commit".to_string()))?;
+    let base = merge_base(store, ours, onto)?.ok_or_else(|| {
+        Error::Diverged("the two histories share no commit, so there is nothing to merge from".to_string())
+    })?;
     let mut chain = Vec::new();
     let mut at = ours.to_string();
     while at != base {

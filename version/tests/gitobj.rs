@@ -121,7 +121,10 @@ fn packs_keep_git_ids_both_ways() {
     }
     assert!(!gitobj::has(&s, &junk).unwrap(), "an unreachable object is collected");
     assert!(gitobj::has(&s, &tag).unwrap(), "the tag object is kept");
-    assert_eq!(gitobj::peel_tag(&s, &tag).as_deref(), Some(text(git(&r, &["rev-parse", "v1^{commit}"], None)).as_str()));
+    assert_eq!(
+        gitobj::peel_tag(&s, &tag).as_deref(),
+        Some(text(git(&r, &["rev-parse", "v1^{commit}"], None)).as_str())
+    );
 }
 
 #[test]

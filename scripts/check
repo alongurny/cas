@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# What must pass before a push: formatting, lints, every test, and the files
+# the tool prints (docs/commands.md, docs/cas.1, completions/) being current.
+#   scripts/check           check
+#   scripts/check --renew   rewrite the printed files first
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [ "${1:-}" = --renew ]; then
+    cargo build --release -p cas-cli
+    cas=target/release/cas
+    $cas help --markdown > docs/commands.md
+    $cas help --man > docs/cas.1
+    $cas completions fish > completions/cas.fish
+    $cas completions bash > completions/cas.bash
+    $cas completions zsh > completions/_cas
+fi
+
+cargo fmt --all --check
+cargo clippy --release --workspace --all-targets --all-features -- -D warnings
+cargo test --release --workspace --all-features
+echo "all checks pass"

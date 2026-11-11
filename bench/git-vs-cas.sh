@@ -25,7 +25,7 @@ git clone -q git.git wgit
 echo "% bench edit" >> wgit/$F; echo "% bench edit" >> wc/$F
 kb() { du -s --apparent-size --block-size=1K "$1" | cut -f1; }
 g0=$(kb wgit/.git/objects); c0=$(kb cas)
-row "commit one edit" "$(t git -C wgit commit -qam bench)" "$(t $CAS --store cas commit -m bench wc)"
+row "commit one edit" "$(t git -C wgit commit -qam bench)" "$(t $CAS --store cas commit wc)"
 row "store growth from that commit, KB" "$(( $(kb wgit/.git/objects) - g0 ))" "$(( $(kb cas) - c0 ))"
 # Serve both over localhost. git: smart HTTP via git http-backend is not at hand, so git uses its
 # pack protocol over a local pipe (file://), which is if anything faster than HTTP.
@@ -38,7 +38,7 @@ row "fetch one file of the tip" "$(t sh -c "git clone -q --filter=blob:none --de
 # Push one new node / commit to the served copies.
 git clone -q file://$B/g2.git wg2
 echo "% push edit" >> wg2/$F; git -C wg2 commit -qam push
-$CAS --store c2 checkout wc2 >/dev/null; echo "% push edit" >> wc2/$F; $CAS --store c2 commit -m push wc2 >/dev/null
+$CAS --store c2 checkout wc2 >/dev/null; echo "% push edit" >> wc2/$F; $CAS --store c2 commit wc2 >/dev/null
 sleep 1
 row "push one new commit" "$(t git -C wg2 push -q origin HEAD)" "$(t $CAS --store c2 --ca cert.pem push $U)"
 kill $SRV || true

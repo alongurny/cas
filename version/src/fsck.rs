@@ -88,7 +88,12 @@ pub fn fsck(store: &dyn Store) -> Result<Report> {
     r.bad.extend(check_notes(store, &notes, &lens));
     r.missing.sort();
     r.bad.sort();
-    r.unreachable = blobs.iter().filter(|k| !seen.contains(k)).count();
+    // What gc would collect: it also keeps the format objects and their
+    // specs, which no view inside a blob names.
+    r.unreachable = match crate::gc::mark(store) {
+        Ok(kept) => blobs.iter().filter(|k| !seen.contains(k) && !kept.contains(k)).count(),
+        Err(_) => blobs.iter().filter(|k| !seen.contains(k)).count(),
+    };
     Ok(r)
 }
 

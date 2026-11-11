@@ -35,50 +35,6 @@ pub const COMMANDS: &[&str] = &[
     "events",
 ];
 
-pub const USAGE: &str = "Forge commands (the forge is the host of --store; --store https://<host>/p/<owner>/<project>
-or --project <owner>/<project> names the project; --json prints the API's answer):
-  signup <name> [--email <e>]      make an account (password on stdin)
-  login <name>                     sign in (password on stdin); writes the token to
-                                   --token-file, or prints it
-  whoami | account <name>          an account: kind, organizations, members
-  account edit [--display <d>] [--email <e>]
-  password                         change it (old and new password on stdin, a line each)
-  token list | token revoke <key>
-  token make <label> [--scope all|read|project:<owner>/<project>] [--days <n>]
-  org create <name> | org member <org> <user> owner|member|remove
-  projects                         the projects you can read
-  project create <name> [--owner <o>] [--description <d>] [--public]
-  project show | project delete --yes | project fork [--owner <o>] [--name <n>]
-  project edit [--description <d>] [--visibility public|private] [--readme <path>]
-  project member <who> read|write|maintain|admin|remove
-  project protect <history> on|off
-  project gate <history> [--approvals <n>] [--checks <a,b>] [--resolved]
-  project label <name> [--color <c>] [--set <s>] [--rule one|any] | project label <name> remove
-  project webhook list | project webhook add <url> [--secret-file <f>] [--events <k,..>]
-  project webhook remove <id>
-  project runner list | project runner <account> add|remove
-  histories                        the project's histories and their tips
-  blame <path>                     each line with the node that last changed it (-H, -n)
-  checks                           check results for a node (-H, -n)
-  proposal list [--state open|merged|closed|all]
-  proposal open <title> --source <history> [--target <history>]
-  proposal show <n> | proposal edit <n> --title <t>
-  proposal close|reopen|approve|merge <n>
-  proposal thread <n> <path>:<line> [--old] <text>|-   a review thread on a line of the diff
-                                   (--old: the line's old side) [--suggestion <text>]
-  proposal reply <n> <thread> <text>|- [--suggestion <text>]
-  proposal resolve|promote <n> <thread> [--undo]    promote: the thread's note becomes the
-                                   merged step's note on its line (author only)
-  issue list [--state open|closed|all] [--label <l>]
-  issue open <title> [--body <text>|-] [--label <l>]... [--at <path>:<line>] [--suggestion <text>]
-  issue show <n> | issue comment <n> <text>|-
-  issue edit <n> [--title <t>] [--body <text>|-] [--assign <a,b>]
-  issue close|reopen <n> | issue label <n> +<add> -<remove> ...
-  release list | release publish <tag> --changelog <file> [--compatible] [-n <node>]
-  release archive <tag> <file.tar.gz>
-  mirror add <name> <git url> | mirror pull <name>
-  events [--after <n>] [--follow]   the event log; --follow waits for new events";
-
 const FLAGS: &[&str] = &["--public", "--resolved", "--undo", "--yes", "--follow", "--json", "--old"];
 
 /// A command's own words: positionals, `--name value` options (several
@@ -111,16 +67,20 @@ impl Opts {
     fn all(&self, k: &str) -> Vec<String> {
         self.vals.get(k).cloned().unwrap_or_default()
     }
+    /// How the command is written, for an error.
+    fn usage(&self) -> String {
+        crate::help::usage(self.pos.first().map_or("", String::as_str))
+    }
     fn flag(&self, k: &str) -> bool {
         self.flags.contains(k)
     }
     fn arg(&self, i: usize, what: &str) -> Res<&str> {
-        self.pos.get(i).map(String::as_str).ok_or(format!("missing {what}\n{USAGE}"))
+        self.pos.get(i).map(String::as_str).ok_or_else(|| format!("missing {what}\n{}", self.usage()))
     }
     /// Positionals from `i` on, as one text; `-` reads stdin.
     fn text(&self, i: usize, what: &str) -> Res<String> {
         if self.pos.len() <= i {
-            return Err(format!("missing {what}\n{USAGE}"));
+            return Err(format!("missing {what}\n{}", self.usage()));
         }
         text_arg(&self.pos[i..].join(" "))
     }
@@ -553,7 +513,7 @@ pub fn run(a: &Args, words: &[String], ca: Option<&[u8]>) -> Res<()> {
                 }
             });
         }
-        _ => return Err(format!("unknown command {cmd}\n{USAGE}")),
+        _ => return Err(format!("no command {cmd}\n`cas help` lists the commands.")),
     }
     Ok(())
 }
@@ -764,7 +724,7 @@ fn project(api: &Api, o: &Opts, sub: &str, show: &Show) -> Res<()> {
                 done("done");
             }
         },
-        x => return Err(format!("project {x}?\n{USAGE}")),
+        x => return Err(format!("project {x}?\n{}", crate::help::usage("project"))),
     }
     Ok(())
 }
@@ -893,7 +853,7 @@ fn proposal(api: &Api, o: &Opts, sub: &str, show: &Show) -> Res<()> {
             api.call("POST", &at(&format!("/threads/{}/{sub}", enc(id, false)))?, Some(b))?;
             out!("{}", if o.flag("--undo") { format!("{sub} undone") } else { format!("{sub}d") });
         }
-        x => return Err(format!("proposal {x}?\n{USAGE}")),
+        x => return Err(format!("proposal {x}?\n{}", crate::help::usage("proposal"))),
     }
     Ok(())
 }
@@ -1055,7 +1015,7 @@ fn issue(api: &Api, o: &Opts, sub: &str, show: &Show) -> Res<()> {
             api.call("PATCH", &at("")?, Some(json!({ "add_labels": add, "remove_labels": remove })))?;
             out!("labels changed");
         }
-        x => return Err(format!("issue {x}?\n{USAGE}")),
+        x => return Err(format!("issue {x}?\n{}", crate::help::usage("issue"))),
     }
     Ok(())
 }

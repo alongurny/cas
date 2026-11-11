@@ -46,6 +46,7 @@ macro_rules! out {
 
 mod commits;
 mod forge;
+mod help;
 
 fn flush_out() {
     use std::io::Write;
@@ -53,83 +54,6 @@ fn flush_out() {
         std::process::exit(0);
     }
 }
-
-const USAGE: &str =
-    "usage: cas [--store <dir>|<url>] [--token-file <file>] [--ca <file>] [--meta <dir>] [-j <threads>] <command>
-A URL is https:// (the only protocol); --ca trusts the CA certificates in <file>
-instead of the public ones. -j <threads> caps the threads a command uses
-(default: one per core).
-History options: -H <history> (default main), -n <node> (a tag, `latest`, or a key
-prefix; default latest), --compatible. There is no commit
-message: a step says why through its notes (commit --notes), and a release
-through its changelog (publish --changelog).
-A history is one of commits (spec/formats/commit.md: versions as `directory`, notes as
-`annotation`, an author and a time on each commit; --author <name>, default $CAS_AUTHOR or
-$USER). Every hash is shown with the name of its hash directly before it, as blake3:<digits>.
---nodes starts a history in the earlier format instead, which the forge still keeps; tag,
-compatible and publish --changelog alone are for that format. From a history of commits\npublish --tag <semantic version> [--change breaking|feature|patch|security --changelog <file>]\nadds its tip to the release history (default releases; --as <name>): a first release has no\nchange, a later one says its change from the one before. On a release history (-H releases)\nlog, ls, checkout, sparse (-n <tag>) and compatible <from> <to> work.
-  commit <dir>                    add <dir> as a new node after the tip (<dir>/.cas-index
-                                  caches stat data, so unchanged files are not rehashed)
-  commit <dir> --notes <file>     ... with a note on each line of the step's diff
-                                  (<file>: what status --diff prints, notes added;
-                                  a first node keeps them on its files' lines)
-  commit <dir> --annotate <path>=<file>  ... with notes on the file <path> as it is
-                                  (<file>: its lines as `| line`, with `# note` lines)
-  notes [<path>]                  a node's annotated files, or <path>'s with its notes
-  status <dir>                    how <dir> differs from the node (nothing is stored)
-  status <dir> --diff             the line diff from the node to <dir>, to annotate
-                                  (stores <dir>'s file blobs)
-  watch <dir>                     follow <dir>'s changes (inotify) until stopped, so
-                                  commit and status look only at what changed
-  reset <dir>                     make <dir> the node's version again (discards changes)
-  clean <dir>                     remove from <dir> the paths the node does not have
-  stash <dir> | stash pop <dir>   keep <dir> in history stash/<history> and reset it, or
-                                  put the newest stash back into <dir> and drop it
-  log                             nodes, newest first, with tags and what each step says
-  ls [<prefix>]                   paths of a node's version
-  diff [--annotated]              changes from a node's predecessor (--annotated:
-                                  the line diff with the step's notes)
-  annotated make <file>           store <file>'s text and notes (the authoring form:
-                                  `| line`, `# note`); prints the annotation's view
-  annotated show <key>            an annotation's text with its notes
-  checkout <dest> [<prefix>]      write a node's version (or a prefix) to <dest>
-  sparse <dest> <path>...         check out only <path>s (files or directories) of a
-                                  node into <dest>; a commit of <dest> keeps the rest
-  summary                         directory and file counts (derived, cached)
-  path-log <path>                 nodes whose step changed <path>
-  tag <name>                      tag a node (-n) in the history
-  compatible <from> <to>          whether upgrading <from> to <to> is compatible
-  merge-base <a> <b>              best common ancestors of nodes <a> and <b>
-  last-modified [<prefix>]        each entry under <prefix> with the node that last changed it
-  objects                         every blob key in the store
-  fsck                            check every reachable blob: readable, valid, complete
-  show <key>                      print a blob: uni-bin as text, else raw
-  push <store> [--as <name>]      send the history (fast-forward only)
-  pull <store> [--as <name>]      fetch history <name> (fast-forward only)
-  rebase <onto>                   replay this history's own nodes onto history <onto>
-  publish --changelog <file> [--as <name>]
-                                  add this history's tip to the release history
-                                  (default releases) as one node whose changelog,
-                                  the file's text, says what changed since the
-                                  last release (no notes reach it;
-                                  spec/release-history.md)
-  merge [<other>]                 merge history <other> in (or the two tips) as one node
-  import-git <repo> [<rev>]       import a git repository's commits (default HEAD)
-                                  as history -H (refused if it exists); a commit's
-                                  message becomes its step's notes, and the tip's
-                                  files note per line the commit that last changed it
-  gc [--full]                     one collection run (two-phase); without --full,
-                                  walks and repacks only what came since the last
-                                  full run while that is small
-  serve <addr> --cert <file> --key <file> [--open] [--max-body <bytes>]
-                                  serve the store over HTTPS (the only protocol)
-                                  with the PEM certificate chain and key, under
-                                  the access policy in --meta, or with --open to anyone;
-                                  request bodies up to <bytes> (default 64 MiB)
-  access show                     the policy in --meta (default .cas-meta)
-  access user <name>              add or re-key <name>; prints its token once
-  access grant <who> '<action> <scope>'  e.g. grant '*' 'read blobs'
-  access revoke <who> '<action> <scope>'";
 
 type Res<T> = Result<T, String>;
 
@@ -187,6 +111,8 @@ struct Args {
     tag: Option<String>,
     change: Option<String>,
     nodes: bool,
+    help: bool,
+    version: bool,
     remote: Option<String>,
     token_file: Option<String>,
     ca: Option<String>,
@@ -210,6 +136,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         tag: None,
         change: None,
         nodes: false,
+        help: false,
+        version: false,
         remote: None,
         token_file: None,
         ca: None,
@@ -239,6 +167,8 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--tag" => a.tag = Some(value("--tag")?),
             "--change" => a.change = Some(value("--change")?),
             "--nodes" => a.nodes = true,
+            "--help" | "-h" => a.help = true,
+            "--version" => a.version = true,
             "--as" => a.remote = Some(value("--as")?),
             "--token-file" => a.token_file = Some(value("--token-file")?),
             "--ca" => a.ca = Some(value("--ca")?),
@@ -370,7 +300,85 @@ fn report(outcome: MergeOutcome) -> Res<()> {
     Ok(())
 }
 
+/// The commands about cas itself, which open no store. True when one ran.
+fn tool(a: &Args) -> Res<bool> {
+    let print = |text: String| std::io::Write::write_all(&mut std::io::stdout(), text.as_bytes()).map_err(e);
+    let first = a.rest.first().map(String::as_str);
+    if a.version || first == Some("version") {
+        print(format!("{}\n", help::version()))?;
+        return Ok(true);
+    }
+    if a.help || first == Some("help") {
+        let about = a.rest.iter().map(String::as_str).find(|w| *w != "help");
+        print(match about {
+            Some("--man") => help::man(),
+            Some("--markdown") => help::markdown(),
+            Some(c) => help::command(c)?,
+            None => help::overview(),
+        })?;
+        return Ok(true);
+    }
+    match first {
+        Some("completions") => {
+            let shell = a.rest.get(1).ok_or_else(|| format!("missing <shell>\n{}", help::usage("completions")))?;
+            print(help::completions(shell)?)?;
+        }
+        // For the completions: the histories of a store directory, read
+        // from its variables' file names without opening the store.
+        Some("__histories") => {
+            let mut names = Vec::new();
+            for f in std::fs::read_dir(std::path::Path::new(&a.store).join("vars")).into_iter().flatten().flatten() {
+                let hex = f.file_name().to_string_lossy().into_owned();
+                let bytes: Option<Vec<u8>> =
+                    (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+                if let Some(name) = bytes.and_then(|b| String::from_utf8(b).ok())
+                    && hex.len() % 2 == 0
+                    && !name.starts_with("derived/")
+                {
+                    names.push(name);
+                }
+            }
+            names.sort();
+            print(names.iter().map(|n| format!("{n}\n")).collect())?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn run(a: Args) -> Res<()> {
+    if tool(&a)? {
+        return Ok(());
+    }
+    // A word that is no command is refused before a store is opened.
+    let mut before = a.rest.iter().peekable();
+    while before.next_if(|w| *w == "--json").is_some()
+        || before.next_if(|w| *w == "--project").is_some_and(|_| before.next().is_some())
+    {}
+    let cmd = match before.next() {
+        None => return Err(help::overview()),
+        Some(x) if help::find(x).is_none() => {
+            return Err(format!("no command {x}\n`cas help` lists the commands."));
+        }
+        Some(x) => x.as_str(),
+    };
+    // Each command that can make a store takes a word, asked for before
+    // a store is made for nothing.
+    if a.rest.len() < 2 && ["commit", "import-git", "pull", "serve", "access", "annotated"].contains(&cmd) {
+        return Err(format!("missing {}\n{}", help::first_word(cmd), help::usage(cmd)));
+    }
+    // Only a command that writes makes a store directory.
+    const MAKES: &[&str] = &["commit", "import-git", "pull", "serve", "access", "annotated"];
+    if !a.store.contains("://")
+        && !MAKES.contains(&cmd)
+        && !forge::COMMANDS.contains(&cmd)
+        && !std::path::Path::new(&a.store).join("blobs").is_dir()
+    {
+        return Err(format!(
+            "no store at {}: commit, import-git or pull makes one, and --store names another",
+            a.store
+        ));
+    }
     // Forge options may come before the command: keep them for it.
     let mut words = a.rest.clone();
     let mut lead = Vec::new();
@@ -407,7 +415,12 @@ fn run(a: Args) -> Res<()> {
     if commits::handles(&a, s)? {
         return commits::run(&a, s);
     }
-    let arg = |i: usize, what: &str| a.rest.get(i).cloned().ok_or(format!("missing {what}\n{USAGE}"));
+    let arg = |i: usize, what: &str| {
+        a.rest
+            .get(i)
+            .cloned()
+            .ok_or_else(|| format!("missing {what}\n{}", help::usage(a.rest.first().map_or("", String::as_str))))
+    };
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     let name = a.history.as_str();
     let step = Step { changelog: None, compatible: a.compatible, notes: None };
@@ -631,7 +644,7 @@ fn run(a: Args) -> Res<()> {
                 let form = annotated::show(s, &key).map_err(e)?;
                 std::io::Write::write_all(&mut std::io::stdout(), &form).map_err(e)?;
             }
-            _ => return Err(format!("annotated make <file> | annotated show <key>\n{USAGE}")),
+            _ => return Err(help::usage("annotated")),
         },
         Some("checkout") => {
             let dest = arg(1, "<dest>")?;
@@ -904,7 +917,7 @@ fn run(a: Args) -> Res<()> {
                         rules.grants.remove(&who);
                     }
                 }
-                _ => return Err(USAGE.into()),
+                _ => return Err(help::usage("access")),
             }
             // Round-trip through the document, so a bad grantee is refused here.
             access::Rules::from_value(&rules.to_value()).map_err(e)?;
@@ -949,7 +962,8 @@ fn run(a: Args) -> Res<()> {
                 std::thread::park();
             }
         }
-        _ => return Err(format!("{USAGE}\n{}", forge::USAGE)),
+        Some(x) => return Err(format!("no command {x}\n`cas help` lists the commands.")),
+        None => return Err(help::overview()),
     }
     Ok(())
 }
@@ -967,8 +981,10 @@ fn main() -> ExitCode {
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
-            eprintln!("{msg}");
-            ExitCode::FAILURE
+            eprintln!("{}", msg.trim_end());
+            // 2 for a command that was not written correctly: such an error
+            // points to the help.
+            if msg.contains("`cas help") { ExitCode::from(2) } else { ExitCode::FAILURE }
         }
     }
 }

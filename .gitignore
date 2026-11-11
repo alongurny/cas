@@ -2,3 +2,4 @@ target/
 forge/web/node_modules/
 forge/web/.svelte-kit/
 forge/web/build/
+result

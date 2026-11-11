@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Run by git before a push once `git config core.hooksPath scripts/hooks` is set.
+exec "$(git rev-parse --show-toplevel)/scripts/check"

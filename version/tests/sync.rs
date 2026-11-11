@@ -124,7 +124,7 @@ fn diverged_histories_are_not_overwritten() {
     history::commit(&*b, b3(), "main", &vb, Step::default(), None).unwrap();
     let b_head = history::head(&*b, "main").unwrap();
 
-    assert_eq!(sync::push(&*a, &*b, "main", "main"), Err(Error::Diverged("main".into())));
+    assert_eq!(sync::push(&*a, &*b, "main", "main"), Err(Error::Behind("main".into())));
     assert_eq!(history::head(&*b, "main").unwrap(), b_head);
     // A rewritten history (a reworded step) is not an extension either.
     let (old, mut h) = history::load(&*a, "main").unwrap();

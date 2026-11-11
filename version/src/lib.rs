@@ -211,8 +211,10 @@ pub enum Error {
     BadKey(String),
     /// The edits would put something under a file.
     PathConflict(Path),
-    /// A branch moved in a way that would lose history if overwritten.
+    /// Histories that do not line up: the text says how.
     Diverged(String),
+    /// A history that cannot move forward to ours: it has commits ours lacks.
+    Behind(String),
     Io(String),
     /// An access policy or grant that does not parse (spec/access.md).
     Policy(String),
@@ -230,7 +232,10 @@ impl fmt::Display for Error {
             Error::BadPath(p) => write!(f, "bad path {p:?}"),
             Error::BadKey(k) => write!(f, "not a blob key: {k:?}"),
             Error::PathConflict(p) => write!(f, "{p} is a file, so nothing can go under it"),
-            Error::Diverged(t) => write!(f, "branch {t} has diverged"),
+            Error::Diverged(t) => write!(f, "{t}"),
+            Error::Behind(h) => {
+                write!(f, "history {h} has commits this one lacks: bring them in first (pull, then merge or rebase)")
+            }
             Error::Io(e) => write!(f, "io: {e}"),
             Error::Policy(e) => write!(f, "policy: {e}"),
             Error::NotRelease(e) => write!(f, "not a release history: {e}"),

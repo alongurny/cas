@@ -1,0 +1,387 @@
+.TH CAS 1 "" "cas 0.1.0" "cas"
+.SH NAME
+cas \- versions of directories in a content\-addressed store
+.SH SYNOPSIS
+.B cas
+[\fIoption\fR...] \fIcommand\fR [\fIargument\fR...]
+.SH DESCRIPTION
+Every version, commit and note is a blob named by its hash, shown as the name of the hash and its digits (blake3:1a2b...). A history is a name that holds its newest commit.
+.SH OPTIONS
+.TP
+\fB\-\-store\fR <dir>|<url>
+the store: a directory (default $CAS_STORE, else .cas) or an https URL
+.TP
+\fB\-\-token\-file\fR <file>
+the file holding the token for a store under access control
+.TP
+\fB\-\-ca\fR <file>
+trust the CA certificates in <file> instead of the public ones
+.TP
+\fB\-\-meta\fR <dir>
+the store holding the access policy (default .cas\-meta)
+.TP
+\fB\-j\fR <threads>
+the most threads a command uses (default: one for each core)
+.TP
+\fB\-H\fR <history>
+the history to work on (default main)
+.TP
+\fB\-n\fR <commit>
+a commit: latest, a key or its start; a tag on a release history (default latest)
+.TP
+\fB\-\-help\fR 
+explain the command instead of running it (also \-h)
+.TP
+\fB\-\-version\fR 
+print the version of cas
+.SH WORK ON A DIRECTORY
+.TP
+\fBcas\fR commit <dir> [\-\-author <name>] [\-\-notes <file>] [\-\-annotate <path>=<file>]...
+Add <dir> as a new commit after the tip.
+.IP
+Prints the key of the new commit. A first commit starts the history.
+.IP
+There is no commit message. A commit says why through notes: \-\-notes takes the diff that `status <dir> \-\-diff` prints with `# note` lines added, on the whole step, on a path or on a line; \-\-annotate takes one file as it is, each line as `| line`, with `# note` lines before the lines they are about.
+.IP
+<dir>/.cas\-index caches file sizes and times, so files that did not change are not read again.
+.IP
+\fB\-\-author\fR <name>: who makes the commit (default $CAS_AUTHOR, else $USER)
+.IP
+\fB\-\-notes\fR <file>: notes for the step: what `status <dir> \-\-diff` prints, with `# note` lines added
+.IP
+\fB\-\-annotate\fR <path>=<file>: notes on the file <path> as it is: its lines as `| line`, with `# note` lines
+.IP
+\fB\-\-nodes\fR : start a history in the earlier format, which the forge still keeps
+.TP
+\fBcas\fR status <dir>
+.TQ
+\fBcas\fR status <dir> \-\-diff
+How <dir> differs from the commit.
+.IP
+Each changed path is printed as added, deleted or changed. Nothing is stored.
+.IP
+With \-\-diff, prints the line diff from the commit to <dir>, which is what `commit \-\-notes` takes after notes are added. This stores the blobs of <dir>'s files.
+.IP
+\fB\-\-diff\fR : print the line diff, ready to add notes to
+.TP
+\fBcas\fR reset <dir>
+Make <dir> the commit's version again.
+.IP
+Changes in <dir> are lost.
+.TP
+\fBcas\fR clean <dir>
+Remove from <dir> the paths the commit does not have.
+.TP
+\fBcas\fR stash <dir>
+.TQ
+\fBcas\fR stash pop <dir>
+Set the changes in <dir> aside, or bring them back.
+.IP
+`stash <dir>` keeps <dir> as a commit in the history stash/<history> and resets <dir>. `stash pop <dir>` puts the newest one back into <dir> and drops it; <dir> must have no changes of its own.
+.IP
+\fB\-\-author\fR <name>: who makes the commit (default $CAS_AUTHOR, else $USER)
+.TP
+\fBcas\fR watch <dir>
+Follow the changes in <dir> until stopped.
+.IP
+While it runs, commit and status look only at what changed (inotify), which matters in a large directory.
+.TP
+\fBcas\fR checkout <dest> [<prefix>]
+Write the commit's version, or the part under <prefix>, to <dest>.
+.TP
+\fBcas\fR sparse <dest> <path>...
+Write only the named files and directories of the commit to <dest>.
+.IP
+A later commit of <dest> keeps everything that was not checked out.
+.SH READ A HISTORY
+.TP
+\fBcas\fR log
+The commits, newest first.
+.IP
+Each line is the commit, its parents in brackets, its time (UTC), its author and the first line of its note. On a release history each line is a tag and its release, followed by what it changes.
+.TP
+\fBcas\fR ls [<prefix>]
+The paths of the commit's version.
+.TP
+\fBcas\fR diff
+.TQ
+\fBcas\fR diff \-\-annotated
+What the commit changed.
+.IP
+Prints each changed path with its format before and after, from each parent. With \-\-annotated, prints the line diff with the notes of the step.
+.IP
+\fB\-\-annotated\fR : print the line diff with the notes of the step
+.TP
+\fBcas\fR notes [<path>]
+The notes of the commit.
+.IP
+Without <path>, the noted paths. With <path>, its note and the file's lines with the note on each, in the form `commit \-\-annotate` takes.
+.TP
+\fBcas\fR summary
+How many directories and files the commit's version has.
+.TP
+\fBcas\fR path\-log <path>
+The commits that changed <path>.
+.TP
+\fBcas\fR last\-modified [<prefix>]
+Each entry under <prefix> with the commit that last changed it.
+.TP
+\fBcas\fR merge\-base <a> <b>
+The best common ancestor of commits <a> and <b>.
+.SH JOIN AND SHARE HISTORIES
+.TP
+\fBcas\fR merge <other>
+Merge history <other> into this one as one commit.
+.IP
+Paths are merged three ways, and the lines of a text file both sides changed. On a conflict nothing is recorded and the conflicts are listed.
+.IP
+\fB\-\-author\fR <name>: who makes the commit (default $CAS_AUTHOR, else $USER)
+.TP
+\fBcas\fR rebase <onto>
+Replay this history's own commits onto history <onto>.
+.TP
+\fBcas\fR push <store> [\-\-as <name>]
+Send the history to another store.
+.IP
+Only what the other store lacks is sent. The history there is created, or moved forward when this one extends it; one that has diverged is refused.
+.IP
+\fB\-\-as\fR <name>: the name of the history on the other side, or of the release history
+.TP
+\fBcas\fR pull <store> [\-\-as <name>]
+Fetch the history from another store.
+.IP
+The same rules as push, the other way.
+.IP
+\fB\-\-as\fR <name>: the name of the history on the other side, or of the release history
+.TP
+\fBcas\fR publish \-\-tag <version> [\-\-change <kind> \-\-changelog <file>] [\-\-as <name>]
+Add the commit's version to the release history as a release.
+.IP
+The release history is `releases`, or \-\-as <name>. A first release has no change. A later one says its change from the release before it: its kind and a changelog.
+.IP
+\fB\-\-tag\fR <version>: the semantic version of the release, such as 1.4.0
+.IP
+\fB\-\-change\fR <kind>: what the release changes since the one before: breaking, feature, patch or security
+.IP
+\fB\-\-changelog\fR <file>: the text that says what the release changes
+.IP
+\fB\-\-as\fR <name>: the name of the history on the other side, or of the release history
+.TP
+\fBcas\fR \-H releases compatible <from> <to>
+Whether upgrading from release <from> to <to> is safe.
+.IP
+Prints compatible or breaking, from the kinds of change between the two.
+.TP
+\fBcas\fR tag <name>
+Name a node of a history in the earlier format.
+.IP
+A history of commits has no tags of its own: `publish \-\-tag` names a release.
+.TP
+\fBcas\fR import\-git <repo> [<rev>]
+Import the commits of a git repository as a new history.
+.IP
+<rev> is HEAD unless given. Refused when the history exists. A commit's message becomes the note of its step.
+.SH THE STORE
+.TP
+\fBcas\fR gc [\-\-full]
+Remove blobs that no history reaches.
+.IP
+A blob is removed only after two runs in a row found it unreachable, so a writer has the time of one run to link what it wrote.
+.IP
+\fB\-\-full\fR : walk the whole store, not only what came since the last full run
+.TP
+\fBcas\fR fsck
+Check every reachable blob: readable, valid and complete.
+.IP
+Fails when a blob is missing or not valid in its format, and names it.
+.TP
+\fBcas\fR objects
+Every blob key in the store.
+.TP
+\fBcas\fR show <key>
+Print a blob.
+.TP
+\fBcas\fR annotated make <file>
+.TQ
+\fBcas\fR annotated show <key>
+Store or print a text with a note on each line.
+.TP
+\fBcas\fR serve <addr> \-\-cert <file> \-\-key <file> [\-\-open] [\-\-max\-body <bytes>]
+Serve the store over HTTPS.
+.IP
+HTTPS is the only protocol. Requests are decided by the access policy in \-\-meta, unless \-\-open serves to anyone.
+.IP
+\fB\-\-cert\fR <file>: the PEM certificate chain to serve with
+.IP
+\fB\-\-key\fR <file>: the PEM private key to serve with
+.IP
+\fB\-\-open\fR : serve to anyone, without an access policy
+.IP
+\fB\-\-max\-body\fR <bytes>: the largest request body accepted (default 64 MiB)
+.TP
+\fBcas\fR access show
+.TQ
+\fBcas\fR access user <name>
+.TQ
+\fBcas\fR access grant <who> '<action> <scope>'
+.TQ
+\fBcas\fR access revoke <who> '<action> <scope>'
+The access policy of a served store.
+.IP
+The policy is in the store \-\-meta names. `access user` adds a user or gives them a new token, printed once. A grant is an action and a scope, such as 'read blobs' or 'write var:main'; <who> is a user or '*' for anyone.
+.SH ON A FORGE
+.TP
+\fBcas\fR signup <name> [\-\-email <e>]
+.TQ
+\fBcas\fR login <name>
+.TQ
+\fBcas\fR whoami
+.TQ
+\fBcas\fR password
+Make an account, sign in, or change the password.
+.IP
+Passwords are read from standard input. login writes the token to \-\-token\-file, or prints it.
+.TP
+\fBcas\fR account <name>
+.TQ
+\fBcas\fR account edit [\-\-display <d>] [\-\-email <e>]
+Show or edit an account.
+.TP
+\fBcas\fR token list
+.TQ
+\fBcas\fR token make <label> [\-\-scope all|read|project:<owner>/<project>] [\-\-days <n>]
+.TQ
+\fBcas\fR token revoke <key>
+The tokens of the account.
+.TP
+\fBcas\fR org create <name>
+.TQ
+\fBcas\fR org member <org> <user> owner|member|remove
+Organizations and their members.
+.TP
+\fBcas\fR projects
+The projects you can read.
+.TP
+\fBcas\fR project create <name> [\-\-owner <o>] [\-\-description <d>] [\-\-public]
+.TQ
+\fBcas\fR project show
+.TQ
+\fBcas\fR project delete \-\-yes
+.TQ
+\fBcas\fR project fork [\-\-owner <o>] [\-\-name <n>]
+.TQ
+\fBcas\fR project edit [\-\-description <d>] [\-\-visibility public|private] [\-\-readme <path>]
+.TQ
+\fBcas\fR project member <who> read|write|maintain|admin|remove
+.TQ
+\fBcas\fR project protect <history> on|off
+.TQ
+\fBcas\fR project gate <history> [\-\-approvals <n>] [\-\-checks <a,b>] [\-\-resolved]
+.TQ
+\fBcas\fR project label <name> [\-\-color <c>] [\-\-set <s>] [\-\-rule one|any]
+.TQ
+\fBcas\fR project label <name> remove
+.TQ
+\fBcas\fR project webhook list
+.TQ
+\fBcas\fR project webhook add <url> [\-\-secret\-file <f>] [\-\-events <k,..>]
+.TQ
+\fBcas\fR project webhook remove <id>
+.TQ
+\fBcas\fR project runner list
+.TQ
+\fBcas\fR project runner <account> add|remove
+Make and manage a project.
+.TP
+\fBcas\fR histories
+The project's histories and their tips.
+.TP
+\fBcas\fR blame <path>
+Each line of <path> with the commit that last changed it.
+.TP
+\fBcas\fR checks
+The check results of a commit.
+.TP
+\fBcas\fR proposal list [\-\-state open|merged|closed|all]
+.TQ
+\fBcas\fR proposal open <title> \-\-source <history> [\-\-target <history>]
+.TQ
+\fBcas\fR proposal show <n>
+.TQ
+\fBcas\fR proposal edit <n> \-\-title <t>
+.TQ
+\fBcas\fR proposal close|reopen|approve|merge <n>
+.TQ
+\fBcas\fR proposal thread <n> <path>:<line> [\-\-old] <text>|\- [\-\-suggestion <text>]
+.TQ
+\fBcas\fR proposal reply <n> <thread> <text>|\- [\-\-suggestion <text>]
+.TQ
+\fBcas\fR proposal resolve|promote <n> <thread> [\-\-undo]
+Propose, review and merge a change.
+.IP
+A thread is a review thread on a line of the diff (\-\-old: the line's old side). promote makes a thread's note the merged step's note on its line.
+.TP
+\fBcas\fR issue list [\-\-state open|closed|all] [\-\-label <l>]
+.TQ
+\fBcas\fR issue open <title> [\-\-body <text>|\-] [\-\-label <l>]...
+.TQ
+\fBcas\fR issue open <title> \-\-at <path>:<line> [\-\-suggestion <text>]
+.TQ
+\fBcas\fR issue show <n>
+.TQ
+\fBcas\fR issue comment <n> <text>|\-
+.TQ
+\fBcas\fR issue edit <n> [\-\-title <t>] [\-\-body <text>|\-] [\-\-assign <a,b>]
+.TQ
+\fBcas\fR issue close|reopen <n>
+.TQ
+\fBcas\fR issue label <n> +<add> \-<remove>...
+Issues of a project.
+.TP
+\fBcas\fR release list
+.TQ
+\fBcas\fR release publish <tag> \-\-changelog <file> [\-\-compatible]
+.TQ
+\fBcas\fR release archive <tag> <file.tar.gz>
+Releases of a project.
+.TP
+\fBcas\fR mirror add <name> <git url>
+.TQ
+\fBcas\fR mirror pull <name>
+Mirror a git repository.
+.TP
+\fBcas\fR events [\-\-after <n>] [\-\-follow]
+The event log of a project.
+.IP
+\-\-follow waits for new events.
+.SH THE TOOL
+.TP
+\fBcas\fR help [<command>]
+.TQ
+\fBcas\fR <command> \-\-help
+Explain cas, or one command.
+.IP
+`help \-\-man` prints the manual page and `help \-\-markdown` the command reference.
+.TP
+\fBcas\fR completions fish|bash|zsh
+Print the completion script for a shell.
+.IP
+fish: cas completions fish > ~/.config/fish/completions/cas.fish
+.IP
+bash: cas completions bash > ~/.local/share/bash\-completion/completions/cas
+.IP
+zsh: cas completions zsh > a file named _cas in a directory of $fpath
+.TP
+\fBcas\fR version
+.TQ
+\fBcas\fR \-\-version
+Print the version of cas.
+.SH EXIT STATUS
+0 when the command did what it says, 1 when it could not, 2 when it was not written correctly.
+.SH ENVIRONMENT
+.TP
+CAS_STORE
+The store, when \-\-store is not given.
+.TP
+CAS_AUTHOR
+The author of a commit, when \-\-author is not given.
