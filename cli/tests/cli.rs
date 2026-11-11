@@ -558,3 +558,85 @@ fn a_commit_has_a_manifest_and_needs_the_prover_for_a_proof() {
     assert_eq!(code, Some(1), "{err}");
     assert!(err.contains("the prover is not installed"), "{err}");
 }
+
+#[test]
+fn a_server_proves_what_is_pushed_and_a_client_asks_it_for_proofs() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let (work, store, served) = (tmp.path().join("work"), tmp.path().join("store"), tmp.path().join("served"));
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::write(work.join("README"), "hi\n").unwrap();
+    cas(&store, &["commit", work.to_str().unwrap(), "--author", "Dana"]);
+
+    // A stand-in for the prover (prove/ has the real one): it writes down
+    // how it was run and makes no proof.
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let ran = tmp.path().join("ran");
+    let script = format!("#!/bin/sh\necho \"$@\" >> {}\n", ran.display());
+    std::fs::write(bin.join("cas-prove"), script).unwrap();
+    std::fs::set_permissions(bin.join("cas-prove"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let addr = "127.0.0.1:47393";
+    let (cert, key) = cas_core::server::self_signed_pem();
+    let (cert_file, key_file) = (tmp.path().join("cert.pem"), tmp.path().join("key.pem"));
+    std::fs::write(&cert_file, cert).unwrap();
+    std::fs::write(&key_file, key).unwrap();
+    let ca = cert_file.to_str().unwrap();
+    let serve = |path: &std::path::Path| {
+        Command::new(env!("CARGO_BIN_EXE_cas"))
+            .env("PATH", path)
+            .arg("--store")
+            .arg(&served)
+            .args(["serve", addr, "--cert", ca, "--key", key_file.to_str().unwrap(), "--open", "--prove"])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // Without the prover, a server asked to prove does not start.
+    let none = serve(&tmp.path().join("nothing")).wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&none.stderr).contains("the prover is not installed"));
+
+    let mut server = serve(&bin);
+    let url = format!("https://{addr}");
+    let mut pushed = false;
+    for _ in 0..50 {
+        let o = Command::new(env!("CARGO_BIN_EXE_cas"))
+            .arg("--store")
+            .arg(&store)
+            .args(["--ca", ca, "push", &url])
+            .output()
+            .unwrap();
+        if o.status.success() {
+            pushed = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(pushed);
+    // The server runs the prover on the manifest of the pushed commit.
+    let manifest = cas(&store, &["manifest"]);
+    let key = manifest.lines().last().unwrap().rsplit(' ').next().unwrap().to_string();
+    let mut line = String::new();
+    for _ in 0..100 {
+        line = std::fs::read_to_string(&ran).unwrap_or_default();
+        if !line.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(line.trim(), format!("prove --store {} {key}", served.display()));
+
+    // The stand-in made no proof, so the client finds none to fetch.
+    let o = Command::new(env!("CARGO_BIN_EXE_cas"))
+        .arg("--store")
+        .arg(&store)
+        .args(["--ca", ca, "verify", "--from", &url])
+        .output()
+        .unwrap();
+    server.kill().unwrap();
+    server.wait().unwrap();
+    assert_eq!(o.status.code(), Some(1));
+    let err = String::from_utf8(o.stderr).unwrap();
+    assert!(err.contains(&format!("{url} has no proof of commit blake3:")), "{err}");
+}

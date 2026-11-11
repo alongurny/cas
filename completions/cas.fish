@@ -9,7 +9,7 @@ function __cas_command
             continue
         end
         switch $w
-            case --store --token-file --ca --meta -j -H -n --author --notes --annotate --as --tag --change --changelog --cert --key --max-body --project
+            case --store --token-file --ca --meta -j -H -n --author --notes --annotate --as --tag --change --changelog --from --cert --key --max-body --project
                 set skip 1
             case '-*'
             case '*'
@@ -103,10 +103,12 @@ complete -c cas -n 'contains -- (__cas_command) publish' -l change -x -a 'breaki
 complete -c cas -n 'contains -- (__cas_command) publish' -l changelog -r -F -d 'the text that says what the release changes'
 complete -c cas -n 'contains -- (__cas_command) prove verify' -l all -d 'every commit the commit reaches, not only the commit itself'
 complete -c cas -n 'contains -- (__cas_command) prove verify' -l quiet -d 'print the outcome only, not a line for each proof'
+complete -c cas -n 'contains -- (__cas_command) verify' -l from -x -d 'fetch the proofs that are not here from this store'
 complete -c cas -n 'contains -- (__cas_command) gc' -l full -d 'walk the whole store, not only what came since the last full run'
 complete -c cas -n 'contains -- (__cas_command) serve' -l cert -r -F -d 'the PEM certificate chain to serve with'
 complete -c cas -n 'contains -- (__cas_command) serve' -l key -r -F -d 'the PEM private key to serve with'
 complete -c cas -n 'contains -- (__cas_command) serve' -l open -d 'serve to anyone, without an access policy'
+complete -c cas -n 'contains -- (__cas_command) serve' -l prove -d 'prove each history of commits as it moves (needs cas-prove)'
 complete -c cas -n 'contains -- (__cas_command) serve' -l max-body -x -d 'the largest request body accepted (default 64 MiB)'
 complete -c cas -n 'contains -- (__cas_command) commit' -l nodes -d 'start a history in the earlier format, which the forge still keeps'
 complete -c cas -l compatible -d 'on a history in the earlier format, mark the step compatible'

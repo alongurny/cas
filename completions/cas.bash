@@ -4,7 +4,7 @@ _cas() {
     for ((i = 1; i < COMP_CWORD; i++)); do
         if ((skip)); then skip=0; continue; fi
         case ${COMP_WORDS[i]} in
-            --store|--token-file|--ca|--meta|-j|-H|-n|--author|--notes|--annotate|--as|--tag|--change|--changelog|--cert|--key|--max-body|--project) skip=1 ;;
+            --store|--token-file|--ca|--meta|-j|-H|-n|--author|--notes|--annotate|--as|--tag|--change|--changelog|--from|--cert|--key|--max-body|--project) skip=1 ;;
             -*) ;;
             *) cmd=${COMP_WORDS[i]}; break ;;
         esac
@@ -24,6 +24,7 @@ _cas() {
         --tag) COMPREPLY=(); return ;;
         --change) COMPREPLY=($(compgen -W 'breaking feature patch security' -- "$cur")); return ;;
         --changelog) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+        --from) COMPREPLY=(); return ;;
         --cert) COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --key) COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --max-body) COMPREPLY=(); return ;;
@@ -37,13 +38,13 @@ _cas() {
             stash) opts+=' --author' ;;
             diff) opts+=' --annotated' ;;
             prove) opts+=' --all --quiet' ;;
-            verify) opts+=' --all --quiet' ;;
+            verify) opts+=' --all --quiet --from' ;;
             merge) opts+=' --author' ;;
             push) opts+=' --as' ;;
             pull) opts+=' --as' ;;
             publish) opts+=' --tag --change --changelog --as' ;;
             gc) opts+=' --full' ;;
-            serve) opts+=' --cert --key --open --max-body' ;;
+            serve) opts+=' --cert --key --open --max-body --prove' ;;
         esac
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
         return

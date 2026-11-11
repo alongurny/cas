@@ -306,6 +306,11 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             if a.store.contains("://") {
                 return Err(format!("{cmd} works on a store directory: run it where the store is"));
             }
+            let other = match (&a.from, cmd) {
+                (Some(_), "prove") => return Err(format!("--from is for verify\n{}", crate::help::usage(cmd))),
+                (Some(f), _) => Some(crate::other_store(a, f)?),
+                (None, _) => None,
+            };
             let (k, _) = at()?;
             // Oldest first, so that what is proven is always a history's start.
             let mut commits: Vec<String> =
@@ -317,7 +322,20 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 let view = derived::derive(s, b3(), &proofs::MANIFEST, &commits::view("commit", k)).map_err(e)?;
                 let proven = derived::cached(s, &proofs::PROOF, &view).map_err(e)?.is_some();
                 if cmd == "verify" && !proven {
-                    return Err(format!("commit {} has no proof: cas prove makes one", short(k)));
+                    // A client keeps only the proofs it asked for (--from).
+                    let fetched = match &other {
+                        Some(o) => proofs::fetch(s, b3(), &**o, &view).map_err(e)?,
+                        None => false,
+                    };
+                    if !fetched {
+                        return Err(match &a.from {
+                            Some(f) => format!("{f} has no proof of commit {}", short(k)),
+                            None => format!(
+                                "commit {} has no proof: cas prove makes one, and --from <store> fetches one",
+                                short(k)
+                            ),
+                        });
+                    }
                 }
                 if cmd == "verify" || !proven {
                     blobs += proofs::read(s, view.key()).map_err(e)?.blobs.len();
@@ -523,7 +541,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
 }
 
 /// The prover program: next to this one, else on the path.
-fn prover() -> Res<std::path::PathBuf> {
+pub(crate) fn prover() -> Res<std::path::PathBuf> {
     let name = "cas-prove";
     let beside = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join(name)));
     let on_path = std::env::var_os("PATH")

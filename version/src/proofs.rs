@@ -185,3 +185,13 @@ pub static PROOF: Function = Function {
     spec: include_str!("../../spec/functions/proof.md"),
     compute: no_prover,
 };
+
+/// Copy the proof of `manifest` from `other` into `store`, where the same
+/// function names it. False when `other` has none (or does not let it be
+/// read). The proof is not checked here: checking it is the verifier's part.
+pub fn fetch(store: &dyn Store, alg: &'static Algorithm, other: &dyn Store, manifest: &View) -> Result<bool> {
+    let Some(proof) = crate::derived::readable_cache(other, &PROOF, manifest)? else { return Ok(false) };
+    let bytes = read_blob(other, proof.key())?;
+    crate::derived::record(store, alg, &PROOF, manifest, &bytes);
+    Ok(crate::derived::cached(store, &PROOF, manifest)?.is_some())
+}

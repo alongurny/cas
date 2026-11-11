@@ -94,7 +94,7 @@ _cas() {
                 sparse) _arguments $general '*: :_files' ;;
                 diff) _arguments $general '--annotated[print the line diff with the notes of the step]' ;;
                 prove) _arguments $general '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' ;;
-                verify) _arguments $general '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' ;;
+                verify) _arguments $general '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' '--from[fetch the proofs that are not here from this store]:<store>:' ;;
                 merge) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '1: :_cas_histories' ;;
                 rebase) _arguments $general '1: :_cas_histories' ;;
                 push) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
@@ -103,7 +103,7 @@ _cas() {
                 import-git) _arguments $general '*: :_files' ;;
                 gc) _arguments $general '--full[walk the whole store, not only what came since the last full run]' ;;
                 annotated) _arguments $general '1: :_cas_word_or_file make show' '*: :_files' ;;
-                serve) _arguments $general '--cert[the PEM certificate chain to serve with]:<file>:_files' '--key[the PEM private key to serve with]:<file>:_files' '--open[serve to anyone, without an access policy]' '--max-body[the largest request body accepted (default 64 MiB)]:<bytes>:' '*: :_files' ;;
+                serve) _arguments $general '--cert[the PEM certificate chain to serve with]:<file>:_files' '--key[the PEM private key to serve with]:<file>:_files' '--open[serve to anyone, without an access policy]' '--max-body[the largest request body accepted (default 64 MiB)]:<bytes>:' '--prove[prove each history of commits as it moves (needs cas-prove)]' '*: :_files' ;;
                 access) _arguments $general '1: :(show user grant revoke)' ;;
                 account) _arguments $general '1: :(edit)' ;;
                 token) _arguments $general '1: :(list make revoke)' ;;

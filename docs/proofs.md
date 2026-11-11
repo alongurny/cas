@@ -50,8 +50,8 @@ any other derived result, and a store need not have them.
 - One proof for a whole history. Each commit has its own proof, and
   `--all` checks them one by one.
 - Release histories and tags. No circuit checks a semantic version yet.
-- Anything about a remote store. `prove` and `verify` run where the store
-  directory is.
+- Nothing is proven in a remote store from outside: `prove` and `verify` run
+  where the store directory is. A server proves its own store (below).
 
 ## The prover
 
@@ -85,5 +85,20 @@ Measured on a cloud machine, on the history of a thesis
   check.
 - A proof is 300 to 400 kilobytes.
 
-Proving is meant for the server that receives a push; a client fetches the
-proofs of the commits it relies on and checks those.
+## On a server
+
+Proving is the part of the store that receives a push, and a client keeps
+only the proofs it asks for:
+
+```sh
+server$ cas serve 0.0.0.0:443 --cert cert.pem --key key.pem --prove
+client$ cas push https://cas.example.org
+client$ cas verify --all --from https://cas.example.org
+```
+
+With `--prove` the server proves each history of commits whenever it moves,
+as `cas prove --all` does, and says so on standard error. `verify --from`
+fetches the proofs that are not in the local store from the other one, keeps
+them and checks them; what it fetches is not trusted, only checked. A push
+is accepted before its proof exists, so for a moment after a push the server
+has none.

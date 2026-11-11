@@ -125,7 +125,7 @@ Lists each blob the commit brings that is not a file: its type, its key and its 
 \fBcas\fR prove [\-\-all] [\-\-quiet]
 Make a proof that what the commit brings is valid.
 .IP
-The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With \-\-all, every commit the commit reaches that has no proof yet gets one, oldest first. A server runs this after a push.
+The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With \-\-all, every commit the commit reaches that has no proof yet gets one, oldest first. `serve \-\-prove` runs this whenever a history moves.
 .IP
 Proving is done by the program cas\-prove, built from prove/ (docs/proofs.md).
 .IP
@@ -133,14 +133,16 @@ Proving is done by the program cas\-prove, built from prove/ (docs/proofs.md).
 .IP
 \fB\-\-quiet\fR : print the outcome only, not a line for each proof
 .TP
-\fBcas\fR verify [\-\-all] [\-\-quiet]
+\fBcas\fR verify [\-\-all] [\-\-quiet] [\-\-from <store>]
 Check the proof of the commit.
 .IP
-Checks the proof kept for the manifest of the commit, or with \-\-all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. Fails when a commit has no proof or a proof does not verify.
+Checks the proof kept for the manifest of the commit, or with \-\-all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. With \-\-from, a proof that is not here is first fetched from that store and kept, so a client holds only the proofs it asked for. Fails when a commit has no proof or a proof does not verify.
 .IP
 \fB\-\-all\fR : every commit the commit reaches, not only the commit itself
 .IP
 \fB\-\-quiet\fR : print the outcome only, not a line for each proof
+.IP
+\fB\-\-from\fR <store>: fetch the proofs that are not here from this store
 .TP
 \fBcas\fR summary
 How many directories and files the commit's version has.
@@ -231,10 +233,10 @@ Print a blob.
 \fBcas\fR annotated show <key>
 Store or print a text with a note on each line.
 .TP
-\fBcas\fR serve <addr> \-\-cert <file> \-\-key <file> [\-\-open] [\-\-max\-body <bytes>]
+\fBcas\fR serve <addr> \-\-cert <file> \-\-key <file> [\-\-open] [\-\-prove] [\-\-max\-body <bytes>]
 Serve the store over HTTPS.
 .IP
-HTTPS is the only protocol. Requests are decided by the access policy in \-\-meta, unless \-\-open serves to anyone.
+HTTPS is the only protocol. Requests are decided by the access policy in \-\-meta, unless \-\-open serves to anyone. With \-\-prove, each history of commits is proven as it moves, as `prove \-\-all` does, so that those who fetch from it can `verify \-\-from` it.
 .IP
 \fB\-\-cert\fR <file>: the PEM certificate chain to serve with
 .IP
@@ -243,6 +245,8 @@ HTTPS is the only protocol. Requests are decided by the access policy in \-\-met
 \fB\-\-open\fR : serve to anyone, without an access policy
 .IP
 \fB\-\-max\-body\fR <bytes>: the largest request body accepted (default 64 MiB)
+.IP
+\fB\-\-prove\fR : prove each history of commits as it moves (needs cas\-prove)
 .TP
 \fBcas\fR access show
 .TQ

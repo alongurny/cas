@@ -79,6 +79,19 @@ fn insecure_http() -> Res<Tls> {
     Err("--insecure-http exists only in benchmark builds (feature bench-insecure); cas speaks HTTPS".into())
 }
 
+/// Another store, reached with the same token and certificate options.
+pub(crate) fn other_store(a: &Args, spec: &str) -> Res<Arc<dyn Store>> {
+    let token = match &a.token_file {
+        Some(f) => Some(std::fs::read_to_string(f).map_err(|x| format!("{f}: {x}"))?.trim().to_string()),
+        None => None,
+    };
+    let ca = match &a.ca {
+        Some(f) => Some(std::fs::read(f).map_err(|x| format!("{f}: {x}"))?),
+        None => None,
+    };
+    open(spec, Remote { token: token.as_deref(), ca: ca.as_deref() })
+}
+
 fn open(spec: &str, r: Remote) -> Res<Arc<dyn Store>> {
     if spec.contains("://") {
         // Remote stores are reached over HTTPS only; HttpStore refuses the rest.
@@ -113,6 +126,7 @@ struct Args {
     nodes: bool,
     all: bool,
     quiet: bool,
+    from: Option<String>,
     help: bool,
     version: bool,
     remote: Option<String>,
@@ -140,6 +154,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         nodes: false,
         all: false,
         quiet: false,
+        from: None,
         help: false,
         version: false,
         remote: None,
@@ -173,6 +188,7 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
             "--nodes" => a.nodes = true,
             "--all" => a.all = true,
             "--quiet" => a.quiet = true,
+            "--from" => a.from = Some(value("--from")?),
             "--help" | "-h" => a.help = true,
             "--version" => a.version = true,
             "--as" => a.remote = Some(value("--as")?),
@@ -332,24 +348,61 @@ fn tool(a: &Args) -> Res<bool> {
         // For the completions: the histories of a store directory, read
         // from its variables' file names without opening the store.
         Some("__histories") => {
-            let mut names = Vec::new();
-            for f in std::fs::read_dir(std::path::Path::new(&a.store).join("vars")).into_iter().flatten().flatten() {
-                let hex = f.file_name().to_string_lossy().into_owned();
-                let bytes: Option<Vec<u8>> =
-                    (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect();
-                if let Some(name) = bytes.and_then(|b| String::from_utf8(b).ok())
-                    && hex.len() % 2 == 0
-                    && !name.starts_with("derived/")
-                {
-                    names.push(name);
-                }
-            }
-            names.sort();
+            let names = histories(&a.store);
             print(names.iter().map(|n| format!("{n}\n")).collect())?;
         }
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+/// The names in a store directory that are not derived results, in order.
+fn histories(store: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for f in std::fs::read_dir(std::path::Path::new(store).join("vars")).into_iter().flatten().flatten() {
+        let hex = f.file_name().to_string_lossy().into_owned();
+        let bytes: Option<Vec<u8>> =
+            (0..hex.len() / 2).map(|i| u8::from_str_radix(hex.get(2 * i..2 * i + 2)?, 16).ok()).collect();
+        if let Some(name) = bytes.and_then(|b| String::from_utf8(b).ok())
+            && hex.len() % 2 == 0
+            && !name.starts_with("derived/")
+        {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names
+}
+
+/// Prove what each history of commits in `store` newly holds, whenever one
+/// of them moves: the server's part of a push (docs/proofs.md).
+fn prove_on_change(store: String) {
+    use cas_core::Span;
+    let span = |from: Option<&str>, to: Option<&str>| Span { from: from.map(Into::into), to: to.map(Into::into) };
+    // Every variable but the derived results; blobs are between the first two.
+    let spans = [span(None, Some("blake3:")), span(Some("blake3;"), Some("derived/")), span(Some("derived0"), None)];
+    let mut proven: std::collections::HashMap<String, View> = std::collections::HashMap::new();
+    let exe = std::env::current_exe().unwrap_or_else(|_| "cas".into());
+    let Ok(s) = open(&store, Remote { token: None, ca: None }) else { return };
+    loop {
+        let names = spans.iter().flat_map(|sp| cas_core::list_all(&*s, sp).unwrap_or_default());
+        for name in names {
+            let Ok(Some(view)) = history::head(&*s, &name) else { continue };
+            if !cas_version::commits::is_commit(&view) || proven.get(&name) == Some(&view) {
+                continue;
+            }
+            let out = std::process::Command::new(&exe)
+                .args(["--store", &store, "-H", &name, "prove", "--all", "--quiet"])
+                .output();
+            match out {
+                Ok(o) if o.status.success() => eprint!("{name}: {}", String::from_utf8_lossy(&o.stdout)),
+                Ok(o) => eprint!("{name}: not proven: {}", String::from_utf8_lossy(&o.stderr)),
+                Err(x) => eprintln!("{name}: not proven: {x}"),
+            }
+            proven.insert(name, view);
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
 
 fn run(a: Args) -> Res<()> {
@@ -948,6 +1001,11 @@ fn run(a: Args) -> Res<()> {
             } else {
                 Tls::from_files(flag("--cert")?.as_ref(), flag("--key")?.as_ref()).map_err(e)?
             };
+            // With --prove, each history of commits is proven as it moves.
+            let prove = a.rest.iter().any(|x| x == "--prove");
+            if prove {
+                commits::prover()?;
+            }
             let backend = DiskBackend::open(&a.store).map_err(e)?;
             let server = if a.rest.iter().any(|x| x == "--open") {
                 eprintln!("serving without access control");
@@ -964,6 +1022,10 @@ fn run(a: Args) -> Res<()> {
             }
             .map_err(e)?;
             out!("serving {} at {}", a.store, server.url());
+            if prove {
+                let store = a.store.clone();
+                std::thread::spawn(move || prove_on_change(store));
+            }
             loop {
                 std::thread::park();
             }

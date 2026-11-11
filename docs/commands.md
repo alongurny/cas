@@ -174,7 +174,7 @@ cas prove [--all] [--quiet]
 
 Make a proof that what the commit brings is valid.
 
-The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With --all, every commit the commit reaches that has no proof yet gets one, oldest first. A server runs this after a push.
+The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With --all, every commit the commit reaches that has no proof yet gets one, oldest first. `serve --prove` runs this whenever a history moves.
 
 Proving is done by the program cas-prove, built from prove/ (docs/proofs.md).
 
@@ -184,15 +184,16 @@ Proving is done by the program cas-prove, built from prove/ (docs/proofs.md).
 ### verify
 
 ```
-cas verify [--all] [--quiet]
+cas verify [--all] [--quiet] [--from <store>]
 ```
 
 Check the proof of the commit.
 
-Checks the proof kept for the manifest of the commit, or with --all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. Fails when a commit has no proof or a proof does not verify.
+Checks the proof kept for the manifest of the commit, or with --all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. With --from, a proof that is not here is first fetched from that store and kept, so a client holds only the proofs it asked for. Fails when a commit has no proof or a proof does not verify.
 
 - `--all`: every commit the commit reaches, not only the commit itself
 - `--quiet`: print the outcome only, not a line for each proof
+- `--from <store>`: fetch the proofs that are not here from this store
 
 ### summary
 
@@ -369,17 +370,18 @@ Store or print a text with a note on each line.
 ### serve
 
 ```
-cas serve <addr> --cert <file> --key <file> [--open] [--max-body <bytes>]
+cas serve <addr> --cert <file> --key <file> [--open] [--prove] [--max-body <bytes>]
 ```
 
 Serve the store over HTTPS.
 
-HTTPS is the only protocol. Requests are decided by the access policy in --meta, unless --open serves to anyone.
+HTTPS is the only protocol. Requests are decided by the access policy in --meta, unless --open serves to anyone. With --prove, each history of commits is proven as it moves, as `prove --all` does, so that those who fetch from it can `verify --from` it.
 
 - `--cert <file>`: the PEM certificate chain to serve with
 - `--key <file>`: the PEM private key to serve with
 - `--open`: serve to anyone, without an access policy
 - `--max-body <bytes>`: the largest request body accepted (default 64 MiB)
+- `--prove`: prove each history of commits as it moves (needs cas-prove)
 
 ### access
 

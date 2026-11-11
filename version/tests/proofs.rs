@@ -127,3 +127,21 @@ fn the_manifests_of_a_history_cover_what_it_reaches() {
     }
     assert_eq!(listed, reach(&s, &c4));
 }
+
+#[test]
+fn a_proof_is_fetched_from_the_store_that_has_it() {
+    let (here, there) = (store(), store());
+    let files = BTreeMap::from([(Path::new("a.txt").unwrap(), file(&here, "one\n"))]);
+    let v = build(&here, b3(), by_alias("directory").unwrap(), &files).unwrap();
+    let c = commit(&here, &v, &[], None, 1);
+    let m = derived::derive(&here, b3(), &MANIFEST, &commits::view("commit", &c)).unwrap();
+    // The other store has no proof yet: nothing is fetched.
+    assert!(!proofs::fetch(&here, b3(), &there, &m).unwrap());
+    assert!(derived::cached(&here, &proofs::PROOF, &m).unwrap().is_none());
+    // Once it has one, the same bytes are kept here under the same name.
+    derived::record(&there, b3(), &proofs::PROOF, &m, b"the bytes of a proof");
+    assert!(proofs::fetch(&here, b3(), &there, &m).unwrap());
+    let kept = derived::cached(&here, &proofs::PROOF, &m).unwrap().unwrap();
+    assert_eq!(kept, derived::cached(&there, &proofs::PROOF, &m).unwrap().unwrap());
+    assert_eq!(cas_version::read_blob(&here, kept.key()).unwrap(), b"the bytes of a proof");
+}
