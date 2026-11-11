@@ -19,6 +19,7 @@ pub mod fsck;
 pub mod gc;
 pub mod git;
 mod git_notes;
+pub mod gitcommits;
 pub mod gitobj;
 pub mod graph;
 pub mod history;

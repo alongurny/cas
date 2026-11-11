@@ -143,6 +143,11 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("git-commit", include_str!("../../spec/formats/git-commit.md"), Kind::Leaf(crate::gitobj::check_commit)),
         format("git-tag", include_str!("../../spec/formats/git-tag.md"), Kind::Leaf(crate::gitobj::check_tag)),
         format("git-links", include_str!("../../spec/formats/git-links.md"), Kind::Leaf(crate::gitobj::check_links)),
+        format(
+            "git-commits",
+            include_str!("../../spec/formats/git-commits.md"),
+            Kind::Leaf(crate::gitcommits::check_links),
+        ),
         format("git-tags", include_str!("../../spec/formats/git-tags.md"), Kind::Leaf(crate::gitobj::check_tags)),
         format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
         format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),

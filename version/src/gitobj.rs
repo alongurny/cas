@@ -99,7 +99,7 @@ fn entry_kind(mode: &str) -> Option<&'static str> {
 }
 
 /// Header lines of a commit or tag: `(name, value)` up to the message.
-fn headers(body: &[u8]) -> Vec<(&str, &str)> {
+pub(crate) fn headers(body: &[u8]) -> Vec<(&str, &str)> {
     let text = match std::str::from_utf8(body) {
         Ok(t) => t,
         // A message in another encoding: the headers are still ASCII.
@@ -997,6 +997,13 @@ pub struct TreeWriter<'a> {
     store: &'a dyn Store,
     trees: HashMap<String, String>,
     batch: Batch<'a>,
+}
+
+impl TreeWriter<'_> {
+    /// Queue a git commit with `body`; its id.
+    pub fn put_commit(&mut self, body: &[u8]) -> Result<String> {
+        self.batch.put("commit", body, None)
+    }
 }
 
 impl<'a> TreeWriter<'a> {
