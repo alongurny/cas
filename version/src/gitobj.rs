@@ -932,6 +932,53 @@ pub(crate) fn links_children(b: &[u8]) -> Vec<View> {
         .unwrap_or_default()
 }
 
+// ---- Annotated tags ----
+
+/// Git's annotated tags: tag name to tag object id, a `git-tags` blob.
+pub type Tags = BTreeMap<String, String>;
+
+pub fn write_tags(store: &dyn Store, alg: &'static Algorithm, tags: &Tags) -> Result<View> {
+    let v = Value::map(tags.iter().map(|(n, t)| (Value::str(n.as_str()), Value::str(t.as_str()))));
+    crate::put(store, alg, "git-tags", &v.serialize())
+}
+
+pub fn read_tags(store: &dyn Store, v: &View) -> Result<Tags> {
+    let val = Value::deserialize(&read_blob(store, v.key())?).map_err(|e| malformed(v.key(), e))?;
+    let mut out = Tags::new();
+    for (k, t) in val.as_map().ok_or_else(|| malformed(v.key(), "not a map"))? {
+        let (Some(k), Some(t)) = (k.as_str(), t.as_str()) else { return Err(malformed(v.key(), "not strings")) };
+        out.insert(k.to_string(), t.to_string());
+    }
+    Ok(out)
+}
+
+pub(crate) fn check_tags(b: &[u8]) -> std::result::Result<(), String> {
+    let v = Value::deserialize(b)?;
+    for (k, t) in v.as_map().ok_or("not a map")? {
+        if !(k.as_str().is_some_and(|k| !k.is_empty()) && t.as_str().is_some_and(is_hex40)) {
+            return Err("a tag is a name and a tag object's id".into());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn tags_children(b: &[u8]) -> Vec<View> {
+    let Ok(v) = Value::deserialize(b) else { return Vec::new() };
+    v.as_map()
+        .map(|m| m.values().filter_map(|t| t.as_str().filter(|t| is_hex40(t)).map(|t| view("tag", t))).collect())
+        .unwrap_or_default()
+}
+
+/// The object an annotated tag names, if `id` is a tag.
+pub fn peel_tag(store: &dyn Store, id: &str) -> Option<String> {
+    let (kind, lo) = get(store, id).ok()?;
+    if kind != "tag" {
+        return None;
+    }
+    let body = split(&lo)?.1;
+    headers(body).into_iter().find(|(k, _)| *k == "object").map(|(_, v)| v.to_string())
+}
+
 // ---- cas to git ----
 
 /// A file's git mode and contents.

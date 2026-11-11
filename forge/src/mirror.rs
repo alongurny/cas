@@ -74,6 +74,23 @@ impl Forge {
                 .into_owned();
         // Git's own objects come too, so the commits keep their ids.
         let packed = self.mirror_objects(&dir, r.doc.s("packed"))?;
+        // Annotated tags keep their tag objects.
+        let mut objects = cas_version::gitobj::Tags::new();
+        let refs = String::from_utf8_lossy(&git(
+            &dir,
+            &["for-each-ref", "--format=%(objecttype) %(objectname) %(refname:short)", "refs/tags"],
+        )?)
+        .into_owned();
+        for l in refs.lines() {
+            if let Some(("tag", rest)) = l.split_once(' ')
+                && let Some((id, name)) = rest.split_once(' ')
+            {
+                objects.insert(name.to_string(), id.to_string());
+            }
+        }
+        if !objects.is_empty() {
+            self.save_git_tags(p, &objects)?;
+        }
         let mut out = Pulled::default();
         for b in branches.lines().filter(|b| !b.is_empty()) {
             let (h, im) = cas_version::git::import(&*self.store, self.alg, &dir, b)?;

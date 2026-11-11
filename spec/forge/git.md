@@ -18,7 +18,7 @@ holds the same bytes, so the two cost little more than one.
 | `HEAD` | `refs/heads/dev` |
 | `refs/heads/<x>` (no `/` in `x`) | `h/<x>`: `dev`, `release`, other shared histories |
 | `refs/heads/u/<user>/<name>` | `u/<user>/<name>` |
-| `refs/tags/<t>` | tag `t` of a history; a tag of `h/release` names the commit of a non-release history with the same version when there is one |
+| `refs/tags/<t>` | tag `t` of a history; a tag of `h/release` names the commit of a non-release history with the same version when there is one; git's annotated tag object when the project keeps one for `t` naming that commit |
 
 A branch names its history's tip (the newest node when the history forks).
 
@@ -39,6 +39,13 @@ commits. A history that came from git (a push, a mirror, a migration) keeps
 git's commits. The links reach the commits, so gc keeps them and blob reads
 are scoped by them as by any variable. The variables are readable on the
 wire and change only through the forge; deleting a branch removes both.
+
+## Annotated tags
+
+Variable `p/<owner>/<project>/git/tags` holds git's annotated tags
+([git-tags](../formats/git-tags.md)): tag name to tag object. A mirror (and
+so a migration) keeps there each annotated tag it fetches, so a clone gets
+the same tag object, with its tagger, date and message, and gc keeps it.
 
 ## Fetch
 

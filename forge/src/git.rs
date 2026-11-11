@@ -17,6 +17,9 @@ use std::io::Read;
 
 /// Where a history's links are kept: which git commit each of its nodes
 /// is, in project variable `git/<history>`.
+/// The project variable holding git's annotated tags (`git-tags`).
+pub const TAGS: &str = "git/tags";
+
 pub fn links_var(history: &str) -> String {
     format!("git/{history}")
 }
@@ -256,6 +259,34 @@ impl Forge {
         }
     }
 
+    /// Git's annotated tags of `p` and the view they were read from.
+    pub fn git_tags(&self, p: &ProjectId) -> Result<(Option<View>, gitobj::Tags)> {
+        match history::head(&*self.store, &p.var(TAGS))? {
+            None => Ok((None, gitobj::Tags::new())),
+            Some(v) => Ok((Some(v.clone()), gitobj::read_tags(&*self.store, &v)?)),
+        }
+    }
+
+    /// Keep `tags` (merged into what is kept) as git's annotated tags of `p`.
+    pub fn save_git_tags(&self, p: &ProjectId, tags: &gitobj::Tags) -> Result<()> {
+        for _ in 0..8 {
+            let (old, mut all) = self.git_tags(p)?;
+            let before = all.clone();
+            all.extend(tags.iter().map(|(k, v)| (k.clone(), v.clone())));
+            if all == before && old.is_some() {
+                return Ok(());
+            }
+            let v = gitobj::write_tags(&*self.store, self.alg, &all)?;
+            let expect = old.as_ref().map_or(Expect::Absent, |o| Expect::Value(o.to_string().into_bytes()));
+            match self.store.write(&p.var(TAGS), v.to_string().as_bytes(), &expect) {
+                Ok(_) => return Ok(()),
+                Err(cas_core::Error::Conflict) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(Error::conflict("the git tags kept moving"))
+    }
+
     /// Save history `var`'s `links` over `old`; a concurrent change is
     /// merged in (links only grow, and a node's commit never changes).
     pub fn save_links(&self, p: &ProjectId, var: &str, old: Option<View>, links: &Links) -> Result<()> {
@@ -347,9 +378,15 @@ impl Forge {
         // A release's tag names the commit of a non-release history with
         // its version when there is one: the commit the work made.
         tags.sort_by_key(|(_, _, i)| all[*i].var != RELEASE);
+        let (_, objects) = self.git_tags(p)?;
         for (name, n, i) in tags {
             let c = by_version.get(&n.version()).or_else(|| all[i].links.get(&n)).cloned();
             if let Some(c) = c {
+                // Git's tag object, when there is one naming that commit.
+                let c = match objects.get(&name) {
+                    Some(t) if gitobj::peel_tag(&*self.store, t).as_deref() == Some(c.as_str()) => t.clone(),
+                    _ => c,
+                };
                 out.entry(format!("refs/tags/{name}")).or_insert(c);
             }
         }

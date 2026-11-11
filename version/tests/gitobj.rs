@@ -109,14 +109,19 @@ fn packs_keep_git_ids_both_ways() {
     // gc keeps what a variable reaches through the git formats, and only that.
     s.write("refs", gitobj::view("commit", &head).to_string().as_bytes(), &Expect::Absent).unwrap();
     let junk = gitobj::put(&s, "blob", b"nobody names me\n").unwrap();
+    // A tag object is kept since a variable's git-tags names it.
+    let tags: gitobj::Tags = [("v1".to_string(), tag.clone())].into_iter().collect();
+    let tv = gitobj::write_tags(&s, b3(), &tags).unwrap();
+    s.write("tags", tv.to_string().as_bytes(), &Expect::Absent).unwrap();
+    assert_eq!(gitobj::read_tags(&s, &tv).unwrap(), tags);
     cas_version::gc::collect(&s, b3()).unwrap();
     cas_version::gc::collect(&s, b3()).unwrap();
     for id in &reach {
-        if *id != tag {
-            assert!(gitobj::has(&s, id).unwrap(), "{id} kept");
-        }
+        assert!(gitobj::has(&s, id).unwrap(), "{id} kept");
     }
     assert!(!gitobj::has(&s, &junk).unwrap(), "an unreachable object is collected");
+    assert!(gitobj::has(&s, &tag).unwrap(), "the tag object is kept");
+    assert_eq!(gitobj::peel_tag(&s, &tag).as_deref(), Some(text(git(&r, &["rev-parse", "v1^{commit}"], None)).as_str()));
 }
 
 #[test]

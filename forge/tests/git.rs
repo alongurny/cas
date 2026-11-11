@@ -270,6 +270,9 @@ fn a_mirrored_repository_keeps_its_commit_ids() {
     assert_eq!(s.must(&c, &["rev-parse", "origin/u/alice/side"]), s.must(&up, &["rev-parse", "side"]));
     assert_eq!(s.must(&c, &["rev-parse", "origin/u/alice/same"]), s.must(&up, &["rev-parse", "same"]));
     assert_eq!(s.must(&c, &["rev-parse", "v1^{commit}"]), s.must(&up, &["rev-parse", "v1^{commit}"]));
+    // The tag is git's annotated tag, tagger, date and message as they were.
+    assert_eq!(s.must(&c, &["cat-file", "-t", "v1"]), "tag");
+    assert_eq!(s.must(&c, &["rev-parse", "v1"]), s.must(&up, &["rev-parse", "v1"]));
     s.must(&c, &["fsck", "--strict", "--no-dangling"]);
 
     // A later pull brings only what is new, and the ids still hold.

@@ -21,6 +21,7 @@ collected like any other data.
 | `p/<owner>/<project>/i` | The issues history ([issues](issues.md)) |
 | `p/<owner>/<project>/m/<name>` | A mirror's state ([mirror](mirror.md)) |
 | `p/<owner>/<project>/git/<history>` | Which git commit each node of a history is ([git](git.md)) |
+| `p/<owner>/<project>/git/tags` | Git's annotated tags ([git](git.md)) |
 | `derived/<F>/<X>` | Derived results: blame, check results ([checks](checks.md)) |
 
 Owner, project and user names are lowercase letters, digits and `-`,
