@@ -2,7 +2,8 @@
 //! `measure/Export.lean`: for each axiom, definition, theorem and opaque
 //! declaration, the builder cites what it needs from the export, writes
 //! the derivation, and the checker checks it. One line per declaration on
-//! stdout: name, kind, status, rows, terms, milliseconds, message. Unsafe
+//! stdout: name, kind, status, rows, terms, milliseconds (all), message,
+//! microseconds of the checker alone. Unsafe
 //! declarations are skipped: Lean's kernel does not fully check them.
 //!
 //! Usage: `lean_check <export> [--only NAME] [--every N] [--budget ROWS]
@@ -17,6 +18,19 @@ use cas_lean::import::{Env, Kind};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+
+thread_local! {
+    /// Microseconds the checker took on the last declaration of this thread.
+    static CHECK_US: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+}
+
+/// Runs the checker, timing it.
+fn timed<T>(f: impl FnOnce() -> T) -> T {
+    let t = std::time::Instant::now();
+    let r = f();
+    CHECK_US.with(|c| c.set(t.elapsed().as_micros()));
+    r
+}
 
 struct Shared(Arc<Env>);
 impl Source for Shared {
@@ -46,7 +60,7 @@ fn one(env: &Arc<Env>, i: usize, budget: usize) -> (String, usize, usize, String
             _ => None,
         };
         let goal = b.check_decl(kind, d.lparams.len() as u32, ty, value).map_err(|e| ("prover".into(), e))?;
-        Checker::check(&b.t, &goal).map_err(|e| ("checker".into(), e))?;
+        timed(|| Checker::check(&b.t, &goal)).map_err(|e| ("checker".into(), e))?;
         Ok(())
     }));
     let (status, msg) = match run {
@@ -100,12 +114,12 @@ fn block(env: &Arc<Env>, i: usize, budget: usize) -> (String, usize, usize, Stri
         let recs = if *nested > 0 {
             let goal =
                 b.nested_block(levels, *params, &types, &ctors, &rec_keys).map_err(|e| ("prover".to_string(), e))?;
-            Checker::check_nested(&b.t, &goal).map_err(|e| ("checker".to_string(), e))?;
+            timed(|| Checker::check_nested(&b.t, &goal)).map_err(|e| ("checker".to_string(), e))?;
             goal.recursors
         } else {
             let goal =
                 b.inductive_block(levels, *params, &types, &ctors, &rec_keys).map_err(|e| ("prover".to_string(), e))?;
-            Checker::check_block(&b.t, &goal).map_err(|e| ("checker".to_string(), e))?;
+            timed(|| Checker::check_block(&b.t, &goal)).map_err(|e| ("checker".to_string(), e))?;
             goal.recursors
         };
         // The recursors are Lean's: same type and rules, term for term.
@@ -195,6 +209,7 @@ fn main() {
                         let k = next.fetch_add(1, Ordering::SeqCst);
                         let Some(&i) = todo.get(k) else { break };
                         eprintln!("start {}", env.name(env.decls[i].name));
+                        CHECK_US.with(|c| c.set(0));
                         let t0 = std::time::Instant::now();
                         let (status, rows, terms, msg) =
                             if blocks { block(&env, i, budget) } else { one(&env, i, budget) };
@@ -210,9 +225,10 @@ fn main() {
                             msg.chars().take(1500).map(|c| if c == '\t' || c == '\n' { ' ' } else { c }).collect();
                         let _g = out.lock().unwrap();
                         println!(
-                            "{}\t{kind}\t{status}\t{rows}\t{terms}\t{}\t{msg}",
+                            "{}\t{kind}\t{status}\t{rows}\t{terms}\t{}\t{msg}\t{}",
                             env.name(d.name),
-                            t0.elapsed().as_millis()
+                            t0.elapsed().as_millis(),
+                            CHECK_US.with(|c| c.get())
                         );
                     }
                 })

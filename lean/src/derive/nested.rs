@@ -23,6 +23,9 @@ impl Builder {
 
     /// The row of e; the constants it names are cited.
     pub fn row_of(&mut self, e: &X) -> Res<Ix> {
+        if let Some((_, r)) = self.row_memo.get(&std::rc::Rc::as_ptr(e)) {
+            return Ok(*r);
+        }
         let d = |b: &mut Builder, k: &Key| b.cite(k);
         let r = match &**e {
             E::BVar(n) => TermRow::BVar(*n),
@@ -40,7 +43,9 @@ impl Builder {
             E::Str(s) => TermRow::Str(s.clone()),
             E::Proj(k, n, x) => TermRow::Proj(d(self, k)?, *n, self.row_of(x)?),
         };
-        Ok(self.term(r))
+        let r = self.term(r);
+        self.row_memo.insert(std::rc::Rc::as_ptr(e), (e.clone(), r));
+        Ok(r)
     }
 
     /// Checks the nested inductive block whose types are the cited rows

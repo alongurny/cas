@@ -27,6 +27,16 @@ struct Meta {
 #[derive(Default)]
 pub struct Builder {
     pub t: Derivation,
+    /// Rows of terms converted by `row_of`, by address (the term is kept
+    /// alive, so the address is not reused): imported terms share
+    /// subterms, and a tree walk of them can be exponential.
+    row_memo: HashMap<*const crate::expr::E, (crate::expr::X, Ix)>,
+    /// Results of instantiate, level instantiate and abstract: terms share
+    /// subterms, so an unmemoized walk can be exponential.
+    inst_memo: HashMap<(Ix, u32, Ix), (Ix, Ix)>,
+    linst_memo: HashMap<(Ix, Ix), (Ix, Ix)>,
+    linstl_memo: HashMap<(Ix, Ix), (Ix, Ix)>,
+    abs_memo: HashMap<(Ix, u32, u32), Ix>,
     levels: HashMap<LevelRow, Ix>,
     lists: HashMap<ListRow, Ix>,
     terms: HashMap<TermRow, Ix>,
@@ -208,6 +218,15 @@ impl Builder {
     // ---- Substitution ----
 
     pub fn inst(&mut self, e: Ix, k: u32, a: Ix) -> (Ix, Ix) {
+        if let Some(r) = self.inst_memo.get(&(e, k, a)) {
+            return *r;
+        }
+        let r = self.inst_(e, k, a);
+        self.inst_memo.insert((e, k, a), r);
+        r
+    }
+
+    fn inst_(&mut self, e: Ix, k: u32, a: Ix) -> (Ix, Ix) {
         if self.meta[e as usize].lbr <= k {
             return (self.add(Fact::Inst { e, k, a, r: e }, Rule::InstClosed, vec![]), e);
         }
@@ -242,6 +261,15 @@ impl Builder {
 
     /// `e` with `fvar n` replaced by `bvar depth`: the inverse of opening.
     fn abstract_fvar(&mut self, e: Ix, n: u32, depth: u32) -> Ix {
+        if let Some(r) = self.abs_memo.get(&(e, n, depth)) {
+            return *r;
+        }
+        let r = self.abstract_fvar_(e, n, depth);
+        self.abs_memo.insert((e, n, depth), r);
+        r
+    }
+
+    fn abstract_fvar_(&mut self, e: Ix, n: u32, depth: u32) -> Ix {
         if self.meta[e as usize].fv <= n {
             return e;
         }
@@ -292,6 +320,15 @@ impl Builder {
     }
 
     pub fn linstl(&mut self, l: Ix, ls: Ix) -> (Ix, Ix) {
+        if let Some(r) = self.linstl_memo.get(&(l, ls)) {
+            return *r;
+        }
+        let r = self.linstl_(l, ls);
+        self.linstl_memo.insert((l, ls), r);
+        r
+    }
+
+    fn linstl_(&mut self, l: Ix, ls: Ix) -> (Ix, Ix) {
         let (rule, prem, r) = match self.t.levels[l as usize].clone() {
             LevelRow::Zero => (Rule::LInstLZero, vec![], l),
             LevelRow::Succ(a) => {
@@ -310,6 +347,15 @@ impl Builder {
     }
 
     pub fn linst(&mut self, e: Ix, ls: Ix) -> (Ix, Ix) {
+        if let Some(r) = self.linst_memo.get(&(e, ls)) {
+            return *r;
+        }
+        let r = self.linst_(e, ls);
+        self.linst_memo.insert((e, ls), r);
+        r
+    }
+
+    fn linst_(&mut self, e: Ix, ls: Ix) -> (Ix, Ix) {
         if !self.has_params(e) {
             return (self.add(Fact::LInst { e, ls, r: e }, Rule::LInstNone, vec![]), e);
         }
