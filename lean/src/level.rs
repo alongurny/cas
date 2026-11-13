@@ -265,3 +265,184 @@ mod tests {
         assert!(geq(&Level::imax(u.clone(), v.clone()), &v));
     }
 }
+
+// ---- Lean's level constructors (kernel/level.cpp) ----
+
+/// Lean's `depth` of a level (Lean/Level.lean).
+pub fn depth(l: &Level) -> u32 {
+    match l {
+        Zero | Param(_) => 0,
+        Succ(a) => depth(a) + 1,
+        Max(a, b) | IMax(a, b) => depth(a).max(depth(b)) + 1,
+    }
+}
+
+fn is_explicit(l: &Level) -> bool {
+    match l {
+        Zero => true,
+        Succ(a) => is_explicit(a),
+        _ => false,
+    }
+}
+
+fn to_offset(l: &Level) -> (&Level, u32) {
+    let mut l = l;
+    let mut k = 0;
+    while let Succ(a) = l {
+        l = a;
+        k += 1;
+    }
+    (l, k)
+}
+
+/// Lean's `mk_max`: `max a b`, simplified in the cases it simplifies.
+pub fn lean_max(a: &Level, b: &Level) -> Level {
+    if is_explicit(a) && is_explicit(b) {
+        return if depth(a) >= depth(b) { a.clone() } else { b.clone() };
+    }
+    if a == b || *b == Zero {
+        return a.clone();
+    }
+    if *a == Zero {
+        return b.clone();
+    }
+    if let Max(x, y) = b
+        && (**x == *a || **y == *a)
+    {
+        return b.clone();
+    }
+    if let Max(x, y) = a
+        && (**x == *b || **y == *b)
+    {
+        return a.clone();
+    }
+    let ((p, i), (q, j)) = (to_offset(a), to_offset(b));
+    if p == q {
+        return if i > j { a.clone() } else { b.clone() };
+    }
+    Level::max(a.clone(), b.clone())
+}
+
+/// Lean's `lean_imax`, which `infer_pi` uses for a pi's universe.
+pub fn lean_imax(a: &Level, b: &Level) -> Level {
+    if b.is_not_zero() {
+        lean_max(a, b)
+    } else if *b == Zero {
+        Zero
+    } else if *a == Zero || *a == Zero.succ() || a == b {
+        b.clone()
+    } else {
+        Level::imax(a.clone(), b.clone())
+    }
+}
+
+// ---- Equality for every assignment of the parameters ----
+
+fn params_of(l: &Level, out: &mut Vec<u32>) {
+    match l {
+        Zero => {}
+        Param(n) => {
+            if !out.contains(n) {
+                out.push(*n)
+            }
+        }
+        Succ(a) => params_of(a, out),
+        Max(a, b) | IMax(a, b) => {
+            params_of(a, out);
+            params_of(b, out);
+        }
+    }
+}
+
+/// Whether l is 0 when the parameters in `zero` are 0 and the others at
+/// least 1.
+fn is_zero_at(l: &Level, zero: &[u32]) -> bool {
+    match l {
+        Zero => true,
+        Succ(_) => false,
+        Param(n) => zero.contains(n),
+        Max(a, b) => is_zero_at(a, zero) && is_zero_at(b, zero),
+        IMax(_, b) => is_zero_at(b, zero),
+    }
+}
+
+/// l as a max of terms `p + k` (`Some(p)`) and constants `k` (`None`),
+/// under the same assumption.
+fn flatten(l: &Level, zero: &[u32], k: u32, out: &mut Vec<(Option<u32>, u32)>) {
+    match l {
+        Zero => out.push((None, k)),
+        Succ(a) => flatten(a, zero, k + 1, out),
+        Param(n) => out.push(if zero.contains(n) { (None, k) } else { (Some(*n), k) }),
+        Max(a, b) => {
+            flatten(a, zero, k, out);
+            flatten(b, zero, k, out);
+        }
+        IMax(a, b) => {
+            if is_zero_at(b, zero) {
+                out.push((None, k));
+            } else {
+                flatten(a, zero, k, out);
+                flatten(b, zero, k, out);
+            }
+        }
+    }
+}
+
+/// a ≤ b for every value ≥ 1 of the parameters outside `zero`.
+fn leq_at(a: &Level, b: &Level, zero: &[u32]) -> bool {
+    let (mut fa, mut fb) = (vec![], vec![]);
+    flatten(a, zero, 0, &mut fa);
+    flatten(b, zero, 0, &mut fb);
+    fa.iter().all(|(p, k)| match p {
+        // A constant is below a constant at least as big, or below q + k'
+        // once 1 + k' reaches it.
+        None => fb.iter().any(|(q, k2)| if q.is_some() { k2 + 1 >= *k } else { k2 >= k }),
+        // p + k grows without bound in p alone.
+        Some(p) => fb.iter().any(|(q, k2)| *q == Some(*p) && k2 >= k),
+    })
+}
+
+/// Whether a and b are equal for every assignment of natural numbers to
+/// the parameters: the levels' meaning in Lean's type theory. Decided by
+/// splitting on which parameters are zero, which removes every `imax`,
+/// and comparing the maxima that remain. Lean's kernel decides a
+/// sufficient condition (`is_equivalent`, normal forms whose order of
+/// parameters follows their names); this is complete.
+pub fn same_value(a: &Level, b: &Level) -> bool {
+    if equivalent(a, b) {
+        return true;
+    }
+    let mut ps = vec![];
+    params_of(a, &mut ps);
+    params_of(b, &mut ps);
+    if ps.len() > 16 {
+        return false;
+    }
+    (0u32..1 << ps.len()).all(|mask| {
+        let zero: Vec<u32> = ps.iter().enumerate().filter(|(i, _)| mask >> i & 1 == 1).map(|(_, p)| *p).collect();
+        leq_at(a, b, &zero) && leq_at(b, a, &zero)
+    })
+}
+
+#[cfg(test)]
+mod value_tests {
+    use super::*;
+
+    #[test]
+    fn levels_equal_for_every_assignment() {
+        let (u, v) = (Param(0), Param(1));
+        let su = u.clone().succ();
+        let sv = v.clone().succ();
+        // Lean's is_equivalent misses this one: imax with a successor.
+        let m = Level::max(sv.clone(), su.clone());
+        let i = Level::imax(sv.clone(), su.clone());
+        assert!(!equivalent(&m, &i) && same_value(&m, &i));
+        assert!(same_value(&Level::imax(u.clone(), Zero), &Zero));
+        assert!(same_value(&Level::max(u.clone(), Zero), &u));
+        assert!(!same_value(&Level::imax(u.clone(), v.clone()), &Level::max(u.clone(), v.clone())));
+        assert!(!same_value(&u, &v));
+        assert!(!same_value(&u, &Zero.succ()));
+        assert!(same_value(&Level::max(Zero.succ(), su.clone()), &su));
+        assert!(!same_value(&Level::max(Zero.succ().succ(), su.clone()), &su));
+    }
+}

@@ -3,7 +3,7 @@
 //! compared by fingerprint.
 
 use crate::fp::{Field, Id, Point, limbs};
-use crate::level::{Level, equivalent};
+use crate::level::{Level, same_value};
 use crate::tables::*;
 
 /// Numbers each term row carries, computed from its children.
@@ -385,7 +385,7 @@ impl<'a> Checker<'a> {
             }
             (Fact::LInst { e, ls, r }, rule) => self.level_substitution(i, e, ls, r, rule),
             (Fact::LInstL { l, ls, r }, rule) => self.level_substitution_level(i, l, ls, r, rule),
-            (Fact::LEq { l, m }, LEqNorm) => need(equivalent(&self.level(l)?, &self.level(m)?), "the levels differ"),
+            (Fact::LEq { l, m }, LEqNorm) => need(same_value(&self.level(l)?, &self.level(m)?), "the levels differ"),
             (f, r) => Err(format!("{r:?} does not conclude {f:?}")),
         }
     }
@@ -452,17 +452,20 @@ impl<'a> Checker<'a> {
             }
             (TermRow::Pi(a, b), Pi) => {
                 let u = self.sort_of(t)?;
-                let LevelRow::IMax(l1, l2) = self.t.levels[u as usize] else { return Err("not an imax".into()) };
                 let (a3, s) = self.infer(i, 0, g)?;
                 let (s2, sort) = self.eq(i, 1, g)?;
-                need(self.same(a, a3) && self.same(s, s2) && self.same_level(self.sort_of(sort)?, l1), "premises")?;
+                need(self.same(a, a3) && self.same(s, s2), "premises")?;
+                let l1 = self.sort_of(sort)?;
                 let n = self.n(g);
                 let fvar = self.find_fvar(i, n)?;
                 let bo = self.inst(i, 2, b, 0, fvar)?;
                 let (ext, bo2, s3) = self.infer_ext(i, 3, g, a, fvar)?;
                 let (s4, sort2) = self.eq(i, 4, ext)?;
                 need(self.same(bo, bo2) && self.same(s3, s4), "premises")?;
-                need(self.same_level(self.sort_of(sort2)?, l2), "the codomain's sort")?;
+                let l2 = self.sort_of(sort2)?;
+                // Lean's `infer_pi` builds the universe with `mk_imax`.
+                let r = crate::level::lean_imax(&self.level(l1)?, &self.level(l2)?);
+                need(self.level(u)? == r, "the pi's universe is not Lean's")?;
                 need(self.meta[b as usize].fv <= n, "the variable occurs already")
             }
             (TermRow::Let(a, v, b), Let) => {
@@ -520,7 +523,8 @@ impl<'a> Checker<'a> {
         let (e3, se) = self.infer(i, 2, g)?;
         let (se2, sort) = self.eq(i, 3, g)?;
         need(self.same(x, x2) && self.same(e, e2) && self.same(e, e3) && self.same(se, se2), "premises")?;
-        let is_prop = equivalent(&self.level(self.sort_of(sort)?)?, &Level::Zero);
+        // Lean's `is_prop`: the type's sort is `Sort 0` itself.
+        let is_prop = self.t.levels[self.sort_of(sort)? as usize] == LevelRow::Zero;
         let (head, ps) = self.spine(iapp)?;
         let TermRow::Const(d, ls) = *self.term(head)? else { return Err("the type is not an inductive type".into()) };
         let induct = &self.t.decls[d as usize];

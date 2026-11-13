@@ -10,7 +10,7 @@ use crate::tables::*;
 use std::collections::HashMap;
 
 impl Builder {
-    fn level_row(&mut self, l: &Level) -> Ix {
+    pub(crate) fn level_row(&mut self, l: &Level) -> Ix {
         let r = match l {
             Level::Zero => LevelRow::Zero,
             Level::Succ(a) => LevelRow::Succ(self.level_row(a)),
@@ -22,8 +22,8 @@ impl Builder {
     }
 
     /// The row of e; the constants it names are cited.
-    pub(crate) fn row_of(&mut self, e: &X) -> Res<Ix> {
-        let d = |b: &Builder, k: &Key| b.decls.get(k).copied().ok_or_else(|| "a constant is not cited".to_string());
+    pub fn row_of(&mut self, e: &X) -> Res<Ix> {
+        let d = |b: &mut Builder, k: &Key| b.cite(k);
         let r = match &**e {
             E::BVar(n) => TermRow::BVar(*n),
             E::FVar(n) => TermRow::FVar(*n),

@@ -77,12 +77,15 @@ kind and its children's rows:
 | `imax l m` | l, m |
 | `param i` | i, the position in the declaration's parameter list |
 
-`LEq(l, m)` holds when both have the same normal form, given by `LNorm(l,
-n)` rows that follow Lean's level normalization (kernel/level.cpp): a
-normal form is a sorted list of distinct `succ^k` of `zero`, a parameter or
-an `imax` that cannot be resolved, with subsumed entries removed. `imax l
-m` resolves to `zero` when m normalizes to `zero`, to `max l m` when m is a
-successor, and stays otherwise. Every `param i` has i below the number of
+`LEq(l, m)` holds when l and m are equal for every assignment of natural
+numbers to the parameters, which is what levels mean in Lean's type theory
+(and in Lean4Lean's). The checker decides it by splitting on which
+parameters are zero, which removes every `imax`, and comparing the maxima of
+`p + k` and constants that remain. Lean's kernel decides only a sufficient
+condition (`is_equivalent`: equal normal forms, with parameters ordered by
+name), and it can miss an equality such as `max (v+1) (u+1) = imax (v+1)
+(u+1)` on a term it never compares; a checker that checks every subterm
+meets such terms, so it uses the complete test. Every `param i` has i below the number of
 the declaration's level parameters.
 
 ## Contexts
@@ -141,7 +144,8 @@ same table, found by lookup.
   `Eq(G, S, sort u)`, `Inst(b, 0, fvar n, b_o)`,
   `Infer(ctx(G, A), b_o, B_o)` and `Inst(B, 0, fvar n, B_o)` with
   `fv(B) <= n`, n the length of G.
-- **pi**: `Infer(G, pi A B, sort (imax u v))` from `Infer(G, A, S)`,
+- **pi**: `Infer(G, pi A B, sort w)` with w = `mk_imax(u, v)`, Lean's
+  simplification of `imax u v` (kernel/level.cpp), as `infer_pi` builds it, from `Infer(G, A, S)`,
   `Eq(G, S, sort u)`, `Inst(B, 0, fvar n, B_o)`,
   `Infer(ctx(G, A), B_o, S')` and `Eq(ctx(G, A), S', sort v)`.
 - **let**: `Infer(G, let A v b, T)` from `Infer(G, A, S)`,

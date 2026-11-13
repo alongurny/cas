@@ -299,3 +299,100 @@ impl Env {
         Ok(x)
     }
 }
+
+// ---- As the prover's source of constants ----
+
+use crate::derive::{Cited, Hint as BHint, Source};
+use crate::tables::{DeclKind, Info, Prim};
+
+fn prim_named(name: &str) -> Option<Prim> {
+    use Prim::*;
+    Some(match name {
+        "Nat" => Nat,
+        "Nat.zero" => NatZero,
+        "Nat.succ" => NatSucc,
+        "Nat.add" => NatAdd,
+        "Nat.sub" => NatSub,
+        "Nat.mul" => NatMul,
+        "Nat.pow" => NatPow,
+        "Nat.gcd" => NatGcd,
+        "Nat.mod" => NatMod,
+        "Nat.div" => NatDiv,
+        "Nat.beq" => NatBeq,
+        "Nat.ble" => NatBle,
+        "Nat.land" => NatLand,
+        "Nat.lor" => NatLor,
+        "Nat.xor" => NatXor,
+        "Nat.shiftLeft" => NatShiftLeft,
+        "Nat.shiftRight" => NatShiftRight,
+        "Bool.true" => BoolTrue,
+        "Bool.false" => BoolFalse,
+        "String" => String,
+        "String.mk" => StringMk,
+        "Char" => Char,
+        "Char.ofNat" => CharOfNat,
+        "List.nil" => ListNil,
+        "List.cons" => ListCons,
+        _ => return None,
+    })
+}
+
+impl Env {
+    /// The kind and information of a declaration as rows hold them.
+    pub fn kind_info(&self, d: &Decl) -> (DeclKind, Info) {
+        let keys = |ns: &[u32]| ns.iter().map(|n| self.key(*n)).collect::<Vec<_>>();
+        match &d.kind {
+            Kind::Axiom => (DeclKind::Axiom, Info::None),
+            Kind::Def { .. } => (DeclKind::Definition, Info::None),
+            Kind::Thm { .. } => (DeclKind::Theorem, Info::None),
+            Kind::Opaque { .. } => (DeclKind::Opaque, Info::None),
+            Kind::Quot(k) => (DeclKind::Quot, Info::Quot(*k)),
+            Kind::Induct { params, indices, rec, all, ctors, .. } => (
+                DeclKind::Inductive,
+                Info::Induct { params: *params, indices: *indices, ctors: keys(ctors), recursive: *rec, all: keys(all) },
+            ),
+            Kind::Ctor { induct, params, fields, .. } => {
+                (DeclKind::Constructor, Info::Ctor { induct: self.key(*induct), params: *params, fields: *fields })
+            }
+            Kind::Rec { params, indices, motives, minors, .. } => (
+                DeclKind::Recursor,
+                Info::Rec { params: *params, motives: *motives, minors: *minors, indices: *indices, rules: vec![] },
+            ),
+        }
+    }
+
+    /// The value of a definition, theorem or opaque declaration.
+    pub fn value_of(d: &Decl) -> Option<u32> {
+        match d.kind {
+            Kind::Def { value, .. } | Kind::Thm { value } | Kind::Opaque { value } => Some(value),
+            _ => None,
+        }
+    }
+}
+
+impl Source for Env {
+    fn cite(&self, key: &Key) -> Option<Cited> {
+        let d = self.by_key(key)?;
+        let mut memo = HashMap::new();
+        let ty = self.term(d.ty, &d.lparams, &mut memo).ok()?;
+        let (kind, info) = self.kind_info(d);
+        // An opaque declaration's value is never unfolded.
+        let value = match d.kind {
+            Kind::Def { value, .. } | Kind::Thm { value } => Some(self.term(value, &d.lparams, &mut memo).ok()?),
+            _ => None,
+        };
+        let hint = match d.kind {
+            Kind::Def { hint: Hint::Abbrev, .. } => BHint::Abbrev,
+            Kind::Def { hint: Hint::Regular(h), .. } => BHint::Regular(h),
+            _ => BHint::Opaque,
+        };
+        let rules = match &d.kind {
+            Kind::Rec { rules, .. } => rules
+                .iter()
+                .map(|(c, n, rhs)| Some((self.key(*c), *n, self.term(*rhs, &d.lparams, &mut memo).ok()?)))
+                .collect::<Option<Vec<_>>>()?,
+            _ => vec![],
+        };
+        Some(Cited { kind, levels: d.lparams.len() as u32, ty, value, hint, info, rules, prim: prim_named(&self.name(d.name)) })
+    }
+}

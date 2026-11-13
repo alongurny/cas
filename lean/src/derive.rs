@@ -7,9 +7,12 @@
 //! here to produce tables for tests and to count rows, not to be fast.
 
 mod block;
+mod kernel;
+mod source;
+pub use source::{Cited, Hint, Source, compare};
 mod nested;
 
-use crate::level::{Level, equivalent};
+use crate::level::{Level, same_value};
 use crate::nat;
 use crate::tables::*;
 use num_bigint::BigUint;
@@ -37,6 +40,16 @@ pub struct Builder {
     /// For tests only: write tables that project data out of a
     /// proposition, which the checker must refuse.
     pub lax: bool,
+    pub source: Option<std::rc::Rc<dyn Source>>,
+    /// For measurements: give up (by panicking) after this many rows; 0 is
+    /// no limit.
+    pub budget: usize,
+    hints: HashMap<Ix, Hint>,
+    whnf_core_cache: HashMap<(Ix, Ix), (Ix, Ix)>,
+    whnf_cache: HashMap<(Ix, Ix), (Ix, Ix)>,
+    failures: std::collections::HashSet<(Ix, Ix, Ix)>,
+    depth: u32,
+    pending: HashMap<Ix, crate::expr::X>,
 }
 
 pub type Res<T> = Result<T, String>;
@@ -178,6 +191,9 @@ impl Builder {
     fn add(&mut self, fact: Fact, rule: Rule, premises: Vec<Ix>) -> Ix {
         if let Some(i) = self.facts.get(&fact) {
             return *i;
+        }
+        if self.budget > 0 && self.t.rows.len() >= self.budget {
+            panic!("cas-lean: row budget exhausted");
         }
         let i = self.t.rows.len() as Ix;
         self.t.rows.push(Row { fact, rule, premises });
@@ -344,7 +360,7 @@ impl Builder {
     }
 
     pub fn leq(&mut self, l: Ix, m: Ix) -> Option<Ix> {
-        equivalent(&self.to_level(l), &self.to_level(m)).then(|| self.add(Fact::LEq { l, m }, Rule::LEqNorm, vec![]))
+        same_value(&self.to_level(l), &self.to_level(m)).then(|| self.add(Fact::LEq { l, m }, Rule::LEqNorm, vec![]))
     }
 
     // ---- Contexts ----
@@ -487,7 +503,7 @@ impl Builder {
         let ikey = self.t.decls[i as usize].key;
         if is_prop {
             let [rule] = rules else { return None };
-            let c = *self.decls.get(&rule.ctor)?;
+            let c = self.cite(&rule.ctor).ok()?;
             let Info::Ctor { params, fields: 0, .. } = self.t.decls[c as usize].info else { return None };
             let head = self.term(TermRow::Const(c, ls));
             let built = self.apps(head, iargs.get(..params as usize)?);
@@ -649,189 +665,12 @@ impl Builder {
         Some((self.trans(cong, s), r))
     }
 
-    /// A literal against a constructor application (`Nat.zero`,
-    /// `Nat.succ x`, `String.mk l`): the literal is written as one.
-    fn lit_vs_ctor(&mut self, g: Ix, a: Ix, b: Ix) -> Res<Option<Ix>> {
-        let (h, _) = self.spine(b);
-        if !matches!(self.prim_of(h), Some(Prim::NatZero | Prim::NatSucc | Prim::StringMk)) {
-            return Ok(None);
-        }
-        let Some((p, c)) = self.lit_as_ctor(g, a) else { return Ok(None) };
-        let Some(q) = self.defeq_whnf(g, c, b)? else { return Ok(None) };
-        Ok(Some(self.trans(p, q)))
-    }
-
-    fn step(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
-        if let Some(r) = self.iota(g, e) {
-            return Some(r);
-        }
-        if let Some(r) = self.quot(g, e) {
-            return Some(r);
-        }
-        if let Some(r) = self.nat_step(g, e) {
-            return Some(r);
-        }
-        match self.t.terms[e as usize].clone() {
-            TermRow::App(f, x) => {
-                if let TermRow::Lam(_, body) = self.t.terms[f as usize] {
-                    let (p, r) = self.inst(body, 0, x);
-                    return Some((self.add(Fact::Eq { g, a: e, b: r }, Rule::Beta, vec![p]), r));
-                }
-                let (p, f2) = self.step(g, f)?;
-                let e2 = self.app(f2, x);
-                let rx = self.refl(g, x);
-                Some((self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongApp, vec![p, rx]), e2))
-            }
-            TermRow::Const(d, ls) => {
-                let decl = self.t.decls[d as usize].clone();
-                if !matches!(decl.kind, DeclKind::Definition | DeclKind::Theorem) {
-                    return None;
-                }
-                let v = decl.value?;
-                let (prem, r) = if decl.levels == 0 {
-                    (vec![], v)
-                } else {
-                    let (p, r) = self.linst(v, ls);
-                    (vec![p], r)
-                };
-                Some((self.add(Fact::Eq { g, a: e, b: r }, Rule::Delta, prem), r))
-            }
-            TermRow::Let(_, v, body) => {
-                let (p, r) = self.inst(body, 0, v);
-                Some((self.add(Fact::Eq { g, a: e, b: r }, Rule::Zeta, vec![p]), r))
-            }
-            TermRow::Proj(s, idx, x) => {
-                let (p, x2) = self.whnf(g, x);
-                let (h, args) = self.spine(x2);
-                let TermRow::Const(c, _) = self.t.terms[h as usize] else { return None };
-                let Info::Ctor { params, fields, .. } = self.t.decls[c as usize].info else { return None };
-                if args.len() != (params + fields) as usize || idx >= fields {
-                    return None;
-                }
-                let e2 = self.term(TermRow::Proj(s, idx, x2));
-                let cong = if x2 == x {
-                    self.refl(g, e)
-                } else {
-                    self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongProj, vec![p])
-                };
-                let r = args[(params + idx) as usize];
-                let pc = self.add(Fact::Eq { g, a: e2, b: r }, Rule::ProjCtor, vec![]);
-                Some((self.trans(cong, pc), r))
-            }
-            _ => None,
-        }
-    }
-
-    /// The weak head normal form of `e`, and a row `Eq(g, e, w)`.
-    pub fn whnf(&mut self, g: Ix, e: Ix) -> (Ix, Ix) {
-        let mut proof = self.refl(g, e);
-        let mut cur = e;
-        while let Some((p, next)) = self.step(g, cur) {
-            proof = self.trans(proof, p);
-            cur = next;
-        }
-        (proof, cur)
-    }
-
-    /// A row `Eq(g, a, b)`, if they are definitionally equal.
-    pub fn defeq(&mut self, g: Ix, a: Ix, b: Ix) -> Res<Option<Ix>> {
-        if a == b {
-            return Ok(Some(self.refl(g, a)));
-        }
-        if let Some(i) = self.facts.get(&Fact::Eq { g, a, b }) {
-            return Ok(Some(*i));
-        }
-        if let Some(p) = self.proof_irrel(g, a, b)? {
-            return Ok(Some(p));
-        }
-        let ((pa, wa), (pb, wb)) = (self.whnf(g, a), self.whnf(g, b));
-        let Some(core) = self.defeq_whnf(g, wa, wb)? else { return Ok(None) };
-        let sb = self.symm(pb);
-        let r = self.trans(core, sb);
-        Ok(Some(self.trans(pa, r)))
-    }
-
-    fn proof_irrel(&mut self, g: Ix, a: Ix, b: Ix) -> Res<Option<Ix>> {
-        let (p0, ta) = self.infer(g, a)?;
-        let (p3, s) = self.infer(g, ta)?;
-        let (p4, z) = self.whnf(g, s);
-        let TermRow::Sort(l) = self.t.terms[z as usize] else { return Ok(None) };
-        if self.t.levels[l as usize] != LevelRow::Zero {
-            return Ok(None);
-        }
-        let (p1, tb) = self.infer(g, b)?;
-        let Some(p2) = self.defeq(g, ta, tb)? else { return Ok(None) };
-        Ok(Some(self.add(Fact::Eq { g, a, b }, Rule::ProofIrrel, vec![p0, p1, p2, p3, p4])))
-    }
-
-    fn defeq_whnf(&mut self, g: Ix, a: Ix, b: Ix) -> Res<Option<Ix>> {
-        if a == b {
-            return Ok(Some(self.refl(g, a)));
-        }
-        let (ta, tb) = (self.t.terms[a as usize].clone(), self.t.terms[b as usize].clone());
-        let fact = Fact::Eq { g, a, b };
-        let r = match (ta, tb) {
-            (TermRow::Sort(l), TermRow::Sort(m)) => self.leq(l, m).map(|p| self.add(fact, Rule::CongSort, vec![p])),
-            (TermRow::Const(d, ls), TermRow::Const(d2, ms))
-                if self.t.decls[d as usize].key == self.t.decls[d2 as usize].key =>
-            {
-                let (ls, ms) = (self.levels_of(ls), self.levels_of(ms));
-                let mut prem = vec![];
-                for (l, m) in ls.iter().zip(&ms) {
-                    match self.leq(*l, *m) {
-                        Some(p) => prem.push(p),
-                        None => return Ok(None),
-                    }
-                }
-                Some(self.add(fact, Rule::CongConst, prem))
-            }
-            (TermRow::App(f, x), TermRow::App(f2, x2)) => {
-                let (Some(p), Some(q)) = (self.defeq(g, f, f2)?, self.defeq(g, x, x2)?) else { return Ok(None) };
-                Some(self.add(fact, Rule::CongApp, vec![p, q]))
-            }
-            (TermRow::Lam(d1, b1), TermRow::Lam(d2, b2)) | (TermRow::Pi(d1, b1), TermRow::Pi(d2, b2)) => {
-                let rule =
-                    if matches!(self.t.terms[a as usize], TermRow::Lam(..)) { Rule::CongLam } else { Rule::CongPi };
-                let Some(p) = self.defeq(g, d1, d2)? else { return Ok(None) };
-                let (ext, fvar, q1, o1) = self.open(g, d1, b1);
-                let (q2, o2) = self.inst(b2, 0, fvar);
-                let Some(r) = self.defeq(ext, o1, o2)? else { return Ok(None) };
-                Some(self.add(fact, rule, vec![p, q2, q1, r]))
-            }
-            (TermRow::Proj(s, n, x), TermRow::Proj(s2, n2, y))
-                if n == n2 && self.t.decls[s as usize].key == self.t.decls[s2 as usize].key =>
-            {
-                self.defeq(g, x, y)?.map(|p| self.add(fact, Rule::CongProj, vec![p]))
-            }
-            (TermRow::Lam(d, _), _) => self.eta(g, a, d, b)?,
-            (_, TermRow::Lam(d, _)) => self.eta(g, b, d, a)?.map(|p| self.symm(p)),
-            _ => None,
-        };
-        if r.is_some() {
-            return Ok(r);
-        }
-        if let Some(p) = self.lit_vs_ctor(g, a, b)? {
-            return Ok(Some(p));
-        }
-        if let Some(p) = self.lit_vs_ctor(g, b, a)? {
-            return Ok(Some(self.symm(p)));
-        }
-        if let Some(p) = self.eta_struct(g, a, b)? {
-            return Ok(Some(p));
-        }
-        if let Some(p) = self.eta_struct(g, b, a)? {
-            return Ok(Some(self.symm(p)));
-        }
-        self.unit_like(g, a, b)
-    }
 
     /// The constructor row of a structure-like type with this key.
-    fn structure_ctor(&self, induct: &Key) -> Option<Ix> {
-        let d = &self.t.decls[*self.decls.get(induct)? as usize];
-        match &d.info {
-            Info::Induct { indices: 0, ctors, recursive: false, .. } if ctors.len() == 1 => {
-                self.decls.get(&ctors[0]).copied()
-            }
+    fn structure_ctor(&mut self, induct: &Key) -> Option<Ix> {
+        let d = self.cite(induct).ok()?;
+        match self.t.decls[d as usize].info.clone() {
+            Info::Induct { indices: 0, ctors, recursive: false, .. } if ctors.len() == 1 => self.cite(&ctors[0]).ok(),
             _ => None,
         }
     }
@@ -845,7 +684,7 @@ impl Builder {
         if self.structure_ctor(&induct).is_none() || args.len() != (params + fields) as usize {
             return Ok(None);
         }
-        let d = self.decls[&induct];
+        let d = self.cite(&induct)?;
         let (p0, ty_t) = self.infer(g, t)?;
         let (p1, ty_s) = self.infer(g, s)?;
         let Some(p2) = self.defeq(g, ty_t, ty_s)? else { return Ok(None) };
@@ -929,7 +768,9 @@ impl Builder {
                     return Err("applying a non-function".into());
                 };
                 let (p2, at) = self.infer(g, a)?;
-                let p3 = self.defeq(g, at, dom)?.ok_or("the argument's type is not the domain")?;
+                let Some(p3) = self.defeq(g, at, dom)? else {
+                    return Err(format!("the argument's type is not the domain: {} =?= {} in {} applied to {}", self.show(at), self.show(dom), self.show(f), self.show(a)));
+                };
                 let (p4, t) = self.inst(cod, 0, a);
                 (Rule::App, vec![p0, p1, p2, p3, p4], t)
             }
@@ -949,7 +790,8 @@ impl Builder {
                 let (ext, _, p2, bo) = self.open(g, a, b);
                 let (p3, s2) = self.infer(ext, bo)?;
                 let (p4, _, v) = self.sort_whnf(ext, s2)?;
-                let l = self.level(LevelRow::IMax(u, v));
+                let l = crate::level::lean_imax(&self.to_level(u), &self.to_level(v));
+                let l = self.level_row(&l);
                 (Rule::Pi, vec![p0, p1, p2, p3, p4], self.sort(l))
             }
             TermRow::Let(a, v, b) => {
@@ -987,7 +829,7 @@ impl Builder {
         let (p1, iapp) = self.whnf(g, e);
         let (p2, se) = self.infer(g, e)?;
         let (p3, _, l) = self.sort_whnf(g, se)?;
-        let is_prop = equivalent(&self.to_level(l), &Level::Zero);
+        let is_prop = self.t.levels[l as usize] == LevelRow::Zero;
         let (head, ps) = self.spine(iapp);
         let TermRow::Const(d, ls) = self.t.terms[head as usize] else { return Err("not a structure".into()) };
         let induct = self.t.decls[d as usize].clone();
@@ -995,7 +837,7 @@ impl Builder {
         if induct.key != self.t.decls[s as usize].key || ctors.len() != 1 {
             return Err("not the structure projected".into());
         }
-        let c = *self.decls.get(&ctors[0]).ok_or("the constructor is not cited")?;
+        let c = self.cite(&ctors[0])?;
         let (p4, mut r) = self.linst(self.t.decls[c as usize].ty, ls);
         let mut prem = vec![p0, p1, p2, p3, p4];
         let pi = |b: &mut Builder, prem: &mut Vec<Ix>, r: Ix| -> Res<(Ix, Ix)> {
