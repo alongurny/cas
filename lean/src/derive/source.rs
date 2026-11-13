@@ -4,8 +4,8 @@
 //! unfolded.
 
 use super::{Builder, Res};
+use crate::derivation::*;
 use crate::expr::X;
-use crate::tables::*;
 
 /// Lean's reducibility hint of a definition; anything else is opaque.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

@@ -1,6 +1,6 @@
 //! Summarizes a measurement of Lean declarations (lean/measure): the
-//! terms each declaration's tables hold and the kernel steps its check
-//! takes, which is about the judgement rows a table proof would need.
+//! terms each declaration's derivation holds and the kernel steps its check
+//! takes, which is about the judgement rows a derivation would need.
 //!
 //! Usage: `cargo run --release -p cas-lean --example summary <out-dir>`
 //! where the directory holds `terms.tsv` and `kstats.tsv`.

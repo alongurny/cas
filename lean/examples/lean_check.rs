@@ -1,7 +1,7 @@
 //! Proves and checks Lean declarations from an export of
 //! `measure/Export.lean`: for each axiom, definition, theorem and opaque
 //! declaration, the builder cites what it needs from the export, writes
-//! the tables, and the checker checks them. One line per declaration on
+//! the derivation, and the checker checks it. One line per declaration on
 //! stdout: name, kind, status, rows, terms, milliseconds, message. Unsafe
 //! declarations are skipped: Lean's kernel does not fully check them.
 //!
@@ -11,9 +11,9 @@
 //! block instead: checked, and its recursors compared with Lean's.
 
 use cas_lean::Checker;
+use cas_lean::derivation::Key;
 use cas_lean::derive::{Builder, Cited, Source};
 use cas_lean::import::{Env, Kind};
-use cas_lean::tables::Key;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -125,7 +125,7 @@ fn block(env: &Arc<Env>, i: usize, budget: usize) -> (String, usize, usize, Stri
                 ));
             }
             let Kind::Rec { rules, .. } = &ld.kind else { unreachable!() };
-            let cas_lean::tables::Info::Rec { rules: built, .. } = b.t.decls[*r as usize].info.clone() else {
+            let cas_lean::derivation::Info::Rec { rules: built, .. } = b.t.decls[*r as usize].info.clone() else {
                 unreachable!()
             };
             for ((c, n, rhs), br) in rules.iter().zip(&built) {

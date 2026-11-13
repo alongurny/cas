@@ -3,8 +3,8 @@
 //! checker (`crate::block`) consults it, and the recursors built.
 
 use super::{Builder, Res};
+use crate::derivation::*;
 use crate::level::{Level, equivalent, geq};
-use crate::tables::*;
 
 /// Free variables the recursor's construction binds and no context holds:
 /// motives, minor premises, the major premise and induction hypotheses.
@@ -139,7 +139,7 @@ impl Builder {
     /// Checks the inductive block whose types are the cited rows `types`
     /// (each of kind inductive, its constructors cited as constructor rows
     /// and named in `ctors`), sets their information, cites the recursors
-    /// under `rec_keys` and returns the goal the tables establish.
+    /// under `rec_keys` and returns the goal the derivation establishes.
     pub fn inductive_block(
         &mut self,
         levels: u32,

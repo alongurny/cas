@@ -1,6 +1,6 @@
-# Measuring Lean declarations for table proofs
+# Measuring Lean declarations for derivations
 
-How much a table proof of a Lean declaration has to hold (spec/lean/tables.md):
+How much a derivation of a Lean declaration has to hold (spec/lean/derivation.md):
 the terms of each declaration, and the steps Lean's kernel takes to check it,
 each of which becomes about one judgement row.
 

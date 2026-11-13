@@ -1,10 +1,10 @@
-//! The table checker (spec/lean/tables.md): every row is checked against
+//! The derivation checker (spec/lean/derivation.md): every row is checked against
 //! its own fields and the rows it names, and nothing else. Terms are
 //! compared by fingerprint.
 
+use crate::derivation::*;
 use crate::fp::{Field, Id, Point, limbs};
 use crate::level::{Level, same_value};
-use crate::tables::*;
 
 /// Numbers each term row carries, computed from its children.
 #[derive(Clone, Copy, Debug, Default)]
@@ -18,7 +18,7 @@ struct Meta {
 }
 
 pub struct Checker<'a> {
-    pub(crate) t: &'a Tables,
+    pub(crate) t: &'a Derivation,
     /// How many level parameters the declarations being checked have.
     pub(crate) levels: u32,
     pub(crate) point: Point,
@@ -38,15 +38,15 @@ pub(crate) fn need(ok: bool, what: &str) -> R {
 }
 
 impl<'a> Checker<'a> {
-    /// The ids of all rows, from a point drawn from the tables and the goal,
+    /// The ids of all rows, from a point drawn from the derivation and the goal,
     /// and every judgement row checked.
-    pub(crate) fn new(tables: &'a Tables, levels: u32, goal: &str) -> Result<Checker<'a>, String> {
+    pub(crate) fn new(derivation: &'a Derivation, levels: u32, goal: &str) -> Result<Checker<'a>, String> {
         let mut commit = blake3::Hasher::new();
-        commit.update(&tables.commitment());
+        commit.update(&derivation.commitment());
         commit.update(goal.as_bytes());
         let point = Point::from_commitment(commit.finalize().as_bytes());
         let mut c = Checker {
-            t: tables,
+            t: derivation,
             levels,
             point,
             lid: vec![],
@@ -58,15 +58,17 @@ impl<'a> Checker<'a> {
             clen: vec![],
         };
         c.ids()?;
-        for i in 0..tables.rows.len() {
-            c.row(i).map_err(|e| format!("row {i} ({:?} by {:?}): {e}", tables.rows[i].fact, tables.rows[i].rule))?;
+        for i in 0..derivation.rows.len() {
+            c.row(i).map_err(|e| {
+                format!("row {i} ({:?} by {:?}): {e}", derivation.rows[i].fact, derivation.rows[i].rule)
+            })?;
         }
         Ok(c)
     }
 
-    /// Checks `goal` against `tables`.
-    pub fn check(tables: &'a Tables, goal: &'a Goal) -> R {
-        let c = Checker::new(tables, goal.levels, &format!("{goal:?}"))?;
+    /// Checks `goal` against `derivation`.
+    pub fn check(derivation: &'a Derivation, goal: &'a Goal) -> R {
+        let c = Checker::new(derivation, goal.levels, &format!("{goal:?}"))?;
         c.goal(goal).map_err(|e| format!("goal: {e}"))
     }
 

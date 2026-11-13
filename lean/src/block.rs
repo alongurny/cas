@@ -1,4 +1,4 @@
-//! The check of an inductive block (spec/lean/tables.md, "inductive
+//! The check of an inductive block (spec/lean/derivation.md, "inductive
 //! block"): Lean's `add_inductive` (kernel/inductive.cpp) run with every
 //! `whnf`, `infer`, `instantiate` and `is_def_eq` it makes answered by the
 //! next row of the goal's tape, whose own check is that of any row. The
@@ -7,14 +7,14 @@
 //! mutual one first (crate::nested); see `check_nested`.
 
 use crate::check::{Checker, R, need};
+use crate::derivation::*;
 use crate::fp::{Field, Id, limbs};
 use crate::level::{Level, equivalent, geq};
-use crate::tables::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 /// A variable of the terms the check builds: a free variable of the
-/// tables' contexts, or one of the recursor's motives, minor premises or
+/// derivation's contexts, or one of the recursor's motives, minor premises or
 /// its major premise, which have no context of their own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Var {
@@ -57,7 +57,7 @@ fn binds(pi: bool, vars: &[(Var, V)], body: V) -> V {
     })
 }
 
-/// A free variable of the tables, with the term row that is it and its type.
+/// A free variable of the derivation, with the term row that is it and its type.
 #[derive(Clone, Copy, Debug)]
 struct Fv {
     n: u32,
@@ -104,22 +104,22 @@ struct Block<'c, 'a> {
 
 impl<'a> Checker<'a> {
     /// Checks that `goal`'s rows are the inductive block Lean's kernel adds.
-    pub fn check_block(tables: &'a Tables, goal: &'a BlockGoal) -> R {
-        let c = Checker::new(tables, goal.levels, &format!("{goal:?}"))?;
+    pub fn check_block(derivation: &'a Derivation, goal: &'a BlockGoal) -> R {
+        let c = Checker::new(derivation, goal.levels, &format!("{goal:?}"))?;
         c.block(goal)
     }
 
     /// Checks the block `goal` with the rows' ids already computed.
     pub(crate) fn block<'c>(&'c self, goal: &'c BlockGoal) -> R {
         let c = self;
-        let tables = c.t;
+        let derivation = c.t;
         let mut by_tid = HashMap::new();
         for (i, id) in c.tid.iter().enumerate() {
             by_tid.entry(*id).or_insert(i as Ix);
         }
         let mut ctx_by = HashMap::new();
         let mut empty = None;
-        for (i, g) in tables.ctxs.iter().enumerate() {
+        for (i, g) in derivation.ctxs.iter().enumerate() {
             match g {
                 CtxRow::Empty => empty = Some(i as Ix),
                 CtxRow::Push(q, a) => {
@@ -146,7 +146,7 @@ impl<'a> Checker<'a> {
 }
 
 impl Block<'_, '_> {
-    fn t(&self) -> &Tables {
+    fn t(&self) -> &Derivation {
         self.c.t
     }
     fn term(&self, e: Ix) -> &TermRow {
@@ -691,8 +691,8 @@ impl<'a> Checker<'a> {
     /// kernel adds: its mutual block is `elim` of its types and
     /// constructors and checks as a block, and the types' information,
     /// the constructors and the recursors are that block's restored.
-    pub fn check_nested(tables: &'a Tables, goal: &'a NestedGoal) -> R {
-        let c = Checker::new(tables, goal.levels, &format!("{goal:?}"))?;
+    pub fn check_nested(derivation: &'a Derivation, goal: &'a NestedGoal) -> R {
+        let c = Checker::new(derivation, goal.levels, &format!("{goal:?}"))?;
         c.nested(goal).map_err(|e| format!("nested block: {e}"))
     }
 

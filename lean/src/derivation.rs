@@ -1,4 +1,4 @@
-//! The tables a prover writes (spec/lean/tables.md). Rows refer to other
+//! The derivation a prover writes, as tables of rows (spec/lean/derivation.md). Rows refer to other
 //! rows by their position, and only to rows before them, so every table is
 //! acyclic by construction. Equality of two terms is equality of their ids,
 //! which the checker computes after drawing the random point.
@@ -220,9 +220,9 @@ pub struct Goal {
     pub is_prop: Option<Ix>,
 }
 
-/// All tables of one declaration's check.
+/// The derivation of one declaration's check: all its tables.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Tables {
+pub struct Derivation {
     pub levels: Vec<LevelRow>,
     pub lists: Vec<ListRow>,
     pub terms: Vec<TermRow>,
@@ -235,8 +235,8 @@ pub struct Tables {
     pub prims: Vec<(Prim, Ix)>,
 }
 
-impl Tables {
-    /// A commitment to the tables, from which the random point is drawn.
+impl Derivation {
+    /// A commitment to the derivation, from which the random point is drawn.
     pub fn commitment(&self) -> [u8; 32] {
         // Any injective encoding will do natively; Debug output is one.
         *blake3::hash(format!("{self:?}").as_bytes()).as_bytes()
@@ -291,7 +291,7 @@ pub struct BlockGoal {
     pub tape: Vec<Ix>,
 }
 
-/// What a nested inductive block's check establishes (spec/lean/tables.md,
+/// What a nested inductive block's check establishes (spec/lean/derivation.md,
 /// "nested inductive blocks"): `aux` is the mutual block Lean's kernel
 /// makes of it, checked as any block, and the types, constructors and
 /// recursors given are that block's rewritten back.
@@ -319,7 +319,7 @@ pub fn lean_key(name: &str) -> Key {
     *h.finalize().as_bytes()
 }
 
-impl Tables {
+impl Derivation {
     /// Lean's `consumeTypeAnnotations`, which its kernel applies to every
     /// binder type of an inductive block: `optParam T d`, `autoParam T s`,
     /// `outParam T` and `semiOutParam T` become T, repeatedly. Whoever uses

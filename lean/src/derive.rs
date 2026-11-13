@@ -1,10 +1,10 @@
-//! A small kernel that writes the tables (the prover's side). It type
+//! A small kernel that writes the derivation (the prover's side). It type
 //! checks the core calculus (sorts, constants, applications, binders, let,
 //! literals) the way Lean's kernel does, and records each step that holds
 //! as a row. A fact proven once is reused, so the rows form a graph.
 //!
 //! It unfolds definitions eagerly, unlike Lean's lazy delta reduction: it is
-//! here to produce tables for tests and to count rows, not to be fast.
+//! here to produce derivations for tests and to count rows, not to be fast.
 
 mod block;
 mod kernel;
@@ -12,9 +12,9 @@ mod source;
 pub use source::{Cited, Hint, Source, compare};
 mod nested;
 
+use crate::derivation::*;
 use crate::level::{Level, same_value};
 use crate::nat;
-use crate::tables::*;
 use num_bigint::BigUint;
 use std::collections::HashMap;
 
@@ -26,7 +26,7 @@ struct Meta {
 
 #[derive(Default)]
 pub struct Builder {
-    pub t: Tables,
+    pub t: Derivation,
     levels: HashMap<LevelRow, Ix>,
     lists: HashMap<ListRow, Ix>,
     terms: HashMap<TermRow, Ix>,
@@ -37,7 +37,7 @@ pub struct Builder {
     infers: HashMap<(Ix, Ix), (Ix, Ix)>,
     meta: Vec<Meta>,
     clen: Vec<u32>,
-    /// For tests only: write tables that project data out of a
+    /// For tests only: write derivations that project data out of a
     /// proposition, which the checker must refuse.
     pub lax: bool,
     pub source: Option<std::rc::Rc<dyn Source>>,
@@ -557,7 +557,7 @@ impl Builder {
     fn prim_const(&mut self, p: Prim, levels: &[Ix]) -> Option<Ix> {
         // Lean's kernel knows these by name: cite one the first time.
         if !self.prims.contains_key(&p) && self.source.is_some() {
-            self.cite(&crate::tables::lean_key(p.lean_name())).ok()?;
+            self.cite(&crate::derivation::lean_key(p.lean_name())).ok()?;
         }
         let d = *self.prims.get(&p)?;
         Some(self.constant(d, levels))
@@ -888,7 +888,7 @@ impl Builder {
         Ok((prem, a))
     }
 
-    /// Checks a declaration and returns the goal its tables establish.
+    /// Checks a declaration and returns the goal its derivation establishes.
     pub fn check_decl(&mut self, kind: DeclKind, levels: u32, ty: Ix, value: Option<Ix>) -> Res<Goal> {
         let g = self.empty();
         let (p, s) = self.infer(g, ty)?;

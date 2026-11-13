@@ -1,8 +1,8 @@
-//! Declarations of the core calculus: the small kernel writes their tables,
-//! the checker accepts them, and changed tables are refused.
+//! Declarations of the core calculus: the small kernel writes their derivations,
+//! the checker accepts them, and changed derivations are refused.
 
-use cas_lean::tables::{CtxRow, Fact, LevelRow, Row, Rule, TermRow};
-use cas_lean::{Builder, Checker, DeclKind, DeclRow, Goal, Tables};
+use cas_lean::derivation::{CtxRow, Fact, LevelRow, Row, Rule, TermRow};
+use cas_lean::{Builder, Checker, DeclKind, DeclRow, Derivation, Goal};
 
 fn key(n: u8) -> [u8; 32] {
     [n; 32]
@@ -12,10 +12,10 @@ fn axiom(b: &mut Builder, n: u8, levels: u32, ty: u32) -> u32 {
     b.decl(DeclRow { key: key(n), kind: DeclKind::Axiom, levels, ty, value: None, info: Default::default() })
 }
 
-fn accepted(b: &mut Builder, kind: DeclKind, levels: u32, ty: u32, value: Option<u32>) -> (Tables, Goal) {
+fn accepted(b: &mut Builder, kind: DeclKind, levels: u32, ty: u32, value: Option<u32>) -> (Derivation, Goal) {
     let goal = b.check_decl(kind, levels, ty, value).expect("the kernel accepts it");
     let t = b.t.clone();
-    Checker::check(&t, &goal).expect("the checker accepts the tables");
+    Checker::check(&t, &goal).expect("the checker accepts the derivation");
     (t, goal)
 }
 
@@ -152,7 +152,7 @@ fn ill_typed_declarations_are_refused_by_the_kernel() {
 /// Every single change to an accepted derivation is either refused or
 /// still a derivation of the same goal (a change to an unused row).
 #[test]
-fn changed_tables_are_refused() {
+fn changed_derivations_are_refused() {
     let mut b = Builder::new();
     let (ty, value) = identity(&mut b);
     let (t, goal) = accepted(&mut b, DeclKind::Definition, 1, ty, Some(value));
@@ -207,7 +207,7 @@ fn changed_tables_are_refused() {
 /// recursor is accepted.
 #[test]
 fn a_recursor_computes_on_constructors() {
-    use cas_lean::tables::{Info, RecRule};
+    use cas_lean::derivation::{Info, RecRule};
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -297,7 +297,7 @@ fn a_recursor_computes_on_constructors() {
 /// structure `mk : (v : N) -> P v -> S` living in `sort`, with a dependent
 /// second field.
 fn boxed(b: &mut Builder, sort: u32) -> (u32, u32, u32, u32, u32, u32) {
-    use cas_lean::tables::Info;
+    use cas_lean::derivation::Info;
     let z = b.zero();
     let one = b.succ(z);
     let (prop, type0) = (b.sort(z), b.sort(one));
@@ -327,7 +327,7 @@ fn boxed(b: &mut Builder, sort: u32) -> (u32, u32, u32, u32, u32, u32) {
 
 #[test]
 fn projections_are_typed_and_computed() {
-    use cas_lean::tables::Rule;
+    use cas_lean::derivation::Rule;
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -378,15 +378,15 @@ fn data_is_not_projected_out_of_a_proposition() {
     let ty = b.pi(s, n_ty);
     let value = b.lam(s, f0);
     assert!(b.check_decl(DeclKind::Definition, 0, ty, Some(value)).is_err());
-    // ... and, when the tables are written anyway, by the checker.
+    // ... and, when the derivation is written anyway, by the checker.
     b.lax = true;
     let goal = b.check_decl(DeclKind::Definition, 0, ty, Some(value)).expect("written");
     let err = Checker::check(&b.t, &goal).unwrap_err();
     assert!(err.contains("a field of a proposition is data"), "{err}");
 }
 
-fn set_recursive(t: &mut Tables, k: [u8; 32]) {
-    use cas_lean::tables::Info;
+fn set_recursive(t: &mut Derivation, k: [u8; 32]) {
+    use cas_lean::derivation::Info;
     for d in &mut t.decls {
         if d.key == k
             && let Info::Induct { recursive, .. } = &mut d.info
@@ -434,7 +434,7 @@ fn a_structure_equals_its_fields_rebuilt() {
 
 #[test]
 fn values_of_a_unit_type_are_equal() {
-    use cas_lean::tables::Info;
+    use cas_lean::derivation::Info;
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -468,7 +468,7 @@ fn values_of_a_unit_type_are_equal() {
 /// reduces on any proof `t` of the proposition `T` (K-like reduction).
 #[test]
 fn a_recursor_on_a_proposition_reduces_on_any_proof() {
-    use cas_lean::tables::{Info, RecRule};
+    use cas_lean::derivation::{Info, RecRule};
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -515,7 +515,7 @@ fn a_recursor_on_a_proposition_reduces_on_any_proof() {
 /// `S.rec` reduces on a variable of the structure S, through eta.
 #[test]
 fn a_recursor_on_a_structure_reduces_on_a_variable() {
-    use cas_lean::tables::{Info, RecRule};
+    use cas_lean::derivation::{Info, RecRule};
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -582,7 +582,7 @@ fn a_recursor_on_a_structure_reduces_on_a_variable() {
 /// simplified (`(a b : α) -> r a b -> r a b`) to keep the test free of `Eq`.
 #[test]
 fn a_function_lifted_to_a_quotient_computes() {
-    use cas_lean::tables::{Info, QuotKind};
+    use cas_lean::derivation::{Info, QuotKind};
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -668,7 +668,7 @@ fn a_function_lifted_to_a_quotient_computes() {
 /// its constructors and recursor, `Nat.add`, `Bool`, `Nat.beq`, `Char`,
 /// `Char.ofNat`, `List`, `String` and `String.mk`. Returns the term `Nat`.
 fn literal_prelude(b: &mut Builder) -> u32 {
-    use cas_lean::tables::{Info, Prim, RecRule};
+    use cas_lean::derivation::{Info, Prim, RecRule};
     let z = b.zero();
     let one = b.succ(z);
     let type0 = b.sort(one);
@@ -896,7 +896,7 @@ fn a_string_literal_is_its_characters() {
 /// recursor built by the kernel and compared by the checker.
 #[test]
 fn an_inductive_block_is_checked_and_its_recursor_built() {
-    use cas_lean::tables::{BlockGoal, Info};
+    use cas_lean::derivation::{BlockGoal, Info};
     let mut b = Builder::new();
     let z = b.zero();
     let one = b.succ(z);
@@ -944,8 +944,8 @@ fn cite_as(b: &mut Builder, k: u8, kind: DeclKind, levels: u32, ty: u32) -> u32 
 /// recursor's universe as Lean decides it.
 #[test]
 fn parameters_indices_mutual_and_reflexive_blocks() {
-    use cas_lean::tables::BlockGoal;
-    // Each block has its own tables, as each declaration does.
+    use cas_lean::derivation::BlockGoal;
+    // Each block has its own derivation, as each declaration does.
     let nat = |b: &mut Builder| {
         let z = b.zero();
         let one = b.succ(z);
@@ -1086,7 +1086,7 @@ fn the_built_recursor_is_leans() {
     let l3 = b.lam(succ_minor, l4);
     let l2 = b.lam(zero_minor, l3);
     let rhs_succ = b.lam(motive_ty, l2);
-    let cas_lean::tables::Info::Rec { rules, .. } = &b.t.decls[dr as usize].info else { panic!() };
+    let cas_lean::derivation::Info::Rec { rules, .. } = &b.t.decls[dr as usize].info else { panic!() };
     assert_eq!((rules[0].rhs, rules[1].rhs), (rhs_zero, rhs_succ), "the rules");
 }
 
@@ -1094,7 +1094,7 @@ fn the_built_recursor_is_leans() {
 /// as an earlier block left it. Returns the row of `List` and of its
 /// constructors.
 fn cite_list(b: &mut Builder) -> (u32, u32, u32) {
-    use cas_lean::tables::Info;
+    use cas_lean::derivation::Info;
     let u = b.param(0);
     let su1 = {
         let s = b.succ(u);
@@ -1143,7 +1143,7 @@ fn cite_list(b: &mut Builder) -> (u32, u32, u32) {
 /// in place of the copy. The checker accepts exactly those.
 #[test]
 fn a_nested_inductive_type_is_checked_through_its_mutual_block() {
-    use cas_lean::tables::Info;
+    use cas_lean::derivation::Info;
     let mut b = Builder::new();
     let (dl, dnil, dcons) = cite_list(&mut b);
     let z = b.zero();

@@ -1,4 +1,4 @@
-//! Nested inductive types (spec/lean/tables.md, "nested inductive
+//! Nested inductive types (spec/lean/derivation.md, "nested inductive
 //! blocks"), as Lean's kernel handles them (kernel/inductive.cpp,
 //! `add_inductive`): the block is rewritten into a mutual block with an
 //! auxiliary type for each nested occurrence (`elim`), that block is
@@ -11,9 +11,9 @@
 //! own types and constructors under derived keys, since their constructors'
 //! types differ there (they mention the auxiliary types).
 
+use crate::derivation::*;
 use crate::expr::*;
 use crate::level::Level;
-use crate::tables::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -67,7 +67,7 @@ pub struct Elim {
 }
 
 struct St<'a> {
-    t: &'a Tables,
+    t: &'a Derivation,
     np: usize,
     lvls: Vec<Level>,
     first: Key,
@@ -81,7 +81,7 @@ struct St<'a> {
     ctor2nested: HashMap<Key, (X, Key)>,
 }
 
-fn decl_by_key<'a>(t: &'a Tables, k: &Key) -> Option<&'a DeclRow> {
+fn decl_by_key<'a>(t: &'a Derivation, k: &Key) -> Option<&'a DeclRow> {
     t.decls.iter().find(|d| &d.key == k)
 }
 
@@ -206,7 +206,7 @@ impl St<'_> {
 /// `elim_nested_inductive`: the mutual block for the block `types`, with
 /// `np` parameters and `levels` level parameters. `ntypes` of the result
 /// equals the length of `types` when nothing is nested.
-pub fn elim(t: &Tables, levels: u32, np: usize, types: &[Ty]) -> Result<Elim, String> {
+pub fn elim(t: &Derivation, levels: u32, np: usize, types: &[Ty]) -> Result<Elim, String> {
     let first = types.first().ok_or("an empty block")?.key;
     let mut st = St {
         t,

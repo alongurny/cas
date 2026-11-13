@@ -4,9 +4,9 @@
 //! declaration. A constant's key is derived from its name here; in cas it
 //! will be the key of the declaration's blob.
 
+use crate::derivation::{Key, QuotKind};
 use crate::expr::{E, X};
 use crate::level::Level;
-use crate::tables::{Key, QuotKind};
 use num_bigint::BigUint;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -311,8 +311,8 @@ impl Env {
 
 // ---- As the prover's source of constants ----
 
+use crate::derivation::{DeclKind, Info, Prim};
 use crate::derive::{Cited, Hint as BHint, Source};
-use crate::tables::{DeclKind, Info, Prim};
 
 fn prim_named(name: &str) -> Option<Prim> {
     use Prim::*;

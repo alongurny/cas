@@ -2,7 +2,7 @@ import Lean
 open Lean
 
 /-!
-Measures the work a table checker for Lean (zkPi extended) would have to
+Measures the work a derivation checker for Lean (zkPi extended) would have to
 check, on the declarations of the given modules:
 
 * `terms.tsv`: per declaration, the distinct term nodes of its type and value

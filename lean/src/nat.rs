@@ -3,7 +3,7 @@
 //! subtraction, division and modulus by zero give 0 and the dividend, and
 //! powers only for exponents up to 2^24.
 
-use crate::tables::Prim;
+use crate::derivation::Prim;
 use num_bigint::BigUint;
 use num_integer::Integer;
 

@@ -1,8 +1,8 @@
-# Lean declarations checked as tables
+# Lean declarations checked through derivations
 
-A Lean 4 declaration is accepted when a set of tables, written by an
-untrusted prover, passes the local checks below. The tables are a
-derivation in a declarative type system: they record only steps that hold,
+A Lean 4 declaration is accepted when a derivation, written by an
+untrusted prover, passes the local checks below. The derivation is one in a
+declarative type system, stored as tables of rows: it records only steps that hold,
 never a failed attempt, and never claim that a term is in normal form. The
 same checks are meant to run natively (a small independent checker) and
 inside a proof (issue #10). The design is "Extending zkPi efficiently"
@@ -26,7 +26,7 @@ fields,
 
 over a field F of size at least 2^192, where the fields are the row's kind,
 its numbers and its children's ids. r is drawn after the prover has
-committed to all tables (from a hash of the commitment). Two different rows
+committed to the whole derivation (from a hash of the commitment). Two different rows
 then get the same id with probability at most m/|F| each, so over n rows at
 most n^2 m / |F|, which is negligible. Equal ids are taken as equal terms;
 there is no table of distinct terms. Over a 64-bit field such as Goldilocks,
@@ -57,7 +57,7 @@ indices (`bvar i`), and variables of the context are de Bruijn levels
 | `proj S i e` | key of the structure S, i, e |
 
 Binder names and binder information are not part of a term; metadata
-(`mdata`) is removed before the tables are written.
+(`mdata`) is removed before the derivation is written.
 
 Each term row also carries three numbers, each checked from the row's own
 kind and its children's rows:
@@ -217,7 +217,7 @@ same table, found by lookup.
   `List.cons.{0} Char (Char.ofNat (lit c)) ...` ending in
   `List.nil.{0} Char`, one cons for each character of s (s is UTF-8).
 - The constants these rules name (`Nat`, `Nat.zero`, `Nat.add`, `Bool.true`,
-  `String.mk`, `List.cons` and the others) are found through the tables'
+  `String.mk`, `List.cons` and the others) are found through the derivation's
   list of primitives, which pairs each with a cited declaration row. That
   these rows are the real constants, by key, is the caller's part, like
   the kinds and inductive information of all cited rows.

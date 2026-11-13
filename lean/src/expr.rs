@@ -4,8 +4,8 @@
 //! into rows, the checker computes their ids and compares them with the
 //! rows it was given.
 
+use crate::derivation::*;
 use crate::level::Level;
-use crate::tables::*;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -31,7 +31,7 @@ pub enum E {
 
 use E::*;
 
-pub fn level_of(t: &Tables, l: Ix) -> Level {
+pub fn level_of(t: &Derivation, l: Ix) -> Level {
     match t.levels[l as usize] {
         LevelRow::Zero => Level::Zero,
         LevelRow::Succ(a) => level_of(t, a).succ(),
@@ -41,7 +41,7 @@ pub fn level_of(t: &Tables, l: Ix) -> Level {
     }
 }
 
-fn levels_of(t: &Tables, mut ls: Ix) -> Vec<Level> {
+fn levels_of(t: &Derivation, mut ls: Ix) -> Vec<Level> {
     let mut out = vec![];
     while let ListRow::Cons(h, r) = t.lists[ls as usize] {
         out.push(level_of(t, h));
@@ -51,7 +51,7 @@ fn levels_of(t: &Tables, mut ls: Ix) -> Vec<Level> {
 }
 
 /// The term of row e.
-pub fn from_row(t: &Tables, e: Ix, memo: &mut HashMap<Ix, X>) -> X {
+pub fn from_row(t: &Derivation, e: Ix, memo: &mut HashMap<Ix, X>) -> X {
     if let Some(x) = memo.get(&e) {
         return x.clone();
     }

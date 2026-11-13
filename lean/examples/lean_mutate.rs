@@ -5,7 +5,7 @@
 //!   declaration's type (`swap`), and the type's first level parameter
 //!   raised by one (`level`). Lean refuses these (almost always); so must
 //!   the prover, or the checker on whatever it writes.
-//! * Table tampering: the honest tables with one term row that the goal
+//! * Tampering: the honest derivation with one term row that the goal
 //!   reaches changed (a child, a level, a constant, an index). When the
 //!   checker accepts, the changed claim is proved again from scratch by a
 //!   fresh builder; a claim the builder refuses is an alarm.
@@ -16,10 +16,10 @@
 //! [--budget ROWS] [--workers N]`.
 
 use cas_lean::Checker;
+use cas_lean::derivation::{DeclKind, Derivation, Ix, Key, TermRow};
 use cas_lean::derive::{Builder, Cited, Source};
 use cas_lean::expr::{X, from_row};
 use cas_lean::import::{Env, Kind};
-use cas_lean::tables::{DeclKind, Ix, Key, Tables, TermRow};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -95,7 +95,7 @@ fn prove(
 }
 
 /// The term rows reachable from e.
-fn reach(t: &Tables, e: Ix, out: &mut HashSet<Ix>) {
+fn reach(t: &Derivation, e: Ix, out: &mut HashSet<Ix>) {
     let mut todo = vec![e];
     while let Some(e) = todo.pop() {
         if !out.insert(e) {
@@ -111,7 +111,7 @@ fn reach(t: &Tables, e: Ix, out: &mut HashSet<Ix>) {
 }
 
 /// A changed copy of term row j, whose children stay before it.
-fn mutate(t: &Tables, j: Ix, rng: &mut Rng) -> TermRow {
+fn mutate(t: &Derivation, j: Ix, rng: &mut Rng) -> TermRow {
     let other = |rng: &mut Rng| rng.below(j as usize) as Ix;
     match t.terms[j as usize].clone() {
         TermRow::BVar(k) => TermRow::BVar(k + 1),
@@ -147,7 +147,7 @@ fn mutate(t: &Tables, j: Ix, rng: &mut Rng) -> TermRow {
 /// Whether every declaration row of t is the export's declaration of its
 /// key (type, value when given, kind, levels and rules): what the citation
 /// check outside the checker establishes.
-fn cited_honestly(env: &Env, t: &Tables) -> bool {
+fn cited_honestly(env: &Env, t: &Derivation) -> bool {
     let mut memo = HashMap::new();
     t.decls.iter().all(|d| {
         let Some(c) = env.cite(&d.key) else { return true };
@@ -159,7 +159,7 @@ fn cited_honestly(env: &Env, t: &Tables) -> bool {
         {
             return false;
         }
-        if let cas_lean::tables::Info::Rec { rules, .. } = &d.info {
+        if let cas_lean::derivation::Info::Rec { rules, .. } = &d.info {
             return rules.len() == c.rules.len()
                 && rules
                     .iter()
@@ -209,9 +209,9 @@ fn run(env: &Arc<Env>, i: usize, j: usize, tamper: usize, budget: usize) -> Vec<
         }
     }
 
-    // Tampering with the honest tables.
+    // Tampering with the honest derivation.
     let mut b = builder(env, budget);
-    let honest = quiet(|| -> Option<cas_lean::tables::Goal> {
+    let honest = quiet(|| -> Option<cas_lean::derivation::Goal> {
         let t = b.row_of(&ty).ok()?;
         let v = b.row_of(&value).ok()?;
         let goal = b.check_decl(kind, levels, t, Some(v)).ok()?;

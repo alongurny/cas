@@ -1,4 +1,4 @@
-//! Fingerprints (spec/lean/tables.md, "Ids and fingerprints"): a row's id is
+//! Fingerprints (spec/lean/derivation.md, "Ids and fingerprints"): a row's id is
 //! the polynomial with the row's fields as coefficients, evaluated at a
 //! random point. Natively the point is four independent elements of the
 //! Goldilocks field, which gives the same collision bound as one point of
@@ -21,12 +21,12 @@ fn mul(a: u64, b: u64) -> u64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Id(pub [u64; 4]);
 
-/// The random point: drawn after the tables are fixed.
+/// The random point: drawn after the derivation is fixed.
 #[derive(Clone, Copy, Debug)]
 pub struct Point([u64; 4]);
 
 impl Point {
-    /// The point drawn from a commitment to the tables (Fiat-Shamir).
+    /// The point drawn from a commitment to the derivation (Fiat-Shamir).
     pub fn from_commitment(commitment: &[u8; 32]) -> Point {
         let mut h = blake3::Hasher::new_derive_key("cas-lean fingerprint point");
         h.update(commitment);

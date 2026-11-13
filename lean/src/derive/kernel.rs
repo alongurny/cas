@@ -2,10 +2,10 @@
 //! (kernel/type_checker.cpp: `whnf_core`, `whnf`, `is_def_eq_core` with
 //! lazy delta reduction by reducibility hints), each step that holds
 //! written as a row. The search is Lean's; only its successful steps reach
-//! the tables, and the checker never sees the hints.
+//! the derivation, and the checker never sees the hints.
 
 use super::{Builder, Res, compare};
-use crate::tables::*;
+use crate::derivation::*;
 
 /// What one lazy delta step found (Lean's `reduction_status`).
 enum Status {
