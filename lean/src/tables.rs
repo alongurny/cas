@@ -73,8 +73,9 @@ pub enum DeclKind {
 pub enum Info {
     #[default]
     None,
-    /// An inductive type: its parameters, indices and constructors.
-    Induct { params: u32, indices: u32, ctors: Vec<Key>, recursive: bool },
+    /// An inductive type: its parameters, indices and constructors,
+    /// whether it is recursive, and the types of its block (Lean's `all`).
+    Induct { params: u32, indices: u32, ctors: Vec<Key>, recursive: bool, all: Vec<Key> },
     /// A constructor of the inductive type `induct`.
     Ctor { induct: Key, params: u32, fields: u32 },
     /// A recursor: how many parameters, motives, minor premises and indices
@@ -288,4 +289,20 @@ pub struct BlockGoal {
     /// them (each `whnf`, `infer`, `instantiate` and `is_def_eq` of the
     /// kernel's procedure).
     pub tape: Vec<Ix>,
+}
+
+/// What a nested inductive block's check establishes (spec/lean/tables.md,
+/// "nested inductive blocks"): `aux` is the mutual block Lean's kernel
+/// makes of it, checked as any block, and the types, constructors and
+/// recursors given are that block's rewritten back.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NestedGoal {
+    pub levels: u32,
+    pub params: u32,
+    /// The declaration rows of the block's own types.
+    pub types: Vec<Ix>,
+    /// The declaration rows of the recursors: one per type of `aux`, in its
+    /// order (the block's own types, then Lean's `rec_1`, `rec_2`, ...).
+    pub recursors: Vec<Ix>,
+    pub aux: BlockGoal,
 }

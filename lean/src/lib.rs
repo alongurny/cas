@@ -9,9 +9,11 @@
 pub mod block;
 pub mod check;
 pub mod derive;
+pub mod expr;
 pub mod fp;
 pub mod level;
 pub mod nat;
+pub mod nested;
 pub mod tables;
 
 pub use check::Checker;

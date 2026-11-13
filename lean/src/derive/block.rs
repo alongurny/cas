@@ -201,8 +201,13 @@ impl Builder {
         });
         for (idx, d) in types.iter().enumerate() {
             let ctor_keys = ctors[idx].iter().map(|c| self.t.decls[*c as usize].key).collect();
-            self.t.decls[*d as usize].info =
-                Info::Induct { params, indices: st.nindices[idx] as u32, ctors: ctor_keys, recursive };
+            self.t.decls[*d as usize].info = Info::Induct {
+                params,
+                indices: st.nindices[idx] as u32,
+                ctors: ctor_keys,
+                recursive,
+                all: st.keys.clone(),
+            };
         }
         let mut built: Vec<Vec<Ctor>> = vec![];
         for (idx, cs) in ctors.iter().enumerate() {

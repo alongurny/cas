@@ -3,8 +3,8 @@
 //! `whnf`, `infer`, `instantiate` and `is_def_eq` it makes answered by the
 //! next row of the goal's tape, whose own check is that of any row. The
 //! recursors' types and rules are then built as Lean builds them and
-//! compared by id with the rows given. Nested inductive types are not
-//! covered yet: their occurrences fail the positivity check.
+//! compared by id with the rows given. A nested block is rewritten into a
+//! mutual one first (crate::nested); see `check_nested`.
 
 use crate::check::{Checker, R, need};
 use crate::fp::{Field, Id, limbs};
@@ -106,6 +106,13 @@ impl<'a> Checker<'a> {
     /// Checks that `goal`'s rows are the inductive block Lean's kernel adds.
     pub fn check_block(tables: &'a Tables, goal: &'a BlockGoal) -> R {
         let c = Checker::new(tables, goal.levels, &format!("{goal:?}"))?;
+        c.block(goal)
+    }
+
+    /// Checks the block `goal` with the rows' ids already computed.
+    pub(crate) fn block<'c>(&'c self, goal: &'c BlockGoal) -> R {
+        let c = self;
+        let tables = c.t;
         let mut by_tid = HashMap::new();
         for (i, id) in c.tid.iter().enumerate() {
             by_tid.entry(*id).or_insert(i as Ix);
@@ -122,7 +129,7 @@ impl<'a> Checker<'a> {
         }
         let empty = empty.ok_or("no empty context")?;
         let mut b = Block {
-            c: &c,
+            c,
             goal,
             tape: 0,
             keys: vec![],
@@ -361,10 +368,11 @@ impl Block<'_, '_> {
         let mut ctors: Vec<Vec<Ctor>> = vec![];
         let mut recursive = false;
         for (idx, d) in goal.types.iter().enumerate() {
-            let Info::Induct { params, indices, ctors: keys, recursive: rec } = self.decl(*d)?.info.clone() else {
+            let Info::Induct { params, indices, ctors: keys, recursive: rec, all } = self.decl(*d)?.info.clone() else {
                 return Err("an inductive type without its information".into());
             };
             need(params == goal.params && indices as usize == self.nindices[idx], "the parameters and indices")?;
+            need(all == self.keys, "the types of the block (all)")?;
             let _ = rec;
             let mut cs = vec![];
             for (j, k) in keys.iter().enumerate() {
@@ -666,5 +674,182 @@ impl Block<'_, '_> {
                 p.id(&f)
             }
         })
+    }
+}
+
+// ---- Nested blocks ----
+
+impl<'a> Checker<'a> {
+    /// Checks that `goal`'s rows are the nested inductive block Lean's
+    /// kernel adds: its mutual block is `elim` of its types and
+    /// constructors and checks as a block, and the types' information,
+    /// the constructors and the recursors are that block's restored.
+    pub fn check_nested(tables: &'a Tables, goal: &'a NestedGoal) -> R {
+        let c = Checker::new(tables, goal.levels, &format!("{goal:?}"))?;
+        c.nested(goal).map_err(|e| format!("nested block: {e}"))
+    }
+
+    fn nested(&self, goal: &NestedGoal) -> R {
+        use crate::expr::*;
+        use crate::nested::*;
+        let t = self.t;
+        let aux = &goal.aux;
+        need(aux.levels == goal.levels && aux.params == goal.params, "the mutual block's levels and parameters")?;
+        let decl = |d: Ix| t.decls.get(d as usize).ok_or_else(|| "no such declaration".to_string());
+        let by_key =
+            |k: &Key| t.decls.iter().find(|d| &d.key == k).ok_or_else(|| "a declaration is not cited".to_string());
+        let mut memo = HashMap::new();
+        // The block as given.
+        let mut own = vec![];
+        let mut keys = vec![];
+        for d in &goal.types {
+            let row = decl(*d)?;
+            need(row.kind == DeclKind::Inductive && row.levels == goal.levels, "not an inductive type")?;
+            keys.push(row.key);
+        }
+        for d in &goal.types {
+            let row = decl(*d)?;
+            let Info::Induct { params, ctors, all, .. } = &row.info else {
+                return Err("a type without information".into());
+            };
+            need(*params == goal.params && *all == keys, "a type's parameters or block")?;
+            let mut cs = vec![];
+            for k in ctors {
+                let c = by_key(k)?;
+                need(c.kind == DeclKind::Constructor && c.levels == goal.levels, "not a constructor")?;
+                cs.push((*k, from_row(t, c.ty, &mut memo)));
+            }
+            own.push(Ty { key: row.key, ty: from_row(t, row.ty, &mut memo), ctors: cs });
+        }
+        let el = elim(t, goal.levels, goal.params as usize, &own)?;
+        need(el.types.len() > own.len(), "nothing is nested")?;
+        // The mutual block is el, and it checks.
+        need(aux.types.len() == el.types.len() && aux.recursors.len() == el.types.len(), "the mutual block's size")?;
+        let mut ids = HashMap::new();
+        let all: Vec<Key> = el.types.iter().map(|ty| ty.key).collect();
+        for (i, ty) in el.types.iter().enumerate() {
+            let row = decl(aux.types[i])?;
+            need(
+                row.key == ty.key && row.kind == DeclKind::Inductive && row.levels == goal.levels,
+                "a type of the mutual block",
+            )?;
+            need(self.tid[row.ty as usize] == self.eid(&ty.ty, &mut ids), "the type of a type of the mutual block")?;
+            let Info::Induct { ctors, all: a, .. } = &row.info else { return Err("a type without information".into()) };
+            need(*a == all && ctors.len() == ty.ctors.len(), "the mutual block's information")?;
+            for (k, (k2, cty)) in ctors.iter().zip(&ty.ctors) {
+                let c = by_key(k)?;
+                need(k == k2 && c.levels == goal.levels, "a constructor of the mutual block")?;
+                need(
+                    self.tid[c.ty as usize] == self.eid(cty, &mut ids),
+                    "the type of a constructor of the mutual block",
+                )?;
+            }
+        }
+        self.block(aux).map_err(|e| format!("the mutual block: {e}"))?;
+        // The block's own types and constructors are the copies restored.
+        let none = HashMap::new();
+        for (i, d) in goal.types.iter().enumerate() {
+            let (row, copy) = (decl(*d)?, decl(aux.types[i])?);
+            let (
+                Info::Induct { indices, ctors, recursive, .. },
+                Info::Induct { indices: i2, ctors: c2, recursive: r2, .. },
+            ) = (&row.info, &copy.info)
+            else {
+                unreachable!()
+            };
+            need(
+                indices == i2 && recursive == r2 && self.tid[row.ty as usize] == self.tid[copy.ty as usize],
+                "a type's information",
+            )?;
+            for (k, k2) in ctors.iter().zip(c2) {
+                let (c, cc) = (by_key(k)?, by_key(k2)?);
+                let Info::Ctor { params, fields, .. } = cc.info else {
+                    return Err("a constructor's information".into());
+                };
+                need(c.info == Info::Ctor { induct: row.key, params, fields }, "a constructor's information")?;
+                let r = el.restore(&from_row(t, cc.ty, &mut memo), 0, &none)?;
+                need(self.tid[c.ty as usize] == self.eid(&r, &mut ids), "a constructor's type")?;
+            }
+        }
+        // The recursors are the mutual block's restored.
+        let mut recs = HashMap::new();
+        for (r, r2) in goal.recursors.iter().zip(&aux.recursors) {
+            recs.insert(decl(*r2)?.key, decl(*r)?.key);
+        }
+        for (r, r2) in goal.recursors.iter().zip(&aux.recursors) {
+            let (row, src) = (decl(*r)?, decl(*r2)?);
+            need(row.kind == DeclKind::Recursor && row.levels == src.levels, "a recursor's kind or levels")?;
+            let shift = src.levels - goal.levels;
+            let ty = el.restore(&from_row(t, src.ty, &mut memo), shift, &recs)?;
+            need(self.tid[row.ty as usize] == self.eid(&ty, &mut ids), "a recursor's type")?;
+            let (
+                Info::Rec { params, motives, minors, indices, rules },
+                Info::Rec { params: p2, motives: m2, minors: n2, indices: i2, rules: rules2 },
+            ) = (&row.info, &src.info)
+            else {
+                return Err("a recursor without its information".into());
+            };
+            need(
+                (params, motives, minors, indices, rules.len()) == (p2, m2, n2, i2, rules2.len()),
+                "a recursor's information",
+            )?;
+            for (rule, rule2) in rules.iter().zip(rules2) {
+                let ctor = el.original(&rule2.ctor).ok_or("a rule of no constructor")?;
+                need(rule.ctor == ctor && rule.fields == rule2.fields, "a rule's constructor")?;
+                let rhs = el.restore(&from_row(t, rule2.rhs, &mut memo), shift, &recs)?;
+                need(self.tid[rule.rhs as usize] == self.eid(&rhs, &mut ids), "a rule's right-hand side")?;
+            }
+        }
+        Ok(())
+    }
+
+    fn lvl_id(&self, l: &Level) -> Id {
+        use Field::*;
+        let p = &self.point;
+        match l {
+            Level::Zero => p.id(&[Num(0)]),
+            Level::Succ(a) => p.id(&[Num(1), Id(self.lvl_id(a))]),
+            Level::Max(a, b) => p.id(&[Num(2), Id(self.lvl_id(a)), Id(self.lvl_id(b))]),
+            Level::IMax(a, b) => p.id(&[Num(3), Id(self.lvl_id(a)), Id(self.lvl_id(b))]),
+            Level::Param(n) => p.id(&[Num(4), Num(*n as u64)]),
+        }
+    }
+
+    /// The id e's row would have.
+    fn eid(&self, e: &crate::expr::X, memo: &mut HashMap<*const crate::expr::E, (Id, crate::expr::X)>) -> Id {
+        use crate::expr::E;
+        use Field::*;
+        let key = Rc::as_ptr(e);
+        if let Some((i, _)) = memo.get(&key) {
+            return *i;
+        }
+        let p = self.point;
+        let id = match &**e {
+            E::BVar(n) => p.id(&[Num(0), Num(*n as u64)]),
+            E::FVar(n) => p.id(&[Num(1), Num(*n as u64)]),
+            E::Sort(l) => p.id(&[Num(2), Id(self.lvl_id(l))]),
+            E::Const(k, ls) => {
+                let ls: Vec<crate::fp::Id> = ls.iter().map(|l| self.lvl_id(l)).collect();
+                let list = ls.iter().rev().fold(p.id(&[Num(0)]), |r, h| p.id(&[Num(1), Id(*h), Id(r)]));
+                let mut f = vec![Num(3)];
+                limbs(k, &mut f);
+                f.push(Id(list));
+                p.id(&f)
+            }
+            E::App(a, b) => p.id(&[Num(4), Id(self.eid(a, memo)), Id(self.eid(b, memo))]),
+            E::Lam(a, b) => p.id(&[Num(5), Id(self.eid(a, memo)), Id(self.eid(b, memo))]),
+            E::Pi(a, b) => p.id(&[Num(6), Id(self.eid(a, memo)), Id(self.eid(b, memo))]),
+            E::Let(a, v, b) => p.id(&[Num(7), Id(self.eid(a, memo)), Id(self.eid(v, memo)), Id(self.eid(b, memo))]),
+            E::Lit(i) => self.tid[*i as usize],
+            E::Proj(k, n, x) => {
+                let mut f = vec![Num(10)];
+                limbs(k, &mut f);
+                f.extend([Num(*n as u64), Id(self.eid(x, memo))]);
+                p.id(&f)
+            }
+        };
+        // The memo is by address, so it keeps e alive.
+        memo.insert(key, (id, e.clone()));
+        id
     }
 }

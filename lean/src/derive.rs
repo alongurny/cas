@@ -7,6 +7,7 @@
 //! here to produce tables for tests and to count rows, not to be fast.
 
 mod block;
+mod nested;
 
 use crate::level::{Level, equivalent};
 use crate::nat;

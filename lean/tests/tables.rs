@@ -311,7 +311,7 @@ fn boxed(b: &mut Builder, sort: u32) -> (u32, u32, u32, u32, u32, u32) {
     let pn0 = b.app(p, n0);
     let dh = axiom(b, 4, 0, pn0);
     let h = b.constant(dh, &[]);
-    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(6)], recursive: false };
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(6)], recursive: false, all: vec![key(5)] };
     let ds = b.decl(DeclRow { key: key(5), kind: DeclKind::Inductive, levels: 0, ty: sort, value: None, info: induct });
     let s = b.constant(ds, &[]);
     let v0 = b.bvar(0);
@@ -439,7 +439,7 @@ fn values_of_a_unit_type_are_equal() {
     let z = b.zero();
     let one = b.succ(z);
     let (prop, type0) = (b.sort(z), b.sort(one));
-    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(2)], recursive: false };
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(2)], recursive: false, all: vec![key(1)] };
     let du =
         b.decl(DeclRow { key: key(1), kind: DeclKind::Inductive, levels: 0, ty: type0, value: None, info: induct });
     let u = b.constant(du, &[]);
@@ -479,7 +479,7 @@ fn a_recursor_on_a_proposition_reduces_on_any_proof() {
         TermRow::Const(d, _) => b.t.decls[d as usize].ty,
         _ => unreachable!(),
     };
-    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(11)], recursive: false };
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(11)], recursive: false, all: vec![key(10)] };
     let dt =
         b.decl(DeclRow { key: key(10), kind: DeclKind::Inductive, levels: 0, ty: prop, value: None, info: induct });
     let t_ty = b.constant(dt, &[]);
@@ -679,16 +679,22 @@ fn literal_prelude(b: &mut Builder) -> u32 {
         }
         d
     };
-    let induct = |ctors: Vec<[u8; 32]>, recursive| Info::Induct { params: 0, indices: 0, ctors, recursive };
+    let induct = |ctors: Vec<[u8; 32]>, recursive, me: u8| Info::Induct {
+        params: 0,
+        indices: 0,
+        ctors,
+        recursive,
+        all: vec![key(me)],
+    };
     let ctor = |induct: u8, fields| Info::Ctor { induct: key(induct), params: 0, fields };
-    let dn = cite(b, 30, DeclKind::Inductive, 0, type0, induct(vec![key(31), key(32)], true), Some(Prim::Nat));
+    let dn = cite(b, 30, DeclKind::Inductive, 0, type0, induct(vec![key(31), key(32)], true, 30), Some(Prim::Nat));
     let nat = b.constant(dn, &[]);
     let dz = cite(b, 31, DeclKind::Constructor, 0, nat, ctor(30, 0), Some(Prim::NatZero));
     let nn = b.pi(nat, nat);
     let ds = cite(b, 32, DeclKind::Constructor, 0, nn, ctor(30, 1), Some(Prim::NatSucc));
     let nnn = b.pi(nat, nn);
     cite(b, 33, DeclKind::Axiom, 0, nnn, Info::None, Some(Prim::NatAdd));
-    let db = cite(b, 34, DeclKind::Inductive, 0, type0, induct(vec![key(35), key(36)], false), None);
+    let db = cite(b, 34, DeclKind::Inductive, 0, type0, induct(vec![key(35), key(36)], false, 34), None);
     let bool_ = b.constant(db, &[]);
     cite(b, 35, DeclKind::Constructor, 0, bool_, ctor(34, 0), Some(Prim::BoolFalse));
     cite(b, 36, DeclKind::Constructor, 0, bool_, ctor(34, 0), Some(Prim::BoolTrue));
@@ -1082,4 +1088,195 @@ fn the_built_recursor_is_leans() {
     let rhs_succ = b.lam(motive_ty, l2);
     let cas_lean::tables::Info::Rec { rules, .. } = &b.t.decls[dr as usize].info else { panic!() };
     assert_eq!((rules[0].rhs, rules[1].rhs), (rhs_zero, rhs_succ), "the rules");
+}
+
+/// `List.{u} (α : Type u)` cited with its constructors and information,
+/// as an earlier block left it. Returns the row of `List` and of its
+/// constructors.
+fn cite_list(b: &mut Builder) -> (u32, u32, u32) {
+    use cas_lean::tables::Info;
+    let u = b.param(0);
+    let su1 = {
+        let s = b.succ(u);
+        b.sort(s)
+    };
+    let list_ty = b.pi(su1, su1);
+    let info =
+        Info::Induct { params: 1, indices: 0, ctors: vec![key(61), key(62)], recursive: true, all: vec![key(60)] };
+    let dl = b.decl(DeclRow { key: key(60), kind: DeclKind::Inductive, levels: 1, ty: list_ty, value: None, info });
+    let list_u = b.constant(dl, &[u]);
+    let (v0, v1, v2) = (b.bvar(0), b.bvar(1), b.bvar(2));
+    let nil_ty = {
+        let l = b.app(list_u, v0);
+        b.pi(su1, l)
+    };
+    let cons_ty = {
+        let l1 = b.app(list_u, v1);
+        let l2 = b.app(list_u, v2);
+        let i = b.pi(l1, l2);
+        let i = b.pi(v0, i);
+        b.pi(su1, i)
+    };
+    let ctor = |fields| Info::Ctor { induct: key(60), params: 1, fields };
+    let dnil = b.decl(DeclRow {
+        key: key(61),
+        kind: DeclKind::Constructor,
+        levels: 1,
+        ty: nil_ty,
+        value: None,
+        info: ctor(0),
+    });
+    let dcons = b.decl(DeclRow {
+        key: key(62),
+        kind: DeclKind::Constructor,
+        levels: 1,
+        ty: cons_ty,
+        value: None,
+        info: ctor(2),
+    });
+    (dl, dnil, dcons)
+}
+
+/// `inductive Tree | node : List Tree -> Tree`: Lean's kernel checks it
+/// as the mutual block of `Tree` and an auxiliary copy of `List Tree`, and
+/// the recursors it adds are `Tree.rec` and `Tree.rec_1`, with `List Tree`
+/// in place of the copy. The checker accepts exactly those.
+#[test]
+fn a_nested_inductive_type_is_checked_through_its_mutual_block() {
+    use cas_lean::tables::Info;
+    let mut b = Builder::new();
+    let (dl, dnil, dcons) = cite_list(&mut b);
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let dt = cite_as(&mut b, 70, DeclKind::Inductive, 0, type0);
+    let tree = b.constant(dt, &[]);
+    let list0 = b.constant(dl, &[z]);
+    let list_tree = b.app(list0, tree);
+    let node_ty = b.pi(list_tree, tree);
+    let dnode = cite_as(&mut b, 71, DeclKind::Constructor, 0, node_ty);
+    let goal = b.nested_block(0, 0, &[dt], &[vec![dnode]], &[key(72), key(73)]).expect("the kernel accepts Tree");
+    let t = b.t.clone();
+    Checker::check_nested(&t, &goal).expect("the checker accepts Tree");
+    assert_eq!(goal.aux.types.len(), 2, "Tree and the copy of List Tree");
+    // Tree.rec.{u} : (motive_1 : Tree -> Sort u) -> (motive_2 : List Tree -> Sort u)
+    //   -> ((a : List Tree) -> motive_2 a -> motive_1 (node a))
+    //   -> motive_2 [] -> ((head : Tree) -> (tail : List Tree) -> motive_1 head
+    //   -> motive_2 tail -> motive_2 (head :: tail)) -> (t : Tree) -> motive_1 t
+    let u = b.param(0);
+    let su = b.sort(u);
+    let v: Vec<u32> = (0..8).map(|i| b.bvar(i)).collect();
+    let node = b.constant(dnode, &[]);
+    let nil = {
+        let n = b.constant(dnil, &[z]);
+        b.app(n, tree)
+    };
+    let cons = {
+        let c = b.constant(dcons, &[z]);
+        b.app(c, tree)
+    };
+    let m1 = b.pi(tree, su);
+    let m2 = b.pi(list_tree, su);
+    let node_minor = {
+        let na = b.app(node, v[1]);
+        let r = b.app(v[3], na);
+        let ih = b.app(v[1], v[0]);
+        let i = b.pi(ih, r);
+        b.pi(list_tree, i)
+    };
+    let nil_minor = b.app(v[1], nil);
+    let cons_minor = {
+        let ht = b.apps(cons, &[v[3], v[2]]);
+        let r = b.app(v[6], ht);
+        let ih2 = b.app(v[5], v[1]);
+        let ih1 = b.app(v[5], v[1]);
+        let i = b.pi(ih2, r);
+        let i = b.pi(ih1, i);
+        let i = b.pi(list_tree, i);
+        b.pi(tree, i)
+    };
+    let prefix = |b: &mut Builder, tail: u32| {
+        let r = b.pi(cons_minor, tail);
+        let r = b.pi(nil_minor, r);
+        let r = b.pi(node_minor, r);
+        let r = b.pi(m2, r);
+        b.pi(m1, r)
+    };
+    let tail = {
+        let r = b.app(v[5], v[0]);
+        b.pi(tree, r)
+    };
+    let rec_ty = prefix(&mut b, tail);
+    assert_eq!(b.t.decls[goal.recursors[0] as usize].ty, rec_ty, "Tree.rec is Lean's");
+    let tail1 = {
+        let r = b.app(v[4], v[0]);
+        b.pi(list_tree, r)
+    };
+    let rec1_ty = prefix(&mut b, tail1);
+    assert_eq!(b.t.decls[goal.recursors[1] as usize].ty, rec1_ty, "Tree.rec_1 is Lean's");
+    let Info::Rec { rules, .. } = &t.decls[goal.recursors[1] as usize].info else { panic!() };
+    assert_eq!((rules[0].ctor, rules[1].ctor), (key(61), key(62)), "rec_1 computes on List.nil and List.cons");
+    let Info::Induct { recursive, all, .. } = &t.decls[dt as usize].info else { panic!() };
+    assert!(*recursive && *all == vec![key(70)]);
+    // Tampering is refused: rules swapped, a rule on the copy's
+    // constructor, and the auxiliary type left in a recursor's type.
+    let mut bad = t.clone();
+    if let Info::Rec { rules, .. } = &mut bad.decls[goal.recursors[1] as usize].info {
+        rules.swap(0, 1);
+    }
+    assert!(Checker::check_nested(&bad, &goal).is_err());
+    let mut bad = t.clone();
+    let Info::Induct { ctors: copy_ctors, .. } = t.decls[goal.aux.types[1] as usize].info.clone() else { panic!() };
+    if let Info::Rec { rules, .. } = &mut bad.decls[goal.recursors[1] as usize].info {
+        rules[0].ctor = copy_ctors[0];
+    }
+    assert!(Checker::check_nested(&bad, &goal).is_err());
+    let mut bad = t.clone();
+    bad.decls[goal.recursors[1] as usize].ty = bad.decls[goal.aux.recursors[1] as usize].ty;
+    assert!(Checker::check_nested(&bad, &goal).is_err());
+    let mut bad = t.clone();
+    bad.decls[dt as usize].info =
+        Info::Induct { params: 0, indices: 0, ctors: vec![key(71)], recursive: false, all: vec![key(70)] };
+    assert!(Checker::check_nested(&bad, &goal).is_err(), "Tree is recursive");
+}
+
+/// `R | mk : List (List R) -> R` needs two auxiliary types, found one
+/// inside the other; `S | mk : (T : Type) -> List (T -> S) -> S` is refused,
+/// since a nested type's parameter may not mention a field.
+#[test]
+fn nested_occurrences_inside_nested_ones_and_local_parameters() {
+    let mut b = Builder::new();
+    let (dl, _, _) = cite_list(&mut b);
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let dr = cite_as(&mut b, 80, DeclKind::Inductive, 0, type0);
+    let r = b.constant(dr, &[]);
+    let list0 = b.constant(dl, &[z]);
+    let lr = b.app(list0, r);
+    let llr = b.app(list0, lr);
+    let mk_ty = b.pi(llr, r);
+    let dmk = cite_as(&mut b, 81, DeclKind::Constructor, 0, mk_ty);
+    let keys = [key(82), key(83), key(84)];
+    let goal = b.nested_block(0, 0, &[dr], &[vec![dmk]], &keys).expect("the kernel accepts R");
+    assert_eq!(goal.aux.types.len(), 3);
+    let t = b.t.clone();
+    Checker::check_nested(&t, &goal).expect("the checker accepts R");
+    // S, in a builder of its own.
+    let mut b = Builder::new();
+    let (dl, _, _) = cite_list(&mut b);
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let ds = cite_as(&mut b, 90, DeclKind::Inductive, 0, type0);
+    let s = b.constant(ds, &[]);
+    let list0 = b.constant(dl, &[z]);
+    let v0 = b.bvar(0);
+    let ts = b.pi(v0, s);
+    let lts = b.app(list0, ts);
+    let inner = b.pi(lts, s);
+    let mk_ty = b.pi(type0, inner);
+    let dmk = cite_as(&mut b, 91, DeclKind::Constructor, 0, mk_ty);
+    let err = b.nested_block(0, 0, &[ds], &[vec![dmk]], &[key(92), key(93)]).unwrap_err();
+    assert!(err.contains("local variables"), "{err}");
 }

@@ -240,11 +240,29 @@ same table, found by lookup.
   recursor's type and rules as `declare_recursors` does, computing ids of
   terms with variables bound directly (no rows needed), and compares them
   with the recursor rows given. K-like reduction needs no flag, since it
-  is derived from proof irrelevance. Nested inductive types (a block type
-  under another type, as in `Array Syntax`) are not covered yet: Lean
-  first translates them to a mutual block, and that translation and its
-  inverse still have to be written as checks; until then their
-  occurrences fail the positivity check.
+  is derived from proof irrelevance. An inductive row also lists the
+  types of its block (Lean's `all`), which the check compares.
+- **nested inductive block**: a block whose constructors use one of its
+  types inside another inductive type's parameters, as in
+  `Tree | node : List Tree -> Tree`. As Lean's kernel does, the checker
+  rewrites it into a mutual block (`elim_nested_inductive`): each nested
+  occurrence `I Ds`, met outermost first, becomes an auxiliary type
+  applied to the block's parameters, with copies of the constructors of
+  `I` (and of every type of `I`'s block) at Ds, themselves rewritten in
+  turn. The rewriting is syntactic, so the checker does it on terms with
+  local constants and compares the ids of the results with the rows of
+  the mutual block given; a nested parameter that mentions a field is
+  refused. In the mutual block the block's own types and constructors
+  appear under keys derived from theirs (`blake3` derive-key
+  "cas-lean nested copy"), and the auxiliary types under keys derived
+  from the first type's key and their position, since only their
+  constructors' types differ. The mutual block is checked as any block.
+  Then the block's own constructors, information and recursors must be
+  the mutual block's restored (`restore_nested`): auxiliary types and
+  constructors replaced by the nested occurrences and their constructors,
+  copies by the originals, and the recursors renamed (the block's own,
+  then `rec_1`, `rec_2`, ... for the auxiliary types, whose rules name
+  the constructors of the nested type, such as `List.cons`).
 - **quotient**: the four quotient constants with their fixed types.
 
 The claim of a declaration is that its own check passes given the rows of
