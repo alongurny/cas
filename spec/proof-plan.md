@@ -69,5 +69,9 @@ the record it starts in and the first key of the next one.
 3. `cas verify <commit> --manifest-only`: needs the commit key, the
    manifest, the proof and the parents' verification, and reads no blob.
 
-Not started as of 2026-11-13. Both are Flock circuit work (alon/flock,
-branch `cas`).
+Step 1 is built (2026-11-13): `cas_chunks` in alon/flock, branch `cas`
+(ed50983). It opens chunks of a blob against its key, the other subtrees
+entering as private chaining values, and proves an edit of the same length
+by sharing those values between the old and the new key. Its cost is the
+opened chunks' blocks and one parent per level for each side, against
+every block of the blob. Steps 2 and 3 (#1) are not started.
