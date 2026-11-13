@@ -91,9 +91,9 @@ localhost (cas built with `bench-insecure`). Times in seconds.
 
 ### git.git
 
-Not measured: git.git has paths the name rule refuses
-(`git-lost+found.txt`), so it cannot be imported into a history of commits
-(spec/types.md). Its numbers on the earlier history format (2026-11-10:
+Not measured: git.git has paths the name rule refuses (`Märchen`, and
+names with `=`, `^`, `,`, `~`, `@`, `%` in its tests), so it cannot be
+imported into a history of commits (spec/types.md). Its numbers on the earlier history format (2026-11-10:
 every command faster than git but ls, diff and merge-base) are in this
 file's history before 3601a14.
 

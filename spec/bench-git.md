@@ -34,8 +34,9 @@ deltas), and 90 MB after, against git's 105 MB.
 ## git.git
 
 git.git cannot be imported on histories of commits: it has paths the name
-rule refuses (`git-lost+found.txt`, from 2005), and the tool does not
-rename (spec/types.md). Its numbers on the earlier history format are in
+rule refuses (`Märchen`, and names with `=`, `^`, `,`, `~`, `@`, `%` in its
+tests), and the tool does not rename (spec/types.md). The rule stays short
+on purpose (Alon, 2026-11-13); only `+` was added. Its numbers on the earlier history format are in
 [perf-port.md](perf-port.md)'s history.
 
 ## Where cas loses
