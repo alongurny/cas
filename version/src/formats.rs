@@ -150,7 +150,12 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         format("git-tags", include_str!("../../spec/formats/git-tags.md"), Kind::Leaf(crate::gitobj::check_tags)),
         format("uni-bin", include_str!("../../spec/formats/uni-bin.md"), Kind::Leaf(uni)),
         format("uni-txt", include_str!("../../spec/formats/uni-txt.md"), Kind::Leaf(uni_text)),
-        format("annotated", include_str!("../../spec/formats/annotated.md"), Kind::Leaf(crate::annotated::check)),
+        format_since(
+            "annotated",
+            include_str!("../../spec/formats/annotated.md"),
+            Kind::Leaf(crate::annotated::check),
+            &[include_str!("../../spec/formats/annotated-v1.md")],
+        ),
         format("diff", include_str!("../../spec/formats/diff.md"), Kind::Leaf(crate::annotated::check_diff)),
         // Formats given as types (spec/types.md).
         format_since(
@@ -167,11 +172,22 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
         ),
         format("lines", include_str!("../../spec/formats/lines.md"), Kind::Leaf(crate::typed::check_lines)),
         format("runs", include_str!("../../spec/formats/runs.md"), Kind::Leaf(crate::typed::check_runs)),
-        format("release", include_str!("../../spec/formats/release.md"), Kind::Leaf(crate::typed::check_release)),
+        format_since(
+            "release",
+            include_str!("../../spec/formats/release.md"),
+            Kind::Leaf(crate::typed::check_release),
+            &[include_str!("../../spec/formats/release-v1.md")],
+        ),
         format("note", include_str!("../../spec/formats/note.md"), Kind::Leaf(crate::typed::check_text)),
+        format("prose", include_str!("../../spec/formats/prose.md"), Kind::Leaf(crate::typed::check_prose)),
         format("author", include_str!("../../spec/formats/author.md"), Kind::Leaf(crate::typed::check_text)),
         format("tag", include_str!("../../spec/formats/tag.md"), Kind::Leaf(crate::typed::check_semver)),
-        format("manifest", include_str!("../../spec/formats/manifest.md"), Kind::Leaf(crate::typed::check_manifest)),
+        format_since(
+            "manifest",
+            include_str!("../../spec/formats/manifest.md"),
+            Kind::Leaf(crate::typed::check_manifest),
+            &[include_str!("../../spec/formats/manifest-v1.md")],
+        ),
     ]
 });
 

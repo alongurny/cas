@@ -43,7 +43,7 @@ const COMMITS: &[&str] = &[
 ];
 
 /// The commands that work on a release history.
-const RELEASE: &[&str] = &["log", "ls", "checkout", "sparse", "compatible"];
+const RELEASE: &[&str] = &["log", "ls", "checkout", "sparse", "compatible", "manifest", "prove", "verify"];
 
 /// The commands that are not about one history.
 const NO_HISTORY: &[&str] = &["gc", "fsck", "objects", "show", "serve", "access", "annotated", "push", "pull", "watch"];
@@ -297,80 +297,16 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             }
         }
         cmd @ ("prove" | "verify") => {
-            // The prover is a program of its own (prove/): it builds Flock.
-            if a.store.contains("://") {
-                return Err(format!("{cmd} works on a store directory: run it where the store is"));
-            }
-            let other = match (&a.from, cmd) {
-                (Some(_), "prove") => return Err(format!("--from is for verify\n{}", crate::help::usage(cmd))),
-                (Some(f), _) => Some(crate::other_store(a, f)?),
-                (None, _) => None,
-            };
             let (k, _) = at()?;
             // Oldest first, so that what is proven is always a history's start.
-            let mut commits: Vec<String> =
+            let mut nodes: Vec<String> =
                 if a.all { commits::log(s, &k).map_err(e)?.into_iter().map(|(k, _)| k).collect() } else { vec![k] };
-            commits.reverse();
-            let mut manifests = Vec::new();
-            let mut blobs = 0;
-            for k in &commits {
-                let view = derived::derive(s, b3(), &proofs::MANIFEST, &commits::view("commit", k)).map_err(e)?;
-                let proven = derived::cached(s, &proofs::PROOF, &view).map_err(e)?.is_some();
-                if cmd == "verify" && !proven {
-                    // A client keeps only the proofs it asked for (--from).
-                    let fetched = match &other {
-                        Some(o) => proofs::fetch(s, b3(), &**o, &view).map_err(e)?,
-                        None => false,
-                    };
-                    if !fetched {
-                        return Err(match &a.from {
-                            Some(f) => format!("{f} has no proof of commit {}", short(k)),
-                            None => format!(
-                                "commit {} has no proof: cas prove makes one, and --from <store> fetches one",
-                                short(k)
-                            ),
-                        });
-                    }
-                }
-                if cmd == "verify" || !proven {
-                    blobs += proofs::read(s, view.key()).map_err(e)?.blobs.len();
-                    manifests.push(view.key().to_string());
-                }
-            }
-            if manifests.is_empty() {
-                out!("{} commits, all proven already", commits.len());
-                return Ok(());
-            }
-            flush_out();
-            let program = prover()?;
-            for part in manifests.chunks(256) {
-                let status = std::process::Command::new(&program)
-                    .arg(cmd)
-                    .arg("--store")
-                    .arg(&a.store)
-                    .args(part)
-                    .stdout(if a.quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
-                    .status()
-                    .map_err(|x| format!("{}: {x}", program.display()))?;
-                if !status.success() {
-                    return Err(format!(
-                        "{cmd} failed{}",
-                        if a.quiet { "; run it without --quiet to see where" } else { "" }
-                    ));
-                }
-            }
-            let done = if cmd == "prove" { "proven" } else { "verified" };
-            out!("{} commits {done}: {blobs} blobs valid", manifests.len());
+            nodes.reverse();
+            prove_or_verify(a, s, cmd, "commit", &nodes)?;
         }
         "manifest" => {
-            // Kept as derived data, so it is worked out once for a commit.
             let (k, _) = at()?;
-            let view = derived::derive(s, b3(), &proofs::MANIFEST, &commits::view("commit", &k)).map_err(e)?;
-            let m = proofs::read(s, view.key()).map_err(e)?;
-            for (key, (alias, len)) in &m.blobs {
-                out!("{alias:10} {} {len}", cas_version::typed::key_text(key));
-            }
-            out!("{} blobs, {} bytes, manifest {}", m.blobs.len(), m.bytes(), view.key());
+            print_manifest(s, "commit", &k)?;
         }
         "log" => {
             let Some(tip) = &tip else { return Ok(()) };
@@ -519,6 +455,18 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 disk.seal_packs().map_err(e)?;
             }
             out!("{} commits in {:.1}s; newest {}", links.len(), start.elapsed().as_secs_f64(), short(&key));
+            // Tags that are semantic versions become releases.
+            let public = a.remote.clone().unwrap_or_else(|| "releases".into());
+            let have = releases::tags(s, &public).map_err(e)?;
+            let (tags, left) =
+                cas_version::gitcommits::tag_releases(s, repo.as_ref(), &key, &links, &have).map_err(e)?;
+            let made = releases::publish_git_tags(s, b3(), &public, &tags).map_err(e)?;
+            for (t, k) in tags.iter().zip(&made) {
+                out!("release {} {} (git tag {})", t.tag, short(k), t.name);
+            }
+            for l in &left {
+                out!("left out git tag {}: {}", l.name, l.why);
+            }
         }
         _ => unreachable!("handles() lets only these commands through"),
     }
@@ -570,8 +518,11 @@ fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
                 out!("{tag}  {}", short(&k));
                 for (from, (changelog, change)) in &r.from {
                     let from_tag = commits::text(s, &releases::read(s, from).map_err(e)?.tag).map_err(e)?;
-                    let text = commits::text(s, changelog).map_err(e)?;
-                    out!("  {change} from {from_tag}: {text}");
+                    let text = releases::changelog(s, changelog).map_err(e)?;
+                    // Further lines of the changelog are indented under the first.
+                    let text: Vec<String> =
+                        text.lines().map(|l| if l.is_empty() { String::new() } else { format!("    {l}") }).collect();
+                    out!("  {change} from {from_tag}: {}", text.join("\n").trim_start());
                 }
             }
         }
@@ -597,6 +548,15 @@ fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
             let n = fs::checkout_sparse(s, &version()?, &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
             out!("{n} paths written to {dest}");
         }
+        "manifest" => print_manifest(s, "release", &find(&a.node)?)?,
+        cmd @ ("prove" | "verify") => {
+            let k = find(&a.node)?;
+            // Oldest first, so that what is proven is always a history's start.
+            let mut nodes: Vec<String> =
+                if a.all { releases::log(s, &k).map_err(e)?.into_iter().map(|(k, _, _)| k).collect() } else { vec![k] };
+            nodes.reverse();
+            prove_or_verify(a, s, cmd, "release", &nodes)?;
+        }
         "compatible" => {
             let (from, to) = (find(&arg(1, "<from>")?)?, find(&arg(2, "<to>")?)?);
             let safe = releases::safe(s, &from, &to).map_err(e)?;
@@ -604,5 +564,87 @@ fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
         }
         _ => unreachable!("handles() lets only release commands through"),
     }
+    Ok(())
+}
+
+/// The manifest of a commit or a release (`alias`), kept as derived data so
+/// that it is worked out once.
+fn manifest_of(s: &dyn Store, alias: &str, key: &str) -> Res<View> {
+    let f = if alias == "release" { &proofs::RELEASE_MANIFEST } else { &proofs::MANIFEST };
+    derived::derive(s, b3(), f, &commits::view(alias, key)).map_err(e)
+}
+
+fn print_manifest(s: &dyn Store, alias: &str, key: &str) -> Res<()> {
+    let view = manifest_of(s, alias, key)?;
+    let m = proofs::read(s, view.key()).map_err(e)?;
+    for (key, (alias, len)) in &m.blobs {
+        out!("{alias:10} {} {len}", cas_version::typed::key_text(key));
+    }
+    out!("{} blobs, {} bytes, manifest {}", m.blobs.len(), m.bytes(), view.key());
+    Ok(())
+}
+
+/// `cas prove` or `cas verify` of the commits or releases (`alias`) with
+/// keys `nodes`, oldest first.
+fn prove_or_verify(a: &Args, s: &dyn Store, cmd: &str, alias: &str, nodes: &[String]) -> Res<()> {
+    // The prover is a program of its own (prove/): it builds Flock.
+    if a.store.contains("://") {
+        return Err(format!("{cmd} works on a store directory: run it where the store is"));
+    }
+    let other = match (&a.from, cmd) {
+        (Some(_), "prove") => return Err(format!("--from is for verify\n{}", crate::help::usage(cmd))),
+        (Some(f), _) => Some(crate::other_store(a, f)?),
+        (None, _) => None,
+    };
+    let mut manifests = Vec::new();
+    let mut blobs = 0;
+    for k in nodes {
+        let view = manifest_of(s, alias, k)?;
+        let proven = derived::cached(s, &proofs::PROOF, &view).map_err(e)?.is_some();
+        if cmd == "verify" && !proven {
+            // A client keeps only the proofs it asked for (--from).
+            let fetched = match &other {
+                Some(o) => proofs::fetch(s, b3(), &**o, &view).map_err(e)?,
+                None => false,
+            };
+            if !fetched {
+                return Err(match &a.from {
+                    Some(f) => format!("{f} has no proof of {alias} {}", short(k)),
+                    None => {
+                        format!(
+                            "{alias} {} has no proof: cas prove makes one, and --from <store> fetches one",
+                            short(k)
+                        )
+                    }
+                });
+            }
+        }
+        if cmd == "verify" || !proven {
+            blobs += proofs::read(s, view.key()).map_err(e)?.blobs.len();
+            manifests.push(view.key().to_string());
+        }
+    }
+    let plural = if alias == "release" { "releases" } else { "commits" };
+    if manifests.is_empty() {
+        out!("{} {plural}, all proven already", nodes.len());
+        return Ok(());
+    }
+    flush_out();
+    let program = prover()?;
+    for part in manifests.chunks(256) {
+        let status = std::process::Command::new(&program)
+            .arg(cmd)
+            .arg("--store")
+            .arg(&a.store)
+            .args(part)
+            .stdout(if a.quiet { std::process::Stdio::null() } else { std::process::Stdio::inherit() })
+            .status()
+            .map_err(|x| format!("{}: {x}", program.display()))?;
+        if !status.success() {
+            return Err(format!("{cmd} failed{}", if a.quiet { "; run it without --quiet to see where" } else { "" }));
+        }
+    }
+    let done = if cmd == "prove" { "proven" } else { "verified" };
+    out!("{} {plural} {done}: {blobs} blobs valid", manifests.len());
     Ok(())
 }

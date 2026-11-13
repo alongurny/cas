@@ -163,7 +163,7 @@ cas manifest
 
 What a proof of the commit covers.
 
-Lists each blob the commit brings that is not a file: its type, its key and its length. A proof for this list says that each of them is valid. The last line gives the totals and the key of the manifest, which is what a proof is named by.
+Lists each blob the commit brings that is not a file: its type, its key and its length. A proof for this list says that each of them is valid. The last line gives the totals and the key of the manifest, which is what a proof is named by. In a release history (-H releases) it is the manifest of the release: the release, its tag, its changelogs and the part of its version the releases before it do not have.
 
 ### prove
 
@@ -173,7 +173,7 @@ cas prove [--all] [--quiet]
 
 Make a proof that what the commit brings is valid.
 
-The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With --all, every commit the commit reaches that has no proof yet gets one, oldest first. `serve --prove` runs this whenever a history moves.
+The proof covers the manifest of the commit (`cas manifest`) and is kept in the store beside it. With --all, every commit the commit reaches that has no proof yet gets one, oldest first. `serve --prove` runs this whenever a history moves. In a release history it proves releases.
 
 Proving is done by the program cas-prove, built from prove/ (docs/proofs.md).
 
@@ -188,7 +188,7 @@ cas verify [--all] [--quiet] [--from <store>]
 
 Check the proof of the commit.
 
-Checks the proof kept for the manifest of the commit, or with --all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. With --from, a proof that is not here is first fetched from that store and kept, so a client holds only the proofs it asked for. Fails when a commit has no proof or a proof does not verify.
+Checks the proof kept for the manifest of the commit, or with --all of every commit it reaches. A proof is checked against the manifest alone: no listed blob is read. With --from, a proof that is not here is first fetched from that store and kept, so a client holds only the proofs it asked for. Fails when a commit has no proof or a proof does not verify. In a release history it checks releases.
 
 - `--all`: every commit the commit reaches, not only the commit itself
 - `--quiet`: print the outcome only, not a line for each proof
@@ -300,12 +300,14 @@ Prints compatible or breaking, from the kinds of change between the two.
 ### import-git
 
 ```
-cas import-git <repo> [<rev>]
+cas import-git <repo> [<rev>] [--as <name>]
 ```
 
-Import the commits of a git repository as a new history.
+Import the commits of a git repository as a new history, and its tags as releases.
 
-<rev> is HEAD unless given. Refused when the history exists. A commit's message becomes the note of its step.
+<rev> is HEAD unless given. Refused when the history exists. A commit's message becomes the note of its step. Each git tag on an imported commit whose name is a semantic version (a leading v aside) becomes a release in `releases`, or --as <name>, oldest first; git does not say what a tag changes, so each is a breaking change, with the tag's message as its changelog. The tags left out are listed with the reason.
+
+- `--as <name>`: the name of the history on the other side, or of the release history
 
 ## The store
 

@@ -110,3 +110,85 @@ fn what_is_not_valid_gets_no_proof() {
     cas_prove::verify_bytes(&m.encode(), &proof).unwrap();
     assert!(proofs::read(&s, &write_blob(&s, b3(), &m.encode()).unwrap()).is_ok());
 }
+
+/// The circuits' automata accept exactly what cas's own checks accept.
+#[test]
+fn the_text_automata_agree_with_the_checks() {
+    use cas_version::typed::{check_prose, check_semver, check_text};
+    use flock_prover::cas_ir::{prose_grammar, semver_grammar, text_grammar};
+    let (text, prose, semver) = (text_grammar(), prose_grammar(), semver_grammar());
+    // Every string of up to 5 symbols over an alphabet with each kind of
+    // byte the grammars tell apart, and longer ones from a fixed generator.
+    let alphabet: Vec<&[u8]> = vec![
+        b"0",
+        b"1",
+        b"9",
+        b"a",
+        b"Z",
+        b"-",
+        b".",
+        b"+",
+        b"\n",
+        b"\r",
+        b"\t",
+        b" ",
+        b"\x7f",
+        "é".as_bytes(),
+        "\u{85}".as_bytes(),
+        b"\xff",
+    ];
+    let mut cases: Vec<Vec<u8>> = vec![Vec::new()];
+    let mut layer: Vec<Vec<u8>> = vec![Vec::new()];
+    for _ in 0..5 {
+        layer = layer.iter().flat_map(|p| alphabet.iter().map(move |a| [p.as_slice(), a].concat())).collect();
+        cases.extend(layer.iter().cloned());
+    }
+    let mut x: u64 = 1;
+    for _ in 0..200_000 {
+        let len = (x % 24) as usize;
+        let mut c = Vec::new();
+        for _ in 0..len {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            c.extend_from_slice(alphabet[(x >> 33) as usize % 9]);
+        }
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        cases.push(c);
+    }
+    for v in ["1.0.0", "0.0.0", "10.20.30", "1.0.0-alpha.1", "1.0.0-0a.01b", "1.0.0+001", "1.0.0-rc.1+b.2"] {
+        cases.push(v.as_bytes().to_vec());
+    }
+    for c in &cases {
+        assert_eq!(text.accepts(c), check_text(c).is_ok(), "text {c:?}");
+        assert_eq!(prose.accepts(c), check_prose(c).is_ok(), "prose {c:?}");
+        assert_eq!(semver.accepts(c), check_semver(c).is_ok(), "semver {:?}", String::from_utf8_lossy(c));
+    }
+}
+
+/// A release history is proven: each release with its tag, its changelog
+/// and the part of its version the release before it does not have.
+#[test]
+fn releases_are_proven() {
+    use cas_version::releases;
+    let s = store();
+    let (_, v) = commit(&s);
+    let first = releases::publish(&s, b3(), "releases", &v, "1.0.0", None).unwrap();
+    let mut files = BTreeMap::new();
+    files.insert(Path::new("README").unwrap(), Node::File(put(&s, b3(), "raw", b"bye\n").unwrap()));
+    let v2 = build(&s, b3(), by_alias("directory").unwrap(), &files).unwrap();
+    let changelog = "Says bye.\n\nThe rest is gone.\n";
+    let second = releases::publish(&s, b3(), "releases", &v2, "2.0.0-rc.1", Some(("breaking", changelog))).unwrap();
+    let r = releases::read(&s, &second).unwrap();
+    let (log, _) = r.from.values().next().unwrap();
+    assert_eq!(releases::changelog(&s, log).unwrap(), "Says bye.\n\nThe rest is gone.");
+
+    let m = proofs::of_release(&s, &second).unwrap();
+    let aliases: Vec<&str> = m.blobs.values().map(|(a, _)| *a).collect();
+    for want in ["release", "tag", "prose", "directory"] {
+        assert!(aliases.contains(&want), "{want} in {aliases:?}");
+    }
+    for k in [&first, &second] {
+        let view = derived::derive(&s, b3(), &proofs::RELEASE_MANIFEST, &commits::view("release", k)).unwrap();
+        cas_prove::prove_and_record(&s, view.key()).unwrap();
+        cas_prove::verify(&s, view.key()).unwrap();
+    }
+}

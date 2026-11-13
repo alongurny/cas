@@ -3,7 +3,7 @@
 //! change from it and a changelog. A release history is a variable holding
 //! a view of its newest release.
 
-use crate::commits::{one_line, put_text, text, view};
+use crate::commits::{put_text, text, view};
 use crate::typed::{CHANGES, RecV, Value, by_type, key_bytes, key_text};
 use crate::{Error, Result, View, malformed, read_blob};
 use cas_core::algo::Algorithm;
@@ -58,6 +58,28 @@ impl Release {
     pub fn version(&self) -> View {
         view("directory", &self.version)
     }
+}
+
+/// A text as prose: line ends as line feeds, other control characters as
+/// spaces, spaces at the ends of lines and blank lines at the start and the
+/// end dropped, and no line feed after the last line.
+pub fn prose(s: &str) -> String {
+    let clean = |l: &str| -> String {
+        let l: String = l.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        l.trim_end().to_string()
+    };
+    let lines: Vec<String> = s.lines().map(clean).collect();
+    let first = lines.iter().position(|l| !l.is_empty()).unwrap_or(lines.len());
+    let last = lines.iter().rposition(|l| !l.is_empty()).map_or(first, |i| i + 1);
+    lines[first..last].join("\n")
+}
+
+/// The text of a changelog: `prose`, or a `note` of a release written before
+/// changelogs were prose (every note is prose).
+pub fn changelog(store: &dyn Store, key: &str) -> Result<String> {
+    let b = read_blob(store, key)?;
+    crate::typed::check_prose(&b).map_err(|e| malformed(key, e))?;
+    Ok(String::from_utf8(b).expect("checked prose is UTF-8"))
 }
 
 pub fn read(store: &dyn Store, key: &str) -> Result<Release> {
@@ -156,11 +178,11 @@ pub fn publish(
                     .iter()
                     .find(|c| **c == change)
                     .ok_or_else(|| Error::NotRelease(format!("{change:?} is not one of {}", CHANGES.join(", "))))?;
-                let changelog = one_line(changelog);
+                let changelog = prose(changelog);
                 if changelog.is_empty() {
                     return Err(Error::NotRelease("the changelog is empty".into()));
                 }
-                from.insert(o.clone(), (put_text(store, alg, "note", &changelog)?, *change));
+                from.insert(o.clone(), (put_text(store, alg, "prose", &changelog)?, *change));
             }
         }
         let r = Release { version: version.key.clone(), tag: tag_key.clone(), from };
@@ -191,4 +213,32 @@ pub fn safe(store: &dyn Store, old: &str, new: &str) -> Result<bool> {
         todo.extend(read(store, &k)?.from.into_iter().filter(|(_, (_, c))| *c != "breaking").map(|(r, _)| r));
     }
     Ok(false)
+}
+
+/// Publish the git tags `tags` as releases of the history `name`, in order.
+/// What a tag changes is not said in git: it may be anything, so each
+/// release after the first is a `breaking` change, with the tag's message
+/// as its changelog. `tags` come from [`crate::gitcommits::tag_releases`].
+/// The keys of the new releases.
+pub fn publish_git_tags(
+    store: &dyn Store,
+    alg: &'static Algorithm,
+    name: &str,
+    tags: &[crate::gitcommits::TagRelease],
+) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for t in tags {
+        let first = tip(store, name)?.is_none();
+        let edge = (!first).then_some(("breaking", t.changelog.as_str()));
+        out.push(publish(store, alg, name, &t.version, &t.tag, edge)?);
+    }
+    Ok(out)
+}
+
+/// The tags of the releases of history `name` (none when it is unset).
+pub fn tags(store: &dyn Store, name: &str) -> Result<Vec<String>> {
+    match tip(store, name)? {
+        Some(t) => Ok(log(store, &t)?.into_iter().map(|(_, _, tag)| tag).collect()),
+        None => Ok(Vec::new()),
+    }
 }

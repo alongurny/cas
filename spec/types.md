@@ -4,7 +4,7 @@ Some formats are not described byte by byte. Each is a type, built from
 the parts below, and its parser, its printer, its validity check and the
 views it holds all follow from the type. The formats are `directory`,
 `commit`, `annotation`, `lines`, `runs`, `release` and `manifest`, with the text formats
-`note`, `author` and `tag` (see each in [formats/](formats/)).
+`note`, `author`, `prose` and `tag` (see each in [formats/](formats/)).
 
 They are designed so that a proof of validity is cheap: a blob is a whole
 number of 64-byte blocks, the size of one BLAKE3 block; every field sits at
@@ -27,9 +27,10 @@ a fixed place in its record; and each value has exactly one encoding.
   or a space; it is not `.` alone and has no two dots in a row. The list of bytes is short on purpose,
   for now: it is what is needed. It is written as one byte holding its length and then
   its bytes.
-- **text** is UTF-8 with no control character. **semver** is a text that is
-  a version as Semantic Versioning 2.0.0 writes it. A text is a blob of its
-  own, never a field.
+- **text** is UTF-8 with no control character. **prose** is UTF-8 with no
+  control character but the line feed (U+000A), so a text is also prose.
+  **semver** is a text that is a version as Semantic Versioning 2.0.0
+  writes it. A text is a blob of its own, never a field.
 - **bytes** is anything.
 
 ## Records

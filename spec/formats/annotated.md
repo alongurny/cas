@@ -3,8 +3,8 @@
 A note on every line of a blob. It says, in short, why a line is there or
 was changed, or anything else worth knowing about it. When the blob is a
 [diff](diff.md) of a step, the annotation is the step's notes and takes the
-place of a changelog: each changed line carries its own reason
-([history.md](history.md), key `'notes'` of a step). An annotation of a
+place of a changelog: each changed line carries its own reason (the
+`step` of a parent in a [commit](commit.md)). An annotation of a
 plain file serves where there is only one side, the before or the after.
 
 The blob is UTF-8 text:

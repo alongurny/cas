@@ -1,6 +1,6 @@
 # Importing git
 
-`cas import-git <repo> [<rev>] [-H <name>]` turns the commits reachable
+`cas import-git <repo> [<rev>] [-H <name>] [--as <name>]` turns the commits reachable
 from `<rev>` (default `HEAD`) into a new history of commits named `<name>`
 (default `main`). It runs `git` and only reads the repository: git packs
 the objects `<rev>` reaches, the store takes them in git's own formats
@@ -19,7 +19,8 @@ the way a forge makes one of a commit pushed to it ([forge/git](forge/git.md)).
 | author | the commit's author, `Name <email>` |
 | committer's time | the commit's time |
 | commit message | the note of the step from the first parent, its lines that say something joined by ` / `; a root commit's is the note of its version |
-| tag | not imported: a history of commits has no tags, and a release is published |
+| tag whose name is a semantic version (a leading `v` aside), on an imported commit | a release of that commit's version in `releases` (or `--as <name>`), oldest commit first; git does not say what a tag changes, so each release after the first is a `breaking` change, with the tag's message (else `release <version>`) as its changelog. A version already released is skipped |
+| any other tag | left out, and listed with the reason |
 
 The same git commits always give the same commits. Empty directories do not
 exist in git, so none are created. The git objects are not kept by the

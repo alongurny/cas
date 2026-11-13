@@ -228,7 +228,7 @@ fn the_views_a_blob_holds_follow_from_its_type() {
     assert_eq!(aliases, ["directory", "author", "annotation", "commit", "annotation", "commit"]);
     let kids = by_type("release").unwrap().children(&by_type("release").unwrap().print(&s[7].1)).unwrap();
     let aliases: Vec<&str> = kids.iter().map(|v| by_id(v.format()).unwrap().alias).collect();
-    assert_eq!(aliases, ["directory", "tag", "release", "note", "release", "note"]);
+    assert_eq!(aliases, ["directory", "tag", "release", "prose", "release", "prose"]);
 }
 
 #[test]

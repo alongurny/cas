@@ -311,3 +311,79 @@ pub fn import(
     let key = from_git(store, alg, &mut links, &tip, &[])?;
     Ok((key, links))
 }
+
+/// A git tag to publish as a release: its name in git, the semantic version
+/// (the name with a leading `v` dropped), the version of the commit it
+/// tags, and its changelog (the tag's message, else `release <tag>`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagRelease {
+    pub name: String,
+    pub tag: String,
+    pub version: View,
+    pub changelog: String,
+}
+
+/// A git tag that is not made a release, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagLeftOut {
+    pub name: String,
+    pub why: String,
+}
+
+fn git_out(repo: &std::path::Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = std::process::Command::new("git").arg("-C").arg(repo).args(args).output()?;
+    if !out.status.success() {
+        return Err(Error::Io(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim())));
+    }
+    Ok(out.stdout)
+}
+
+/// The git tags of `repo` that become releases of the history ending at
+/// `tip` (whose commits `links` names in git): each tag whose name is a
+/// semantic version, a leading `v` aside, and that tags a commit of the
+/// history. Oldest commit first; tags in `have` are skipped silently. The
+/// rest are left out with a reason.
+pub fn tag_releases(
+    store: &dyn Store,
+    repo: &std::path::Path,
+    tip: &str,
+    links: &Links,
+    have: &[String],
+) -> Result<(Vec<TagRelease>, Vec<TagLeftOut>)> {
+    let of_git: HashMap<&String, &String> = links.iter().map(|(k, g)| (g, k)).collect();
+    let log = commits::log(store, tip)?;
+    let pos: HashMap<&String, usize> = log.iter().rev().enumerate().map(|(i, (k, _))| (k, i)).collect();
+    let names = String::from_utf8_lossy(&git_out(repo, &["tag", "-l"])?).into_owned();
+    let mut found: Vec<(usize, TagRelease)> = Vec::new();
+    let mut left = Vec::new();
+    for name in names.lines().filter(|n| !n.is_empty()) {
+        let tag = name.strip_prefix('v').unwrap_or(name);
+        if crate::typed::check_semver(tag.as_bytes()).is_err() {
+            left.push(TagLeftOut { name: name.into(), why: "not a semantic version".into() });
+            continue;
+        }
+        let Ok(id) = git_out(repo, &["rev-parse", &format!("refs/tags/{name}^{{commit}}")]) else {
+            left.push(TagLeftOut { name: name.into(), why: "tags no commit".into() });
+            continue;
+        };
+        let id = String::from_utf8_lossy(&id).trim().to_string();
+        let Some(i) = of_git.get(&id).and_then(|k| pos.get(k)) else {
+            left.push(TagLeftOut { name: name.into(), why: format!("tags sha1:{id}, not in the history") });
+            continue;
+        };
+        if have.iter().any(|h| h == tag) {
+            continue;
+        }
+        if let Some((_, other)) = found.iter().find(|(_, r)| r.tag == tag) {
+            left.push(TagLeftOut { name: name.into(), why: format!("the same version as {}", other.name) });
+            continue;
+        }
+        let msg = git_out(repo, &["tag", "-l", "--format=%(contents)", name]).unwrap_or_default();
+        let msg = String::from_utf8_lossy(&msg).trim().to_string();
+        let changelog = if msg.is_empty() { format!("release {tag}") } else { msg };
+        let version = log[log.len() - 1 - i].1.version();
+        found.push((*i, TagRelease { name: name.into(), tag: tag.into(), version, changelog }));
+    }
+    found.sort_by(|a, b| (a.0, &a.1.name).cmp(&(b.0, &b.1.name)));
+    Ok((found.into_iter().map(|(_, r)| r).collect(), left))
+}

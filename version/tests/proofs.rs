@@ -61,7 +61,7 @@ fn a_manifest_has_one_encoding() {
     swapped.extend_from_slice(&b[..64]);
     assert!(Manifest::decode(&swapped).is_err());
     let mut tag = b.clone();
-    tag[32] = 9;
+    tag[32] = 11;
     assert!(Manifest::decode(&tag).is_err());
     assert!(Manifest::decode(&[]).is_err());
 }

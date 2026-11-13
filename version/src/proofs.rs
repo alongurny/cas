@@ -130,27 +130,38 @@ impl Walk<'_> {
 /// The manifest of the commit `key`: what it brings that its parents do not
 /// have in the same place.
 pub fn of_commit(store: &dyn Store, key: &str) -> Result<Manifest> {
+    crate::commits::read(store, key)?;
+    of_node(store, "commit", key)
+}
+
+/// The manifest of the release `key` (spec/functions/release-manifest.md):
+/// what it brings that the releases it follows do not have in the same
+/// place.
+pub fn of_release(store: &dyn Store, key: &str) -> Result<Manifest> {
+    crate::releases::read(store, key)?;
+    of_node(store, "release", key)
+}
+
+/// The manifest of a commit or a release: a head compared with the heads of
+/// the nodes its list names first (its parents), and a list whose other
+/// keys are its own.
+fn of_node(store: &dyn Store, alias: &'static str, key: &str) -> Result<Manifest> {
     let k = key_bytes(key).ok_or_else(|| Error::BadKey(key.to_string()))?;
-    let c = crate::commits::read(store, key)?;
-    let mut parents = Vec::new();
-    for p in c.parents.keys() {
-        parents.push(key_bytes(p).ok_or_else(|| Error::BadKey(p.clone()))?);
-    }
-    // The commit's fields are compared with its parents' fields.
+    let t = by_type(alias).unwrap();
     let mut w = Walk { store, out: Manifest::default(), parsed: BTreeMap::new() };
-    let t = by_type("commit").unwrap();
     let bytes = read_blob(store, key)?;
-    w.out.blobs.insert(k, ("commit", bytes.len() as u64));
+    w.out.blobs.insert(k, (alias, bytes.len() as u64));
     let v = t.parse(&bytes).map_err(|e| malformed(key, e))?;
+    // The node's fields are compared with its parents' fields.
     let mut heads = Vec::new();
-    for p in &parents {
-        if let Some(pv) = w.value(t, p)?.clone() {
+    for e in &v.list {
+        if let Some(pv) = w.value(t, &e.keys[0])?.clone() {
             heads.extend(pv.head);
         }
     }
     let r = t.head.as_ref().unwrap();
     w.fields(r, v.head.as_ref().unwrap(), &heads.iter().collect::<Vec<_>>())?;
-    // The notes of each step are this commit's own.
+    // The notes of each step, or each changelog, are this node's own.
     let (lr, _) = t.list.as_ref().unwrap();
     for e in &v.list {
         w.fields(lr, e, &[])?;
@@ -160,6 +171,10 @@ pub fn of_commit(store: &dyn Store, key: &str) -> Result<Manifest> {
 
 fn manifest(store: &dyn Store, _: &'static Algorithm, input: &View) -> Result<Vec<u8>> {
     Ok(of_commit(store, input.key())?.encode())
+}
+
+fn release_manifest(store: &dyn Store, _: &'static Algorithm, input: &View) -> Result<Vec<u8>> {
+    Ok(of_release(store, input.key())?.encode())
 }
 
 fn no_prover(_: &dyn Store, _: &'static Algorithm, _: &View) -> Result<Vec<u8>> {
@@ -173,6 +188,15 @@ pub static MANIFEST: Function = Function {
     output: "manifest",
     spec: include_str!("../../spec/functions/manifest.md"),
     compute: manifest,
+};
+
+/// What a release brings, as a manifest.
+pub static RELEASE_MANIFEST: Function = Function {
+    name: "release-manifest",
+    input: "release",
+    output: "manifest",
+    spec: include_str!("../../spec/functions/release-manifest.md"),
+    compute: release_manifest,
 };
 
 /// A proof that the blobs of a manifest are valid. Made by the prover and

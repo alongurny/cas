@@ -8,7 +8,6 @@ use crate::record::{self, Doc, Record};
 use crate::{Error, Forge, Result, now};
 use cas_version::gitcommits::{self, Links};
 use cas_version::{commits, releases};
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path as FsPath;
 use std::process::{Command, Stdio};
@@ -194,42 +193,13 @@ impl Forge {
     /// `v` aside) and names a commit of the history ending at `tip`, oldest
     /// first, unless there is a release of that tag already.
     fn mirror_releases(&self, user: &str, p: &ProjectId, dir: &FsPath, tip: &str, links: &Links) -> Result<()> {
-        let of_git: HashMap<&String, &String> = links.iter().map(|(k, g)| (g, k)).collect();
-        let log = commits::log(&*self.store, tip)?;
-        let pos: HashMap<&String, usize> = log.iter().rev().enumerate().map(|(i, (k, _))| (k, i)).collect();
-        let names = String::from_utf8_lossy(&git(dir, &["tag", "-l"])?).into_owned();
-        let mut tags: Vec<(usize, &str, String)> = Vec::new();
-        for name in names.lines().filter(|n| !n.is_empty()) {
-            let tag = name.strip_prefix('v').unwrap_or(name);
-            if cas_version::typed::check_semver(tag.as_bytes()).is_err() {
-                continue;
-            }
-            let Ok(id) = git(dir, &["rev-parse", &format!("refs/tags/{name}^{{commit}}")]) else { continue };
-            let id = String::from_utf8_lossy(&id).trim().to_string();
-            if let Some(i) = of_git.get(&id).and_then(|k| pos.get(k)) {
-                tags.push((*i, name, tag.to_string()));
-            }
-        }
-        tags.sort();
         let var = p.var(RELEASE);
-        let mut have: Vec<String> = match releases::tip(&*self.store, &var)? {
-            Some(t) => releases::log(&*self.store, &t)?.into_iter().map(|(_, _, tag)| tag).collect(),
-            None => Vec::new(),
-        };
-        for (i, name, tag) in tags {
-            if have.contains(&tag) {
-                continue;
-            }
-            let version = log[log.len() - 1 - i].1.version();
-            let msg =
-                String::from_utf8_lossy(&git(dir, &["tag", "-l", "--format=%(contents)", name]).unwrap_or_default())
-                    .trim()
-                    .to_string();
-            let changelog = if msg.is_empty() { format!("release {tag}") } else { msg };
-            // What a tag changes is not said in git: it may be anything.
-            let edge = (!have.is_empty()).then_some(("breaking", changelog.as_str()));
-            as_actor(Some(user), || releases::publish(&*self.store, self.alg, &var, &version, &tag, edge))?;
-            have.push(tag);
+        let have = releases::tags(&*self.store, &var)?;
+        let (tags, _) = gitcommits::tag_releases(&*self.store, dir, tip, links, &have)?;
+        for t in tags {
+            as_actor(Some(user), || {
+                releases::publish_git_tags(&*self.store, self.alg, &var, std::slice::from_ref(&t))
+            })?;
         }
         Ok(())
     }

@@ -384,10 +384,12 @@ fn releases_have_tags_and_typed_changes() {
 
     let shown = cas(&store, &["-H", "releases", "log"]);
     let lines: Vec<&str> = shown.lines().collect();
-    assert_eq!(lines.len(), 7, "{shown}");
+    // A changelog keeps its lines.
+    assert_eq!(lines.len(), 10, "{shown}");
     assert!(lines[0].starts_with("2.0.0  "));
-    assert_eq!(lines[1], "  breaking from 1.1.0: What 2.0.0 changes. / In two lines.");
-    assert_eq!(lines[6].split("  ").next(), Some("1.0.0"));
+    assert_eq!(lines[1], "  breaking from 1.1.0: What 2.0.0 changes.");
+    assert_eq!(lines[2], "    In two lines.");
+    assert_eq!(lines[9].split("  ").next(), Some("1.0.0"));
     assert_eq!(cas(&store, &["-H", "releases", "compatible", "1.0.0", "1.1.0"]), "compatible\n");
     assert_eq!(cas(&store, &["-H", "releases", "compatible", "1.0.0", "2.0.0"]), "breaking\n");
     cas(&store, &["-H", "releases", "-n", "1.0.1", "checkout", out.to_str().unwrap()]);
@@ -520,4 +522,44 @@ fn a_server_proves_what_is_pushed_and_a_client_asks_it_for_proofs() {
     assert_eq!(o.status.code(), Some(1));
     let err = String::from_utf8(o.stderr).unwrap();
     assert!(err.contains(&format!("{url} has no proof of commit blake3:")), "{err}");
+}
+
+/// `import-git` makes the git tags that are semantic versions releases, and
+/// says which tags it leaves out.
+#[test]
+fn import_git_takes_semantic_version_tags_as_releases() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path().join("repo");
+    let store = tmp.path().join("store");
+    let git = |args: &[&str]| {
+        let o = Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "user.name=Dana", "-c", "user.email=dana@example.org"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+    };
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&["init", "-q"]);
+    for (i, tag) in ["v1.0.0", "1.1.0", "not-a-version"].iter().enumerate() {
+        std::fs::write(repo.join("a"), format!("{i}\n")).unwrap();
+        git(&["add", "a"]);
+        git(&["commit", "-qm", &format!("step {i}")]);
+        git(&["tag", "-a", tag, "-m", &format!("Release {tag}.\n\nSecond paragraph.")]);
+    }
+    let out = cas(&store, &["import-git", repo.to_str().unwrap()]);
+    assert!(out.contains("release 1.0.0 "), "{out}");
+    assert!(out.contains("release 1.1.0 "), "{out}");
+    assert!(out.contains("left out git tag not-a-version: not a semantic version"), "{out}");
+    let shown = cas(&store, &["-H", "releases", "log"]);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert!(lines[0].starts_with("1.1.0  "), "{shown}");
+    assert_eq!(lines[1], "  breaking from 1.0.0: Release 1.1.0.");
+    assert_eq!(lines[2], "");
+    assert_eq!(lines[3], "    Second paragraph.");
+    assert!(lines[4].starts_with("1.0.0  "), "{shown}");
+    cas(&store, &["-H", "releases", "-n", "1.0.0", "checkout", tmp.path().join("out").to_str().unwrap()]);
+    assert_eq!(std::fs::read_to_string(tmp.path().join("out/a")).unwrap(), "0\n");
 }

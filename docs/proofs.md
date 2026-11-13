@@ -41,6 +41,23 @@ result of the function `manifest` on the commit, and the proof the result of
 the function `proof` on the manifest. So they travel and are collected like
 any other derived result, and a store need not have them.
 
+## Releases
+
+A release history is proven the same way, release by release:
+
+```sh
+$ cas -H releases prove --all
+$ cas -H releases verify --all
+$ cas -H releases manifest -n 1.1.0
+```
+
+A release's manifest (the function `release-manifest`,
+[../spec/functions/release-manifest.md](../spec/functions/release-manifest.md))
+lists the release, its tag (proven a semantic version), its changelogs
+(proven prose) and the part of its version that the releases it follows do
+not have in the same place. So a release history can be checked without the
+commits its versions came from.
+
 ## What is not proven
 
 - That the manifest is the right one for its commit. `cas verify` works the
@@ -49,7 +66,6 @@ any other derived result, and a store need not have them.
   there is none yet.
 - One proof for a whole history. Each commit has its own proof, and
   `--all` checks them one by one.
-- Release histories and tags. No circuit checks a semantic version yet.
 - Nothing is proven in a remote store from outside: `prove` and `verify` run
   where the store directory is. A server proves its own store (below).
 

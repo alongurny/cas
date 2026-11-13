@@ -8,7 +8,7 @@ use crate::project::{DEV, RELEASE};
 use crate::{Error, Forge, Result};
 use cas_core::Expect;
 use cas_version::uni::Value;
-use cas_version::{Node, View, commits, read_blob, releases, walk};
+use cas_version::{Node, View, read_blob, releases, walk};
 use serde_json::{Value as J, json};
 
 impl Forge {
@@ -19,7 +19,7 @@ impl Forge {
         for (key, r, tag) in releases::log(&*self.store, &tip)? {
             // What it says of the release before it.
             let (changelog, change) = match r.from.values().next() {
-                Some((note, change)) => (Some(commits::text(&*self.store, note)?), Some(*change)),
+                Some((note, change)) => (Some(releases::changelog(&*self.store, note)?), Some(*change)),
                 None => (None, None),
             };
             out.push(json!({

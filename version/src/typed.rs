@@ -274,6 +274,15 @@ pub fn check_text(b: &[u8]) -> Result<(), String> {
     }
 }
 
+/// `prose`: UTF-8 with no control character but the line feed.
+pub fn check_prose(b: &[u8]) -> Result<(), String> {
+    match std::str::from_utf8(b) {
+        Ok(s) if !s.chars().any(|c| c.is_control() && c != '\n') => Ok(()),
+        Ok(_) => Err("prose has a control character other than a line feed".into()),
+        Err(_) => Err("prose is not UTF-8".into()),
+    }
+}
+
 /// `semver`: a version as Semantic Versioning 2.0.0 writes it.
 pub fn check_semver(b: &[u8]) -> Result<(), String> {
     let s = std::str::from_utf8(b).map_err(|_| "a tag is not UTF-8")?;
@@ -303,7 +312,8 @@ fn maybe(name: &'static str, targets: &'static [&'static str]) -> KeyF {
 }
 
 /// The types a proof can cover, in the tag order of a manifest.
-pub const PROVEN: &[&str] = &["directory", "commit", "annotation", "lines", "runs", "release", "note", "author"];
+pub const PROVEN: &[&str] =
+    &["directory", "commit", "annotation", "lines", "runs", "release", "note", "author", "prose", "tag"];
 
 /// The kinds of change between two releases, in tag order.
 pub const CHANGES: &[&str] = &["breaking", "feature", "patch", "security"];
@@ -384,7 +394,7 @@ static TYPES: LazyLock<Vec<Type>> = LazyLock::new(|| {
             nonempty: true,
         },
         // release = { version: key<directory>, tag: key<tag>,
-        //             from: sorted<{ release: key<release>, changelog: key<note>, change }> by release }
+        //             from: sorted<{ release: key<release>, changelog: key<prose>, change }> by release }
         Type {
             alias: "release",
             head: Some(Rec {
@@ -395,7 +405,7 @@ static TYPES: LazyLock<Vec<Type>> = LazyLock::new(|| {
             }),
             list: Some((
                 Rec {
-                    keys: vec![key("release", &["release"]), key("changelog", &["note"])],
+                    keys: vec![key("release", &["release"]), key("changelog", &["prose"])],
                     choices: vec![ChoiceF { name: "change", kinds: CHANGES }],
                     ints: vec![],
                     name: false,

@@ -43,6 +43,7 @@ _cas() {
             push) opts+=' --as' ;;
             pull) opts+=' --as' ;;
             publish) opts+=' --tag --change --changelog --as' ;;
+            import-git) opts+=' --as' ;;
             gc) opts+=' --full' ;;
             serve) opts+=' --cert --key --open --max-body --prove' ;;
         esac

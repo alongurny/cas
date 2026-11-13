@@ -48,7 +48,7 @@ _cas() {
         'pull:fetch the history from another store'
         'publish:add the commit'\''s version to the release history as a release'
         'compatible:whether upgrading from release <from> to <to> is safe'
-        'import-git:import the commits of a git repository as a new history'
+        'import-git:import the commits of a git repository as a new history, and its tags as releases'
         'gc:remove blobs that no history reaches'
         'fsck:check every reachable blob\: readable, valid and complete'
         'objects:every blob key in the store'
@@ -99,7 +99,7 @@ _cas() {
                 push) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
                 pull) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
                 publish) _arguments $general '--tag[the semantic version of the release, such as 1.4.0]:<version>:' '--change[what the release changes since the one before\: breaking, feature, patch or security]:<kind>:(breaking feature patch security)' '--changelog[the text that says what the release changes]:<file>:_files' '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' ;;
-                import-git) _arguments $general '*: :_files' ;;
+                import-git) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
                 gc) _arguments $general '--full[walk the whole store, not only what came since the last full run]' ;;
                 annotated) _arguments $general '1: :_cas_word_or_file make show' '*: :_files' ;;
                 serve) _arguments $general '--cert[the PEM certificate chain to serve with]:<file>:_files' '--key[the PEM private key to serve with]:<file>:_files' '--open[serve to anyone, without an access policy]' '--max-body[the largest request body accepted (default 64 MiB)]:<bytes>:' '--prove[prove each history of commits as it moves (needs cas-prove)]' '*: :_files' ;;

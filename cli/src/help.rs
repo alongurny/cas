@@ -224,7 +224,9 @@ pub const COMMANDS: &[Cmd] = &[
         "what a proof of the commit covers",
         "Lists each blob the commit brings that is not a file: its type, its key and its length. \
          A proof for this list says that each of them is valid. The last line gives the totals \
-         and the key of the manifest, which is what a proof is named by.",
+         and the key of the manifest, which is what a proof is named by. In a release history \
+         (-H releases) it is the manifest of the release: the release, its tag, its changelogs \
+         and the part of its version the releases before it do not have.",
     ),
     Cmd {
         opts: &["--all", "--quiet"],
@@ -235,7 +237,8 @@ pub const COMMANDS: &[Cmd] = &[
             "make a proof that what the commit brings is valid",
             "The proof covers the manifest of the commit (`cas manifest`) and is kept in the store \
              beside it. With --all, every commit the commit reaches that has no proof yet gets \
-             one, oldest first. `serve --prove` runs this whenever a history moves.\n\n\
+             one, oldest first. `serve --prove` runs this whenever a history moves. In a release \
+             history it proves releases.\n\n\
              Proving is done by the program cas-prove, built from prove/ (docs/proofs.md).",
         )
     },
@@ -250,7 +253,8 @@ pub const COMMANDS: &[Cmd] = &[
              it reaches. A proof is checked against the manifest alone: no listed blob is read. \
              With --from, a proof \
              that is not here is first fetched from that store and kept, so a client holds only \
-             the proofs it asked for. Fails when a commit has no proof or a proof does not verify.",
+             the proofs it asked for. Fails when a commit has no proof or a proof does not verify. In a \
+             release history it checks releases.",
         )
     },
     cmd("summary", READ, &["summary"], "how many directories and files the commit's version has", ""),
@@ -318,13 +322,17 @@ pub const COMMANDS: &[Cmd] = &[
     ),
     Cmd {
         words: Words::Path,
+        opts: &["--as"],
         ..cmd(
             "import-git",
             JOIN,
-            &["import-git <repo> [<rev>]"],
-            "import the commits of a git repository as a new history",
+            &["import-git <repo> [<rev>] [--as <name>]"],
+            "import the commits of a git repository as a new history, and its tags as releases",
             "<rev> is HEAD unless given. Refused when the history exists. A commit's message \
-             becomes the note of its step.",
+             becomes the note of its step. Each git tag on an imported commit whose name is a \
+             semantic version (a leading v aside) becomes a release in `releases`, or --as <name>, \
+             oldest first; git does not say what a tag changes, so each is a breaking change, with \
+             the tag's message as its changelog. The tags left out are listed with the reason.",
         )
     },
     Cmd {
