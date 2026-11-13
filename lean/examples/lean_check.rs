@@ -2,10 +2,12 @@
 //! `measure/Export.lean`: for each axiom, definition, theorem and opaque
 //! declaration, the builder cites what it needs from the export, writes
 //! the tables, and the checker checks them. One line per declaration on
-//! stdout: name, kind, status, rows, terms, milliseconds, message.
+//! stdout: name, kind, status, rows, terms, milliseconds, message. Unsafe
+//! declarations are skipped: Lean's kernel does not fully check them.
 //!
 //! Usage: `lean_check <export> [--only NAME] [--every N] [--budget ROWS]
-//! [--workers N] [--limit N] [--blocks]`. With `--blocks`, each inductive
+//! [--workers N] [--limit N] [--blocks] [--names FILE]`, FILE listing names
+//! one per line. With `--blocks`, each inductive
 //! block instead: checked, and its recursors compared with Lean's.
 
 use cas_lean::Checker;
@@ -161,15 +163,20 @@ fn main() {
     let workers: usize = opt("--workers").map_or(4, |s| s.parse().unwrap());
     let limit: usize = opt("--limit").map_or(usize::MAX, |s| s.parse().unwrap());
     let only = opt("--only");
+    let names: Option<std::collections::HashSet<String>> =
+        opt("--names").map(|f| std::fs::read_to_string(f).unwrap().lines().map(str::to_string).collect());
     let blocks = args.iter().any(|a| a == "--blocks");
     let todo: Vec<usize> = (0..env.decls.len())
         .filter(|i| {
             let d = &env.decls[*i];
-            (if blocks {
-                matches!(&d.kind, Kind::Induct { all, .. } if all[0] == d.name)
-            } else {
-                matches!(d.kind, Kind::Axiom | Kind::Def { .. } | Kind::Thm { .. } | Kind::Opaque { .. })
-            }) && only.as_ref().is_none_or(|n| env.name(d.name) == *n)
+            !d.unsafe_
+                && (if blocks {
+                    matches!(&d.kind, Kind::Induct { all, .. } if all[0] == d.name)
+                } else {
+                    matches!(d.kind, Kind::Axiom | Kind::Def { .. } | Kind::Thm { .. } | Kind::Opaque { .. })
+                })
+                && only.as_ref().is_none_or(|n| env.name(d.name) == *n)
+                && names.as_ref().is_none_or(|s| s.contains(&env.name(d.name)))
         })
         .step_by(every)
         .take(limit)

@@ -13,7 +13,8 @@ shared; each line is one item, its fields separated by spaces:
   `E i a f x`, `E i l t b` (lambda), `E i f t b` (pi), `E i z t v b` (let),
   `E i n <nat>`, `E i t <hex>` (string literal), `E i j <struct> idx e`;
   metadata is dropped, as the kernel ignores it;
-* `D <name> <type> <nlevels> <level names>... | <rest>`, rest by
+* `D <name> <type> <nlevels> <level names>... [u] | <rest>` (u marks an
+  unsafe declaration, which the kernel does not fully check), rest by
   kind: `axiom`; `def <value> <hint>` (hint `o`, `a` or a height);
   `thm <value>`; `opaque <value>`; `quot <type|ctor|lift|ind>`;
   `induct <params> <indices> <rec> <nnested> all <names> ctors <names>`;
@@ -115,7 +116,7 @@ def decl (ci : ConstantInfo) : M Unit := do
     | .recInfo v => do
       let rules ← v.rules.mapM fun r => do pure s!" {← name r.ctor} {r.nfields} {← expr r.rhs}"
       pure s!"rec {v.numParams} {v.numIndices} {v.numMotives} {v.numMinors} {if v.k then 1 else 0} all{← names v.all} rules{String.join rules}"
-  emit s!"D {n} {ty} {ci.levelParams.length}{lps} | {rest}"
+  emit s!"D {n} {ty} {ci.levelParams.length}{lps}{if ci.isUnsafe then " u" else ""} | {rest}"
 
 def main (args : List String) : IO Unit := do
   let out :: mods := args | throw (IO.userError "usage: <out-file> <Module>...")

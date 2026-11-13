@@ -817,13 +817,9 @@ impl Builder {
                 let (p5, t) = self.infer(g, b2)?;
                 (Rule::Let, vec![p0, p1, p2, p3, p4, p5], t)
             }
-            TermRow::Lit(_) => {
-                let d = *self.prims.get(&Prim::Nat).ok_or("no Nat for literals")?;
-                (Rule::LitNat, vec![], self.constant(d, &[]))
-            }
+            TermRow::Lit(_) => (Rule::LitNat, vec![], self.prim_const(Prim::Nat, &[]).ok_or("no Nat for literals")?),
             TermRow::Str(_) => {
-                let d = *self.prims.get(&Prim::String).ok_or("no String for literals")?;
-                (Rule::LitStr, vec![], self.constant(d, &[]))
+                (Rule::LitStr, vec![], self.prim_const(Prim::String, &[]).ok_or("no String for literals")?)
             }
             TermRow::Proj(s, idx, x) => {
                 let (prem, t) = self.proj_type(g, s, idx, x)?;

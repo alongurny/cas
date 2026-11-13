@@ -70,6 +70,8 @@ pub struct Decl {
     pub ty: u32,
     pub lparams: Vec<u32>,
     pub kind: Kind,
+    /// Lean's kernel does not check unsafe declarations fully.
+    pub unsafe_: bool,
 }
 
 #[derive(Default)]
@@ -153,7 +155,14 @@ impl Env {
             }
             "D" => {
                 let bar = w.iter().position(|x| *x == "|").ok_or("no bar")?;
-                let lparams = (4..bar).map(n).collect::<Result<_, _>>()?;
+                // `D name ty nlevels lparams... [u] | rest`: u marks an unsafe declaration.
+                let nl = n(3)? as usize;
+                let lparams = (4..4 + nl).map(n).collect::<Result<_, _>>()?;
+                let unsafe_ = match bar - 4 - nl {
+                    0 => false,
+                    1 if w[4 + nl] == "u" => true,
+                    _ => return Err("a bad declaration header".into()),
+                };
                 let r = &w[bar + 1..];
                 let m = |k: usize| -> Result<u32, String> {
                     r.get(k).ok_or("a field is missing")?.parse::<u32>().map_err(|e| e.to_string())
@@ -204,7 +213,7 @@ impl Env {
                     }
                     k => return Err(format!("declaration kind {k}")),
                 };
-                self.decls.push(Decl { name: n(1)?, ty: n(2)?, lparams, kind });
+                self.decls.push(Decl { name: n(1)?, ty: n(2)?, lparams, kind, unsafe_ });
             }
             k => return Err(format!("line kind {k}")),
         }

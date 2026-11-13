@@ -272,7 +272,7 @@ fn main() {
     let only = opt("--only");
     let picked: Vec<usize> = (0..env.decls.len())
         .filter(|i| only.as_ref().is_none_or(|n| env.name(env.decls[*i].name) == *n))
-        .filter(|i| matches!(env.decls[*i].kind, Kind::Def { .. } | Kind::Thm { .. }))
+        .filter(|i| !env.decls[*i].unsafe_ && matches!(env.decls[*i].kind, Kind::Def { .. } | Kind::Thm { .. }))
         .step_by(every)
         .take(limit)
         .collect();

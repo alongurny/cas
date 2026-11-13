@@ -558,7 +558,7 @@ impl Builder {
     /// Lean's `is_def_eq_core`.
     pub(crate) fn defeq_core(&mut self, g: Ix, t: Ix, s: Ix) -> Res<Option<Ix>> {
         self.depth += 1;
-        if self.depth > 2000 {
+        if self.depth > 20000 {
             panic!("defeq too deep: {} =?= {}", self.show(t), self.show(s));
         }
         let r = self.defeq_core_(g, t, s);
