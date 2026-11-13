@@ -672,7 +672,7 @@ fn literal_prelude(b: &mut Builder) -> u32 {
     let z = b.zero();
     let one = b.succ(z);
     let type0 = b.sort(one);
-    let mut cite = |b: &mut Builder, k: u8, kind, levels, ty, info, prim: Option<Prim>| {
+    let cite = |b: &mut Builder, k: u8, kind, levels, ty, info, prim: Option<Prim>| {
         let d = b.decl(DeclRow { key: key(k), kind, levels, ty, value: None, info });
         if let Some(p) = prim {
             b.prim(p, d);
