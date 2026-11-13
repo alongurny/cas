@@ -75,3 +75,32 @@ entering as private chaining values, and proves an edit of the same length
 by sharing those values between the old and the new key. Its cost is the
 opened chunks' blocks and one parent per level for each side, against
 every block of the blob. Steps 2 and 3 (#1) are not started.
+
+## #1 without places (2026-11-13)
+
+Matching "the same place" needs names and merges handled in the circuit.
+A weaker condition is enough and is simpler:
+
+- Let V be the blobs the proof opens from the parents: each parent commit
+  (its key is in the commit, which is listed), and any blob whose key an
+  opened blob of V holds.
+- Each key a listed blob holds (not a file, not a parent commit, not none)
+  is, with its type, either a record of the manifest or held by a blob of
+  V with the same type.
+
+Sound: every blob of V is reachable from a verified parent, so by
+induction every key it holds of a proven type is valid. Complete: the
+manifest walk leaves a key out only when a parent's counterpart in the
+same field holds it, and the prover opens that counterpart chain as V.
+
+In the circuit this is one lookup: requests `(key, type)` from the rows of
+the listed blobs, supplies from the manifest's public records and from the
+rows of V. A supply answers any number of requests, so it needs the bus
+with multiplicities (alon/flock docs/tuple-bus-review-cas.md, finding 2),
+which Flock does not have yet. V's blobs are hashed whole (an insertion
+shifts every later entry), which is about the cost of the parents' changed
+directories again.
+
+Next: multiplicities on Flock's bus (a bit-decomposed multiplicity column,
+`∏ (β + φ)^(2^i m_i)` on the supply side), then the request and supply
+ports on the typed rows, then `cas verify` from the manifest alone.
