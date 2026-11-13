@@ -6,3 +6,8 @@ description = "Lean declarations checked as tables of local rules (spec/lean/tab
 
 [dependencies]
 blake3 = "1.8.7"
+num-bigint = "0.4.8"
+num-integer = "0.1.47"
+
+[dev-dependencies]
+num-bigint = "0.4.8"

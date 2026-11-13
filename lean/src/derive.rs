@@ -7,7 +7,9 @@
 //! here to produce tables for tests and to count rows, not to be fast.
 
 use crate::level::{Level, equivalent};
+use crate::nat;
 use crate::tables::*;
+use num_bigint::BigUint;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -24,6 +26,7 @@ pub struct Builder {
     terms: HashMap<TermRow, Ix>,
     ctxs: HashMap<CtxRow, Ix>,
     decls: HashMap<Key, Ix>,
+    prims: HashMap<Prim, Ix>,
     facts: HashMap<Fact, Ix>,
     infers: HashMap<(Ix, Ix), (Ix, Ix)>,
     meta: Vec<Meta>,
@@ -150,6 +153,12 @@ impl Builder {
     }
     pub fn empty(&mut self) -> Ix {
         self.ctx(CtxRow::Empty)
+    }
+
+    /// Names the declaration row `d` as the primitive `p`.
+    pub fn prim(&mut self, p: Prim, d: Ix) {
+        self.t.prims.push((p, d));
+        self.prims.insert(p, d);
     }
 
     /// Cites a declaration (its own proof is assumed).
@@ -455,6 +464,9 @@ impl Builder {
     /// or by eta for a structure that is not a proposition (Lean's
     /// `to_cnstr_when_K` and `to_cnstr_when_structure`).
     fn as_ctor(&mut self, g: Ix, m: Ix, rules: &[RecRule]) -> Option<(Ix, Ix)> {
+        if let Some(r) = self.lit_as_ctor(g, m) {
+            return Some(r);
+        }
         let (h, _) = self.spine(m);
         if let TermRow::Const(c, _) = self.t.terms[h as usize]
             && matches!(self.t.decls[c as usize].info, Info::Ctor { .. })
@@ -516,11 +528,144 @@ impl Builder {
         Some((self.trans(cong, step), b))
     }
 
+    // ---- Literals ----
+
+    fn prim_const(&mut self, p: Prim, levels: &[Ix]) -> Option<Ix> {
+        let d = *self.prims.get(&p)?;
+        Some(self.constant(d, levels))
+    }
+
+    /// The primitive `e` is, used without levels.
+    fn prim_of(&self, e: Ix) -> Option<Prim> {
+        let TermRow::Const(d, ls) = self.t.terms[e as usize] else { return None };
+        let key = self.t.decls[d as usize].key;
+        let p = self.t.prims.iter().find(|(_, x)| self.t.decls[*x as usize].key == key)?.0;
+        self.levels_of(ls).is_empty().then_some(p)
+    }
+
+    pub fn nat_lit(&mut self, n: &BigUint) -> Ix {
+        self.term(TermRow::Lit(nat::bytes(n)))
+    }
+
+    fn lit_val(&self, l: Ix) -> BigUint {
+        match &self.t.terms[l as usize] {
+            TermRow::Lit(b) => nat::value(b),
+            _ => unreachable!("a literal"),
+        }
+    }
+
+    /// A literal written as a constructor application, and `Eq(g, m, c)`:
+    /// `Nat.zero` or `Nat.succ (lit n)`, or `String.mk` of the characters.
+    fn lit_as_ctor(&mut self, g: Ix, m: Ix) -> Option<(Ix, Ix)> {
+        match self.t.terms[m as usize].clone() {
+            TermRow::Lit(bytes) => {
+                let n = nat::value(&bytes);
+                let (c, rule) = if n == BigUint::ZERO {
+                    (self.prim_const(Prim::NatZero, &[])?, Rule::NatZero)
+                } else {
+                    let prev = self.nat_lit(&(n - 1u32));
+                    let succ = self.prim_const(Prim::NatSucc, &[])?;
+                    (self.app(succ, prev), Rule::NatSucc)
+                };
+                let p = self.add(Fact::Eq { g, a: c, b: m }, rule, vec![]);
+                Some((self.symm(p), c))
+            }
+            TermRow::Str(s) => {
+                let s = String::from_utf8(s).ok()?;
+                let zero = self.zero();
+                let ch = self.prim_const(Prim::Char, &[])?;
+                let nil = self.prim_const(Prim::ListNil, &[zero])?;
+                let cons = self.prim_const(Prim::ListCons, &[zero])?;
+                let of_nat = self.prim_const(Prim::CharOfNat, &[])?;
+                let mut list = self.app(nil, ch);
+                for c in s.chars().rev() {
+                    let l = self.nat_lit(&(c as u32).into());
+                    let cv = self.app(of_nat, l);
+                    list = self.apps(cons, &[ch, cv, list]);
+                }
+                let mk = self.prim_const(Prim::StringMk, &[])?;
+                let b = self.app(mk, list);
+                Some((self.add(Fact::Eq { g, a: m, b }, Rule::StrLit, vec![]), b))
+            }
+            _ => None,
+        }
+    }
+
+    /// `Eq(g, e, lit)` when e reduces to a literal or to `Nat.zero`.
+    fn reduce_to_lit(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
+        let (p, w) = self.whnf(g, e);
+        if matches!(self.t.terms[w as usize], TermRow::Lit(_)) {
+            return Some((p, w));
+        }
+        if self.prim_of(w) == Some(Prim::NatZero) {
+            let l = self.nat_lit(&BigUint::ZERO);
+            let q = self.add(Fact::Eq { g, a: w, b: l }, Rule::NatZero, vec![]);
+            return Some((self.trans(p, q), l));
+        }
+        None
+    }
+
+    /// Lean's `reduce_nat`: `Nat.succ` of a literal, and the binary
+    /// operations on two literals.
+    fn nat_step(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
+        let TermRow::App(f, y) = self.t.terms[e as usize] else { return None };
+        if self.prim_of(f) == Some(Prim::NatSucc) {
+            let (p, l) = self.reduce_to_lit(g, y)?;
+            let r = self.nat_lit(&(self.lit_val(l) + 1u32));
+            let e2 = self.app(f, l);
+            let cong = if l == y {
+                self.refl(g, e)
+            } else {
+                let rf = self.refl(g, f);
+                self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongApp, vec![rf, p])
+            };
+            let s = self.add(Fact::Eq { g, a: e2, b: r }, Rule::NatSucc, vec![]);
+            return Some((self.trans(cong, s), r));
+        }
+        let TermRow::App(op, x) = self.t.terms[f as usize] else { return None };
+        let o = self.prim_of(op)?;
+        let zero = BigUint::ZERO;
+        nat::eval(o, &zero, &zero)?;
+        let (px, lx) = self.reduce_to_lit(g, x)?;
+        let (py, ly) = self.reduce_to_lit(g, y)?;
+        let r = match nat::eval(o, &self.lit_val(lx), &self.lit_val(ly))? {
+            nat::Value::Nat(n) => self.nat_lit(&n),
+            nat::Value::Bool(v) => self.prim_const(if v { Prim::BoolTrue } else { Prim::BoolFalse }, &[])?,
+        };
+        let f2 = self.app(op, lx);
+        let pf = if lx == x {
+            self.refl(g, f)
+        } else {
+            let rop = self.refl(g, op);
+            self.add(Fact::Eq { g, a: f, b: f2 }, Rule::CongApp, vec![rop, px])
+        };
+        let e2 = self.app(f2, ly);
+        let cong =
+            if e2 == e { self.refl(g, e) } else { self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongApp, vec![pf, py]) };
+        let s = self.add(Fact::Eq { g, a: e2, b: r }, Rule::NatBin, vec![]);
+        Some((self.trans(cong, s), r))
+    }
+
+    /// A literal against a constructor application (`Nat.zero`,
+    /// `Nat.succ x`, `String.mk l`): the literal is written as one.
+    fn lit_vs_ctor(&mut self, g: Ix, a: Ix, b: Ix) -> Res<Option<Ix>> {
+        let (h, _) = self.spine(b);
+        if !matches!(self.prim_of(h), Some(Prim::NatZero | Prim::NatSucc | Prim::StringMk)) {
+            return Ok(None);
+        }
+        let Some((p, c)) = self.lit_as_ctor(g, a) else { return Ok(None) };
+        let Some(q) = self.defeq_whnf(g, c, b)? else { return Ok(None) };
+        Ok(Some(self.trans(p, q)))
+    }
+
     fn step(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
         if let Some(r) = self.iota(g, e) {
             return Some(r);
         }
         if let Some(r) = self.quot(g, e) {
+            return Some(r);
+        }
+        if let Some(r) = self.nat_step(g, e) {
             return Some(r);
         }
         match self.t.terms[e as usize].clone() {
@@ -661,6 +806,12 @@ impl Builder {
         };
         if r.is_some() {
             return Ok(r);
+        }
+        if let Some(p) = self.lit_vs_ctor(g, a, b)? {
+            return Ok(Some(p));
+        }
+        if let Some(p) = self.lit_vs_ctor(g, b, a)? {
+            return Ok(Some(self.symm(p)));
         }
         if let Some(p) = self.eta_struct(g, a, b)? {
             return Ok(Some(p));
@@ -808,11 +959,11 @@ impl Builder {
                 (Rule::Let, vec![p0, p1, p2, p3, p4, p5], t)
             }
             TermRow::Lit(_) => {
-                let d = self.t.nat.ok_or("no Nat for literals")?;
+                let d = *self.prims.get(&Prim::Nat).ok_or("no Nat for literals")?;
                 (Rule::LitNat, vec![], self.constant(d, &[]))
             }
             TermRow::Str(_) => {
-                let d = self.t.string.ok_or("no String for literals")?;
+                let d = *self.prims.get(&Prim::String).ok_or("no String for literals")?;
                 (Rule::LitStr, vec![], self.constant(d, &[]))
             }
             TermRow::Proj(s, idx, x) => {

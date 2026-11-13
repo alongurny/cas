@@ -247,6 +247,8 @@ name = "cas-lean"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "num-bigint",
+ "num-integer",
 ]
 
 [[package]]

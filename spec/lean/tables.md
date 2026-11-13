@@ -148,7 +148,7 @@ same table, found by lookup.
   `Eq(G, S, sort u)`, `Infer(G, v, V)`, `Eq(G, V, A)`, `Inst(b, 0, v, b')`
   and `Infer(G, b', T)`.
 - **lit**: `lit n` has type `const Nat []`, `str s` has `const String []`;
-  the keys of Nat and String are those of the cited prelude.
+  the constants Nat and String are found through the list of primitives.
 - **proj**: `Infer(G, proj S i e, T)` from `Infer(G, e, E)`, `Eq(G, E, I ps)`
   with I the structure S (an inductive type with one constructor, applied to
   its parameters and indices), `Infer(G, E, SE)` and `Eq(G, SE, sort l)`,
@@ -194,15 +194,27 @@ same table, found by lookup.
 - **unit-like**: `Eq(G, a, b)` from `Infer(G, a, A)`, `Eq(G, A, I ps)`,
   `Infer(G, b, B)` and `Eq(G, I ps, B)`, when I is structure-like and its
   constructor has no fields.
-- **nat literals**: `lit 0 = const Nat.zero []`; `lit (n + 1) = app
-  (const Nat.succ []) (lit n)`; `Nat.add`, `sub`, `mul`, `div`, `mod`,
-  `gcd`, `beq`, `ble`, `land`, `lor`, `xor`, `shiftLeft`, `shiftRight`,
-  `pow` and `log2` applied to two (one) literals equal the literal result.
-  Products are checked by evaluating the limb polynomials at a random point
-  with the carries as extra columns; a quotient q and remainder m of a by b
-  by `a = q b + m` and `m < b`.
-- **string literals**: `str s` equals `String.mk` of the list of
-  `Char.ofNat (lit c)` for its characters.
+- **nat literals**: `Eq(G, const Nat.zero [], lit 0)` (rule nat-zero) and
+  `Eq(G, app (const Nat.succ []) (lit n), lit (n + 1))` (nat-succ); with
+  symm these also write a literal as a constructor, which is how a
+  recursor reduces on a literal. `Nat.add`, `sub`, `mul`, `div`, `mod`,
+  `gcd`, `beq`, `ble`, `land`, `lor`, `xor`, `shiftLeft`, `shiftRight` and
+  `pow` applied to two literals equal the result (nat-bin): a literal, or
+  `Bool.true`/`Bool.false` for `beq` and `ble`. These are exactly the
+  operations of Lean's `reduce_nat`, with its semantics: truncated
+  subtraction, `x / 0 = 0`, `x % 0 = x`, and `pow` only for exponents up
+  to 2^24. The native checker computes the result; a circuit checks
+  products by evaluating the limb polynomials at a random point with the
+  carries as extra columns, and a quotient q and remainder m of a by b by
+  `a = q b + m` and `m < b`.
+- **string literals**: `Eq(G, str s, String.mk l)` (str-lit) where l is
+  `List.cons.{0} Char (Char.ofNat (lit c)) ...` ending in
+  `List.nil.{0} Char`, one cons for each character of s (s is UTF-8).
+- The constants these rules name (`Nat`, `Nat.zero`, `Nat.add`, `Bool.true`,
+  `String.mk`, `List.cons` and the others) are found through the tables'
+  list of primitives, which pairs each with a cited declaration row. That
+  these rows are the real constants, by key, is the caller's part, like
+  the kinds and inductive information of all cited rows.
 
 ## The declaration's own check
 

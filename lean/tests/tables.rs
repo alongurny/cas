@@ -663,3 +663,225 @@ fn a_function_lifted_to_a_quotient_computes() {
     bad.decls[dmk as usize].info = Info::Quot(QuotKind::Ind);
     assert!(Checker::check(&bad, &goal).is_err());
 }
+
+/// The constants literals need, cited and named as primitives: `Nat` with
+/// its constructors and recursor, `Nat.add`, `Bool`, `Nat.beq`, `Char`,
+/// `Char.ofNat`, `List`, `String` and `String.mk`. Returns the term `Nat`.
+fn literal_prelude(b: &mut Builder) -> u32 {
+    use cas_lean::tables::{Info, Prim, RecRule};
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let mut cite = |b: &mut Builder, k: u8, kind, levels, ty, info, prim: Option<Prim>| {
+        let d = b.decl(DeclRow { key: key(k), kind, levels, ty, value: None, info });
+        if let Some(p) = prim {
+            b.prim(p, d);
+        }
+        d
+    };
+    let induct = |ctors: Vec<[u8; 32]>, recursive| Info::Induct { params: 0, indices: 0, ctors, recursive };
+    let ctor = |induct: u8, fields| Info::Ctor { induct: key(induct), params: 0, fields };
+    let dn = cite(b, 30, DeclKind::Inductive, 0, type0, induct(vec![key(31), key(32)], true), Some(Prim::Nat));
+    let nat = b.constant(dn, &[]);
+    let dz = cite(b, 31, DeclKind::Constructor, 0, nat, ctor(30, 0), Some(Prim::NatZero));
+    let nn = b.pi(nat, nat);
+    let ds = cite(b, 32, DeclKind::Constructor, 0, nn, ctor(30, 1), Some(Prim::NatSucc));
+    let nnn = b.pi(nat, nn);
+    cite(b, 33, DeclKind::Axiom, 0, nnn, Info::None, Some(Prim::NatAdd));
+    let db = cite(b, 34, DeclKind::Inductive, 0, type0, induct(vec![key(35), key(36)], false), None);
+    let bool_ = b.constant(db, &[]);
+    cite(b, 35, DeclKind::Constructor, 0, bool_, ctor(34, 0), Some(Prim::BoolFalse));
+    cite(b, 36, DeclKind::Constructor, 0, bool_, ctor(34, 0), Some(Prim::BoolTrue));
+    let nnb = {
+        let i = b.pi(nat, bool_);
+        b.pi(nat, i)
+    };
+    cite(b, 37, DeclKind::Axiom, 0, nnb, Info::None, Some(Prim::NatBeq));
+    let dc = cite(b, 38, DeclKind::Axiom, 0, type0, Info::None, Some(Prim::Char));
+    let char_ = b.constant(dc, &[]);
+    let nc = b.pi(nat, char_);
+    cite(b, 39, DeclKind::Axiom, 0, nc, Info::None, Some(Prim::CharOfNat));
+    let u = b.param(0);
+    let su1 = {
+        let s = b.succ(u);
+        b.sort(s)
+    };
+    let list_ty = b.pi(su1, su1);
+    let dl = cite(b, 40, DeclKind::Axiom, 1, list_ty, Info::None, None);
+    let list_u = b.constant(dl, &[u]);
+    let (v0, v1, v2) = (b.bvar(0), b.bvar(1), b.bvar(2));
+    let nil_ty = {
+        let l = b.app(list_u, v0);
+        b.pi(su1, l)
+    };
+    cite(b, 41, DeclKind::Axiom, 1, nil_ty, Info::None, Some(Prim::ListNil));
+    let cons_ty = {
+        let l1 = b.app(list_u, v1);
+        let l2 = b.app(list_u, v2);
+        let i = b.pi(l1, l2);
+        let i = b.pi(v0, i);
+        b.pi(su1, i)
+    };
+    cite(b, 42, DeclKind::Axiom, 1, cons_ty, Info::None, Some(Prim::ListCons));
+    let dstr = cite(b, 43, DeclKind::Axiom, 0, type0, Info::None, Some(Prim::String));
+    let string = b.constant(dstr, &[]);
+    let list_char = {
+        let l0 = b.constant(dl, &[z]);
+        b.app(l0, char_)
+    };
+    let mk_ty = b.pi(list_char, string);
+    cite(b, 44, DeclKind::Axiom, 0, mk_ty, Info::None, Some(Prim::StringMk));
+    // Nat.rec.{u} : (motive : Nat -> Sort u) -> motive zero
+    //   -> ((n : Nat) -> motive n -> motive (succ n)) -> (t : Nat) -> motive t
+    let (zero, succ) = (b.constant(dz, &[]), b.constant(ds, &[]));
+    let su = b.sort(u);
+    let motive_ty = b.pi(nat, su);
+    let v3 = b.bvar(3);
+    let zero_minor = b.app(v0, zero);
+    let mn = b.app(v2, v0);
+    let sn = b.app(succ, v1);
+    let msn = b.app(v3, sn);
+    let ih = b.pi(mn, msn);
+    let succ_minor = b.pi(nat, ih);
+    let result = b.app(v3, v0);
+    let rec_ty = {
+        let t = b.pi(nat, result);
+        let s = b.pi(succ_minor, t);
+        let z = b.pi(zero_minor, s);
+        b.pi(motive_ty, z)
+    };
+    let l3 = b.lam(succ_minor, v1);
+    let l2 = b.lam(zero_minor, l3);
+    let rhs_zero = b.lam(motive_ty, l2);
+    // The rules mention the recursor itself, so they are set once it is cited.
+    let info = Info::Rec { params: 0, motives: 1, minors: 2, indices: 0, rules: vec![] };
+    let dr = cite(b, 45, DeclKind::Recursor, 1, rec_ty, info, None);
+    let rec_u = b.constant(dr, &[u]);
+    let recur = b.apps(rec_u, &[v3, v2, v1, v0]);
+    let body = b.apps(v1, &[v0, recur]);
+    let l4 = b.lam(nat, body);
+    let l3 = b.lam(succ_minor, l4);
+    let l2 = b.lam(zero_minor, l3);
+    let rhs_succ = b.lam(motive_ty, l2);
+    b.t.decls[dr as usize].info = Info::Rec {
+        params: 0,
+        motives: 1,
+        minors: 2,
+        indices: 0,
+        rules: vec![
+            RecRule { ctor: key(31), fields: 0, rhs: rhs_zero },
+            RecRule { ctor: key(32), fields: 1, rhs: rhs_succ },
+        ],
+    };
+    nat
+}
+
+/// A predicate on `ty` and a proof that it holds of `at`: `(P, h)`.
+fn holds(b: &mut Builder, k: u8, ty: u32, at: u32) -> (u32, u32) {
+    let z = b.zero();
+    let prop = b.sort(z);
+    let p_ty = b.pi(ty, prop);
+    let dp = axiom(b, k, 0, p_ty);
+    let p = b.constant(dp, &[]);
+    let pa = b.app(p, at);
+    let dh = axiom(b, k + 1, 0, pa);
+    (p, b.constant(dh, &[]))
+}
+
+fn constant_named(b: &mut Builder, k: u8, levels: &[u32]) -> u32 {
+    let d = b.t.decls.iter().position(|d| d.key == key(k)).expect("cited") as u32;
+    b.constant(d, levels)
+}
+
+#[test]
+fn the_kernel_arithmetic_on_literals_is_checked() {
+    use num_bigint::BigUint;
+    let mut b = Builder::new();
+    let nat = literal_prelude(&mut b);
+    let lit = |b: &mut Builder, n: u32| b.nat_lit(&BigUint::from(n));
+    // P (Nat.add 2 3) from P 5, and P (Nat.succ 4) from P 5.
+    let five = lit(&mut b, 5);
+    let (p, h) = holds(&mut b, 50, nat, five);
+    let add = constant_named(&mut b, 33, &[]);
+    let (two, three, four) = (lit(&mut b, 2), lit(&mut b, 3), lit(&mut b, 4));
+    let sum = b.apps(add, &[two, three]);
+    let ty = b.app(p, sum);
+    let (t, goal) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(h));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::NatBin));
+    let mut bad = t.clone();
+    let i = bad.terms.iter().position(|e| *e == TermRow::Lit(vec![5])).unwrap();
+    bad.terms[i] = TermRow::Lit(vec![6]);
+    assert!(Checker::check(&bad, &goal).is_err());
+    let succ = constant_named(&mut b, 32, &[]);
+    let s4 = b.app(succ, four);
+    let ty = b.app(p, s4);
+    let (t, _) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(h));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::NatSucc));
+    // R (Nat.beq 3 3) gives R Bool.true.
+    let bool_true = constant_named(&mut b, 36, &[]);
+    let bool_ = match b.t.terms[bool_true as usize] {
+        TermRow::Const(d, _) => b.t.decls[d as usize].ty,
+        _ => unreachable!(),
+    };
+    let beq = constant_named(&mut b, 37, &[]);
+    let eq33 = b.apps(beq, &[three, three]);
+    let (r, hr) = holds(&mut b, 52, bool_, eq33);
+    let ty = b.app(r, bool_true);
+    accepted(&mut b, DeclKind::Theorem, 0, ty, Some(hr));
+}
+
+#[test]
+fn a_recursor_runs_on_a_literal() {
+    use num_bigint::BigUint;
+    let mut b = Builder::new();
+    let nat = literal_prelude(&mut b);
+    let lit = |b: &mut Builder, n: u32| b.nat_lit(&BigUint::from(n));
+    let nine = lit(&mut b, 9);
+    let (p, h) = holds(&mut b, 50, nat, nine);
+    // P (Nat.rec.{1} (fun _ => Nat) 7 (fun n r => Nat.succ r) 2) from P 9
+    let z = b.zero();
+    let one = b.succ(z);
+    let rec1 = constant_named(&mut b, 45, &[one]);
+    let succ = constant_named(&mut b, 32, &[]);
+    let motive = b.lam(nat, nat);
+    let v0 = b.bvar(0);
+    let sr = b.app(succ, v0);
+    let step = {
+        let i = b.lam(nat, sr);
+        b.lam(nat, i)
+    };
+    let (seven, two) = (lit(&mut b, 7), lit(&mut b, 2));
+    let run = b.apps(rec1, &[motive, seven, step, two]);
+    let ty = b.app(p, run);
+    let (t, _) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(h));
+    assert!(t.rows.iter().filter(|r| r.rule == Rule::Iota).count() >= 3);
+}
+
+#[test]
+fn a_string_literal_is_its_characters() {
+    let mut b = Builder::new();
+    literal_prelude(&mut b);
+    let z = b.zero();
+    let string = constant_named(&mut b, 43, &[]);
+    let ch = constant_named(&mut b, 38, &[]);
+    let of_nat = constant_named(&mut b, 39, &[]);
+    let nil = constant_named(&mut b, 41, &[z]);
+    let cons = constant_named(&mut b, 42, &[z]);
+    let mk = constant_named(&mut b, 44, &[]);
+    let mut list = b.app(nil, ch);
+    for c in "hé".chars().rev() {
+        let l = b.nat_lit(&(c as u32).into());
+        let cv = b.app(of_nat, l);
+        list = b.apps(cons, &[ch, cv, list]);
+    }
+    let built = b.app(mk, list);
+    let (q, h) = holds(&mut b, 50, string, built);
+    let s = b.term(TermRow::Str("hé".as_bytes().to_vec()));
+    let ty = b.app(q, s);
+    let (t, goal) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(h));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::StrLit));
+    let mut bad = t.clone();
+    let i = bad.terms.iter().position(|e| *e == TermRow::Str("hé".as_bytes().to_vec())).unwrap();
+    bad.terms[i] = TermRow::Str(b"he".to_vec());
+    assert!(Checker::check(&bad, &goal).is_err());
+}

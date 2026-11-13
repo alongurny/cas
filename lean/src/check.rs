@@ -467,8 +467,8 @@ impl<'a> Checker<'a> {
                 need(self.same(b2, b3) && self.same(t, t2), "premises")
             }
             (TermRow::Proj(s, idx, x), Proj) => self.proj_type(i, g, s, idx, x, t),
-            (TermRow::Lit(_), LitNat) => self.prelude_type(t, self.t.nat),
-            (TermRow::Str(_), LitStr) => self.prelude_type(t, self.t.string),
+            (TermRow::Lit(_), LitNat) => self.prelude_type(t, Prim::Nat),
+            (TermRow::Str(_), LitStr) => self.prelude_type(t, Prim::String),
             (e, r) => Err(format!("{r:?} does not type {e:?}")),
         }
     }
@@ -569,15 +569,53 @@ impl<'a> Checker<'a> {
         need(j == self.t.rows[i].premises.len(), "extra premises")
     }
 
-    fn prelude_type(&self, t: Ix, decl: Option<Ix>) -> R {
-        let d = decl.ok_or("no declaration given for literals")?;
-        match self.term(t)? {
-            TermRow::Const(d2, ls) => need(
-                self.t.decls[*d2 as usize].key == self.t.decls[d as usize].key && self.list(*ls)?.is_empty(),
-                "not the literal's type",
-            ),
-            _ => Err("not the literal's type".into()),
+    /// The primitive `e` is, with the levels it is used at.
+    fn prim(&self, e: Ix) -> Option<(Prim, Vec<Ix>)> {
+        let TermRow::Const(d, ls) = *self.term(e).ok()? else { return None };
+        let key = &self.t.decls[d as usize].key;
+        let (p, _) = self.t.prims.iter().find(|(_, x)| self.t.decls.get(*x as usize).is_some_and(|x| &x.key == key))?;
+        Some((*p, self.list(ls).ok()?))
+    }
+
+    /// `e` is the primitive `p` without levels (as Lean's kernel compares
+    /// `Nat.add` and the others).
+    fn is_prim(&self, e: Ix, p: Prim) -> bool {
+        matches!(self.prim(e), Some((q, ls)) if q == p && ls.is_empty())
+    }
+
+    /// `e` is the primitive `p` at the single level zero (`List.nil.{0}`).
+    fn is_prim0(&self, e: Ix, p: Prim) -> bool {
+        matches!(self.prim(e), Some((q, ls)) if q == p && ls.len() == 1 && self.t.levels[ls[0] as usize] == LevelRow::Zero)
+    }
+
+    fn prelude_type(&self, t: Ix, p: Prim) -> R {
+        need(self.is_prim(t, p), "not the literal's type")
+    }
+
+    fn lit(&self, e: Ix) -> Result<num_bigint::BigUint, String> {
+        match self.term(e)? {
+            TermRow::Lit(n) => Ok(crate::nat::value(n)),
+            _ => Err("not a literal".into()),
         }
+    }
+
+    /// `b` is `String.mk` of the list of `Char.ofNat (lit c)` for the
+    /// characters of `s` (Lean's `string_lit_to_constructor`).
+    fn string_ctor(&self, s: &[u8], b: Ix) -> R {
+        let s = std::str::from_utf8(s).map_err(|_| "a string literal that is not UTF-8")?;
+        let TermRow::App(mk, mut list) = *self.term(b)? else { return Err("not String.mk applied".into()) };
+        need(self.is_prim(mk, Prim::StringMk), "not String.mk applied")?;
+        let is_char = |e: Ix| self.is_prim(e, Prim::Char);
+        for c in s.chars() {
+            let (head, args) = self.spine(list)?;
+            need(self.is_prim0(head, Prim::ListCons) && args.len() == 3 && is_char(args[0]), "not a cons of chars")?;
+            let TermRow::App(of_nat, n) = *self.term(args[1])? else { return Err("not Char.ofNat applied".into()) };
+            need(self.is_prim(of_nat, Prim::CharOfNat), "not Char.ofNat applied")?;
+            need(self.lit(n)? == (c as u32).into(), "another character")?;
+            list = args[2];
+        }
+        let (head, args) = self.spine(list)?;
+        need(self.is_prim0(head, Prim::ListNil) && args.len() == 1 && is_char(args[0]), "not the end of the list")
     }
 
     /// The `fvar n` named by the row: a term row, found among the terms the
@@ -713,6 +751,30 @@ impl<'a> Checker<'a> {
                     Info::Ctor { fields: 0, .. } => Ok(()),
                     _ => Err("the constructor has fields".into()),
                 }
+            }
+            NatZero => need(self.is_prim(a, Prim::NatZero) && self.lit(b)? == 0u32.into(), "not Nat.zero = 0"),
+            NatSucc => {
+                let TermRow::App(f, x) = ta else { return Err("not Nat.succ applied".into()) };
+                need(self.is_prim(f, Prim::NatSucc), "not Nat.succ applied")?;
+                need(self.lit(x)? + 1u32 == self.lit(b)?, "not the successor")
+            }
+            NatBin => {
+                let TermRow::App(fx, y) = ta else { return Err("not an operation applied".into()) };
+                let TermRow::App(f, x) = *self.term(fx)? else { return Err("not an operation applied".into()) };
+                let (op, ls) = self.prim(f).ok_or("not an operation")?;
+                need(ls.is_empty(), "an operation at levels")?;
+                match crate::nat::eval(op, &self.lit(x)?, &self.lit(y)?)
+                    .ok_or("not an operation the kernel evaluates")?
+                {
+                    crate::nat::Value::Nat(n) => need(self.lit(b)? == n, "not the result"),
+                    crate::nat::Value::Bool(v) => {
+                        need(self.is_prim(b, if v { Prim::BoolTrue } else { Prim::BoolFalse }), "not the result")
+                    }
+                }
+            }
+            StrLit => {
+                let TermRow::Str(s) = ta else { return Err("not a string literal".into()) };
+                self.string_ctor(&s, b)
             }
             QuotLift => {
                 // Quot.lift f h (Quot.mk r a) = f a, Quot.ind h (Quot.mk r a) = h a,

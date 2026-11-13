@@ -158,6 +158,10 @@ pub enum Rule {
     Iota,
     ProjCtor,
     QuotLift,
+    NatZero,
+    NatSucc,
+    NatBin,
+    StrLit,
     CongProj,
     EtaStruct,
     UnitLike,
@@ -224,9 +228,10 @@ pub struct Tables {
     pub ctxs: Vec<CtxRow>,
     pub decls: Vec<DeclRow>,
     pub rows: Vec<Row>,
-    /// The declaration rows of `Nat` and `String`, when literals occur.
-    pub nat: Option<Ix>,
-    pub string: Option<Ix>,
+    /// The declaration rows of the constants Lean's kernel knows by name.
+    /// Like a row's kind and info, that these are the real `Nat.add` and the
+    /// others is the caller's part to check.
+    pub prims: Vec<(Prim, Ix)>,
 }
 
 impl Tables {
@@ -235,4 +240,35 @@ impl Tables {
         // Any injective encoding will do natively; Debug output is one.
         *blake3::hash(format!("{self:?}").as_bytes()).as_bytes()
     }
+}
+
+/// The constants Lean's kernel computes with: what literals mean, and the
+/// operations on two literals that it evaluates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Prim {
+    Nat,
+    NatZero,
+    NatSucc,
+    NatAdd,
+    NatSub,
+    NatMul,
+    NatPow,
+    NatGcd,
+    NatMod,
+    NatDiv,
+    NatBeq,
+    NatBle,
+    NatLand,
+    NatLor,
+    NatXor,
+    NatShiftLeft,
+    NatShiftRight,
+    BoolTrue,
+    BoolFalse,
+    String,
+    StringMk,
+    Char,
+    CharOfNat,
+    ListNil,
+    ListCons,
 }

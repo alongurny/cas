@@ -10,6 +10,7 @@ pub mod check;
 pub mod derive;
 pub mod fp;
 pub mod level;
+pub mod nat;
 pub mod tables;
 
 pub use check::Checker;
