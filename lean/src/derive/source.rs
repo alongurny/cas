@@ -130,7 +130,11 @@ impl Builder {
                 TermRow::Sort(l) => out.push_str(&format!("Sort {:?}", b.to_level(*l))),
                 TermRow::Const(k, _) => {
                     let key = b.t.decls[*k as usize].key;
-                    let n = b.source.as_ref().and_then(|s| s.name(&key)).unwrap_or_else(|| format!("c{:02x}{:02x}", key[0], key[1]));
+                    let n = b
+                        .source
+                        .as_ref()
+                        .and_then(|s| s.name(&key))
+                        .unwrap_or_else(|| format!("c{:02x}{:02x}", key[0], key[1]));
                     out.push_str(&n)
                 }
                 TermRow::App(f, x) => {

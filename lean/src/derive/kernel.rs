@@ -34,7 +34,11 @@ impl Builder {
         for x in args {
             let rx = self.refl(g, *x);
             let (na, nb) = (self.app(cur_a, *x), self.app(cur_b, *x));
-            p = if cur_a == cur_b { self.refl(g, na) } else { self.add(Fact::Eq { g, a: na, b: nb }, Rule::CongApp, vec![p, rx]) };
+            p = if cur_a == cur_b {
+                self.refl(g, na)
+            } else {
+                self.add(Fact::Eq { g, a: na, b: nb }, Rule::CongApp, vec![p, rx])
+            };
             cur_a = na;
             cur_b = nb;
         }
@@ -59,7 +63,8 @@ impl Builder {
             return None;
         }
         let e2 = self.term(TermRow::Proj(s, idx, c));
-        let cong = if c == x { self.refl(g, e) } else { self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongProj, vec![p]) };
+        let cong =
+            if c == x { self.refl(g, e) } else { self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongProj, vec![p]) };
         let r = args[(params + idx) as usize];
         let pc = self.add(Fact::Eq { g, a: e2, b: r }, Rule::ProjCtor, vec![]);
         Some((self.trans(cong, pc), r))
@@ -160,7 +165,12 @@ impl Builder {
     pub fn whnf(&mut self, g: Ix, e: Ix) -> (Ix, Ix) {
         if matches!(
             self.t.terms[e as usize],
-            TermRow::BVar(_) | TermRow::Sort(_) | TermRow::Pi(..) | TermRow::Lit(_) | TermRow::Str(_) | TermRow::FVar(_)
+            TermRow::BVar(_)
+                | TermRow::Sort(_)
+                | TermRow::Pi(..)
+                | TermRow::Lit(_)
+                | TermRow::Str(_)
+                | TermRow::FVar(_)
         ) {
             return (self.refl(g, e), e);
         }
@@ -221,7 +231,8 @@ impl Builder {
         let fact = Fact::Eq { g, a: t, b: s };
         Ok(match (self.t.terms[t as usize].clone(), self.t.terms[s as usize].clone()) {
             (TermRow::Lam(d1, b1), TermRow::Lam(d2, b2)) | (TermRow::Pi(d1, b1), TermRow::Pi(d2, b2)) => {
-                let rule = if matches!(self.t.terms[t as usize], TermRow::Lam(..)) { Rule::CongLam } else { Rule::CongPi };
+                let rule =
+                    if matches!(self.t.terms[t as usize], TermRow::Lam(..)) { Rule::CongLam } else { Rule::CongPi };
                 let Some(p) = self.defeq(g, d1, d2)? else { return Ok(L::False) };
                 let (ext, fvar, q1, o1) = self.open(g, d1, b1);
                 let (q2, o2) = self.inst(b2, 0, fvar);
@@ -259,8 +270,7 @@ impl Builder {
     }
 
     fn nat_zero(&self, t: Ix) -> bool {
-        self.prim_of(t) == Some(Prim::NatZero)
-            || matches!(&self.t.terms[t as usize], TermRow::Lit(b) if b.is_empty())
+        self.prim_of(t) == Some(Prim::NatZero) || matches!(&self.t.terms[t as usize], TermRow::Lit(b) if b.is_empty())
     }
 
     /// `Nat.succ x` for t a positive literal or `Nat.succ x` itself: the
@@ -401,7 +411,9 @@ impl Builder {
 
     /// `c ls =?= c ms` for the same constant.
     fn defeq_const(&mut self, g: Ix, a: Ix, b: Ix) -> Option<Ix> {
-        let (TermRow::Const(d, ls), TermRow::Const(d2, ms)) = (self.t.terms[a as usize].clone(), self.t.terms[b as usize].clone()) else {
+        let (TermRow::Const(d, ls), TermRow::Const(d2, ms)) =
+            (self.t.terms[a as usize].clone(), self.t.terms[b as usize].clone())
+        else {
             return None;
         };
         if self.t.decls[d as usize].key != self.t.decls[d2 as usize].key {
@@ -426,7 +438,11 @@ impl Builder {
         for (x, y) in at.iter().zip(bs) {
             let Some(q) = self.defeq(g, *x, *y)? else { return Ok(None) };
             let (na, nb) = (self.app(ca, *x), self.app(cb, *y));
-            p = if na == nb { self.refl(g, na) } else { self.add(Fact::Eq { g, a: na, b: nb }, Rule::CongApp, vec![p, q]) };
+            p = if na == nb {
+                self.refl(g, na)
+            } else {
+                self.add(Fact::Eq { g, a: na, b: nb }, Rule::CongApp, vec![p, q])
+            };
             ca = na;
             cb = nb;
         }
@@ -526,11 +542,14 @@ impl Builder {
     #[allow(clippy::too_many_arguments)]
     fn proj_to_field(&mut self, g: Ix, s: Ix, idx: u32, proj: Ix, p: Ix, c: Ix, field: Ix) -> Ix {
         let pc = self.term(TermRow::Proj(s, idx, c));
-        let cong = if pc == proj { self.refl(g, proj) } else { self.add(Fact::Eq { g, a: proj, b: pc }, Rule::CongProj, vec![p]) };
+        let cong = if pc == proj {
+            self.refl(g, proj)
+        } else {
+            self.add(Fact::Eq { g, a: proj, b: pc }, Rule::CongProj, vec![p])
+        };
         let f = self.add(Fact::Eq { g, a: pc, b: field }, Rule::ProjCtor, vec![]);
         self.trans(cong, f)
     }
-
 
     /// Lean's `is_def_eq_core`.
     pub(crate) fn defeq_core(&mut self, g: Ix, t: Ix, s: Ix) -> Res<Option<Ix>> {
@@ -587,7 +606,8 @@ impl Builder {
             let r = self.refl(g, tn);
             return Ok(Some(self.around(pt, r, ps)));
         }
-        if let (TermRow::Proj(_, i, _), TermRow::Proj(_, j, _)) = (&self.t.terms[tn as usize], &self.t.terms[sn as usize])
+        if let (TermRow::Proj(_, i, _), TermRow::Proj(_, j, _)) =
+            (&self.t.terms[tn as usize], &self.t.terms[sn as usize])
             && i == j
         {
             let i = *i;
@@ -605,7 +625,8 @@ impl Builder {
         // is_def_eq_app
         let (ht, at) = self.spine(tn);
         let (hs, as_) = self.spine(sn);
-        if !at.is_empty() && at.len() == as_.len()
+        if !at.is_empty()
+            && at.len() == as_.len()
             && let Some(ph) = self.defeq(g, ht, hs)?
             && let Some(p) = self.args_after(g, ph, &at, &as_)?
         {
@@ -636,7 +657,10 @@ impl Builder {
         // try_string_lit_expansion
         for (x, y, flip) in [(tn, sn, false), (sn, tn, true)] {
             let (h, args) = self.spine(y);
-            if matches!(self.t.terms[x as usize], TermRow::Str(_)) && args.len() == 1 && self.prim_of(h) == Some(Prim::StringMk) {
+            if matches!(self.t.terms[x as usize], TermRow::Str(_))
+                && args.len() == 1
+                && self.prim_of(h) == Some(Prim::StringMk)
+            {
                 let Some((p, c)) = self.lit_as_ctor(g, x) else { continue };
                 let (q, w) = self.whnf(g, c);
                 let Some(core) = self.defeq_core(g, w, y)? else { return Ok(None) };

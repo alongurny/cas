@@ -696,7 +696,10 @@ impl<'a> Checker<'a> {
                 let Info::Ctor { params: cp, fields, .. } = cdecl.info else {
                     return Err("the major premise is not a constructor applied".into());
                 };
-                need(cp == *params && margs.len() == (cp + fields) as usize, "the constructor's arguments")?;
+                // A nested recursor's rule takes the constructor of the type it is nested
+                // in (Array.mk under Syntax.rec_1), whose parameters are not the
+                // recursor's: the fields are the last arguments, as in Lean.
+                need(margs.len() == (cp + fields) as usize, "the constructor's arguments")?;
                 let rule = rules.iter().find(|x| x.ctor == cdecl.key).ok_or("no rule for the constructor")?;
                 need(rule.fields == fields, "the rule's fields")?;
                 let rhs = if decl.levels == 0 && self.t.rows[i].premises.is_empty() {

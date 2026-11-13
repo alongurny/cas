@@ -349,7 +349,13 @@ impl Env {
             Kind::Quot(k) => (DeclKind::Quot, Info::Quot(*k)),
             Kind::Induct { params, indices, rec, all, ctors, .. } => (
                 DeclKind::Inductive,
-                Info::Induct { params: *params, indices: *indices, ctors: keys(ctors), recursive: *rec, all: keys(all) },
+                Info::Induct {
+                    params: *params,
+                    indices: *indices,
+                    ctors: keys(ctors),
+                    recursive: *rec,
+                    all: keys(all),
+                },
             ),
             Kind::Ctor { induct, params, fields, .. } => {
                 (DeclKind::Constructor, Info::Ctor { induct: self.key(*induct), params: *params, fields: *fields })
@@ -393,6 +399,15 @@ impl Source for Env {
                 .collect::<Option<Vec<_>>>()?,
             _ => vec![],
         };
-        Some(Cited { kind, levels: d.lparams.len() as u32, ty, value, hint, info, rules, prim: prim_named(&self.name(d.name)) })
+        Some(Cited {
+            kind,
+            levels: d.lparams.len() as u32,
+            ty,
+            value,
+            hint,
+            info,
+            rules,
+            prim: prim_named(&self.name(d.name)),
+        })
     }
 }

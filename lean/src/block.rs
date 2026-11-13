@@ -215,7 +215,14 @@ impl Block<'_, '_> {
     }
     /// A new free variable of type `a` after context g: the context with
     /// it, and the variable.
-    fn push(&self, g: Ix, a: Ix) -> Result<(Ix, Fv), String> {
+    /// A local of type a with its annotations consumed, as Lean's
+    /// `mk_local_decl_for`, after the tape proves the two types equal.
+    fn push(&mut self, g: Ix, a: Ix) -> Result<(Ix, Fv), String> {
+        let b = self.t().consume_annotations(a);
+        if b != a {
+            self.defeq(g, a, b)?;
+        }
+        let a = b;
         let ext = *self.ctx_by.get(&(self.c.cid[g as usize], self.c.tid[a as usize])).ok_or("a context is missing")?;
         let n = self.c.clen[g as usize];
         let id = self.c.point.id(&[Field::Num(1), Field::Num(n as u64)]);

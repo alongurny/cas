@@ -7,7 +7,7 @@ use crate::expr::{E, X, from_row};
 use crate::level::Level;
 use crate::nested::*;
 use crate::tables::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 impl Builder {
     pub(crate) fn level_row(&mut self, l: &Level) -> Ix {
@@ -56,6 +56,7 @@ impl Builder {
         ctors: &[Vec<Ix>],
         rec_keys: &[Key],
     ) -> Res<NestedGoal> {
+        self.cite_nested(types, ctors)?;
         let mut memo = HashMap::new();
         let mut own = vec![];
         for (d, cs) in types.iter().zip(ctors) {
@@ -153,5 +154,39 @@ impl Builder {
             self.t.decls[*r as usize].info = Info::Rec { params, motives, minors, indices, rules: new_rules };
         }
         Ok(NestedGoal { levels, params, types: types.to_vec(), recursors: out, aux })
+    }
+}
+
+impl Builder {
+    /// Cites, for every inductive type the constructors mention (and those
+    /// its constructors mention in turn), its block and constructors:
+    /// `elim` reads them to make the auxiliary types.
+    fn cite_nested(&mut self, types: &[Ix], ctors: &[Vec<Ix>]) -> Res<()> {
+        let mut seen: HashSet<Key> = types.iter().map(|d| self.t.decls[*d as usize].key).collect();
+        let mut todo: Vec<Ix> = ctors.iter().flatten().map(|c| self.t.decls[*c as usize].ty).collect();
+        let mut visited = HashSet::new();
+        while let Some(e) = todo.pop() {
+            if !visited.insert(e) {
+                continue;
+            }
+            match self.t.terms[e as usize].clone() {
+                TermRow::Const(d, _) => {
+                    let key = self.t.decls[d as usize].key;
+                    let Info::Induct { all, ctors, .. } = self.t.decls[d as usize].info.clone() else { continue };
+                    for k in all.iter().chain(&ctors) {
+                        if seen.insert(*k) {
+                            let c = self.cite(k)?;
+                            todo.push(self.t.decls[c as usize].ty);
+                        }
+                    }
+                    seen.insert(key);
+                }
+                TermRow::App(a, b) | TermRow::Lam(a, b) | TermRow::Pi(a, b) => todo.extend([a, b]),
+                TermRow::Let(a, v, b) => todo.extend([a, v, b]),
+                TermRow::Proj(_, _, x) => todo.push(x),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }

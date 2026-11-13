@@ -665,7 +665,6 @@ impl Builder {
         Some((self.trans(cong, s), r))
     }
 
-
     /// The constructor row of a structure-like type with this key.
     fn structure_ctor(&mut self, induct: &Key) -> Option<Ix> {
         let d = self.cite(induct).ok()?;
@@ -769,7 +768,13 @@ impl Builder {
                 };
                 let (p2, at) = self.infer(g, a)?;
                 let Some(p3) = self.defeq(g, at, dom)? else {
-                    return Err(format!("the argument's type is not the domain: {} =?= {} in {} applied to {}", self.show(at), self.show(dom), self.show(f), self.show(a)));
+                    return Err(format!(
+                        "the argument's type is not the domain: {} =?= {} in {} applied to {}",
+                        self.show(at),
+                        self.show(dom),
+                        self.show(f),
+                        self.show(a)
+                    ));
                 };
                 let (p4, t) = self.inst(cod, 0, a);
                 (Rule::App, vec![p0, p1, p2, p3, p4], t)

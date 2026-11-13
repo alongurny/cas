@@ -174,10 +174,12 @@ same table, found by lookup.
   bodies compared after opening with the same `fvar n`); `sort l = sort m`
   from `LEq(l, m)`; `const c ls = const c ms` from `LEq` of each level.
 - **iota**: a recursor applied to its parameters, motives, minors, indices
-  and a major premise that is a constructor application (with the right
-  number of parameters) equals the matching rule's right-hand side,
+  and a major premise that is a constructor application (its parameters
+  and fields, the fields last) equals the matching rule's right-hand side,
   instantiated with the levels, the parameters, motives and minors, and the
-  constructor's fields. Lean's K-like reduction (a proposition with one
+  constructor's fields. The constructor's parameters need not be the
+  recursor's: a nested block's recursor `T.rec_1` has a rule for
+  `Array.mk`, applied to `T`. Lean too takes only the last fields. Lean's K-like reduction (a proposition with one
   constructor without fields) and its reduction on a structure that is not
   built need no rule of their own: the major premise is first shown equal
   to a constructor application by proof irrelevance or by eta for
@@ -246,6 +248,12 @@ same table, found by lookup.
   with the recursor rows given. K-like reduction needs no flag, since it
   is derived from proof irrelevance. An inductive row also lists the
   types of its block (Lean's `all`), which the check compares.
+  As Lean's `mk_local_decl_for` does, every binder type of the block
+  (parameters, indices and fields) is taken with its annotations consumed
+  (`optParam T d`, `autoParam T s`, `outParam T` and `semiOutParam T`
+  become T), so a class `Coe (α : semiOutParam (Sort u))` has the
+  recursor `Coe.rec {α : Sort u}`. Each time a type changes, the tape
+  proves the two equal, so nothing trusts those names.
 - **nested inductive block**: a block whose constructors use one of its
   types inside another inductive type's parameters, as in
   `Tree | node : List Tree -> Tree`. As Lean's kernel does, the checker

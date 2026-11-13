@@ -61,6 +61,16 @@ impl Builder {
             _ => Err("not a type".into()),
         }
     }
+    /// A local of type a with its annotations consumed, as Lean's
+    /// `mk_local_decl_for`; the tape proves the two types equal.
+    fn local(&mut self, st: &mut St, g: Ix, a: Ix) -> Res<(Ix, Fv)> {
+        let b = self.t.consume_annotations(a);
+        if b != a {
+            self.t_defeq(st, g, a, b)?;
+        }
+        Ok(self.fresh(g, b))
+    }
+
     fn fresh(&mut self, g: Ix, a: Ix) -> (Ix, Fv) {
         let n = self.clen[g as usize];
         let term = self.term(TermRow::FVar(n));
@@ -105,7 +115,7 @@ impl Builder {
             if self.has_occ(st, a) {
                 return Err("a non positive occurrence of the block".into());
             }
-            let (ext, x) = self.fresh(g, a);
+            let (ext, x) = self.local(st, g, a)?;
             let body = self.t_inst(st, b, x.term);
             return self.positive(st, ext, body);
         }
@@ -117,7 +127,7 @@ impl Builder {
         let mut w = self.t_whnf(st, g, t);
         let mut xs = vec![];
         while let TermRow::Pi(a, b) = self.t.terms[w as usize] {
-            let (ext, x) = self.fresh(g, a);
+            let (ext, x) = self.local(st, g, a).ok()?;
             let body = self.t_inst(st, b, x.term);
             g = ext;
             xs.push(x);
@@ -154,7 +164,7 @@ impl Builder {
             while let TermRow::Pi(a, b) = self.t.terms[t as usize] {
                 let x = if i < np {
                     if idx == 0 {
-                        let (ext, x) = self.fresh(g, a);
+                        let (ext, x) = self.local(&mut st, g, a)?;
                         st.params.push(x);
                         pctx = ext;
                         g = ext;
@@ -166,7 +176,7 @@ impl Builder {
                         p
                     }
                 } else {
-                    let (ext, x) = self.fresh(g, a);
+                    let (ext, x) = self.local(&mut st, g, a)?;
                     indices.push(x);
                     g = ext;
                     x
@@ -228,7 +238,7 @@ impl Builder {
                             return Err("a field's universe is too big".into());
                         }
                         self.positive(&mut st, g, a)?;
-                        let (ext, x) = self.fresh(g, a);
+                        let (ext, x) = self.local(&mut st, g, a)?;
                         fields.push(x);
                         g = ext;
                         t = self.t_inst(&mut st, b, x.term);
@@ -261,7 +271,7 @@ impl Builder {
                 } else {
                     true
                 };
-                let (ext, x) = self.fresh(g, a);
+                let (ext, x) = self.local(&mut st, g, a)?;
                 if !zero {
                     to_check.push(x);
                 }

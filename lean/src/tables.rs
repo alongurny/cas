@@ -306,3 +306,47 @@ pub struct NestedGoal {
     pub recursors: Vec<Ix>,
     pub aux: BlockGoal,
 }
+
+/// The key of the Lean constant with this dotted name of string
+/// components, as the importer derives it (`import::Env::key`).
+pub fn lean_key(name: &str) -> Key {
+    let mut h = blake3::Hasher::new_derive_key("cas-lean lean constant name");
+    for s in name.split('.') {
+        h.update(&[0]);
+        h.update(&(s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    }
+    *h.finalize().as_bytes()
+}
+
+impl Tables {
+    /// Lean's `consumeTypeAnnotations`, which its kernel applies to every
+    /// binder type of an inductive block: `optParam T d`, `autoParam T s`,
+    /// `outParam T` and `semiOutParam T` become T, repeatedly. Whoever uses
+    /// the result also proves it equal to e, so these names are trusted for
+    /// nothing.
+    pub fn consume_annotations(&self, mut e: Ix) -> Ix {
+        thread_local! {
+            static KEYS: [(Key, usize); 4] = [
+                (lean_key("optParam"), 2),
+                (lean_key("autoParam"), 2),
+                (lean_key("outParam"), 1),
+                (lean_key("semiOutParam"), 1),
+            ];
+        }
+        loop {
+            let mut args = vec![];
+            let mut h = e;
+            while let TermRow::App(f, x) = self.terms[h as usize] {
+                args.push(x);
+                h = f;
+            }
+            let TermRow::Const(d, _) = self.terms[h as usize] else { return e };
+            let key = self.decls[d as usize].key;
+            if !KEYS.with(|k| k.iter().any(|(k, n)| *k == key && *n == args.len())) {
+                return e;
+            }
+            e = *args.last().unwrap();
+        }
+    }
+}
