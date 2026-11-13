@@ -367,7 +367,71 @@ impl Builder {
     }
 
     /// One reduction step at the head, if any.
+    fn spine(&self, mut e: Ix) -> (Ix, Vec<Ix>) {
+        let mut args = vec![];
+        while let TermRow::App(f, x) = self.t.terms[e as usize] {
+            args.push(x);
+            e = f;
+        }
+        args.reverse();
+        (e, args)
+    }
+
+    /// `Eq(g, e, e')` where e' is e with its argument at `pos` (counted from
+    /// the head) replaced, given `p: Eq(g, arg, new)`.
+    fn replace_arg(&mut self, g: Ix, e: Ix, pos: usize, nargs: usize, p: Ix) -> (Ix, Ix) {
+        let TermRow::App(f, x) = self.t.terms[e as usize] else { unreachable!() };
+        let Fact::Eq { b: new, .. } = self.row(p) else { unreachable!() };
+        if pos + 1 == nargs {
+            let rf = self.refl(g, f);
+            let e2 = self.app(f, new);
+            (self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongApp, vec![rf, p]), e2)
+        } else {
+            let (q, f2) = self.replace_arg(g, f, pos, nargs - 1, p);
+            let rx = self.refl(g, x);
+            let e2 = self.app(f2, x);
+            (self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongApp, vec![q, rx]), e2)
+        }
+    }
+
+    /// One iota step: a recursor whose major premise reduces to a
+    /// constructor application.
+    fn iota(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
+        let (head, args) = self.spine(e);
+        let TermRow::Const(r, ls) = self.t.terms[head as usize] else { return None };
+        let decl = self.t.decls[r as usize].clone();
+        let Info::Rec { params, motives, minors, indices, rules } = decl.info else { return None };
+        let before = (params + motives + minors) as usize;
+        let at = before + indices as usize;
+        let major = *args.get(at)?;
+        let (pm, m2) = self.whnf(g, major);
+        let (mh, margs) = self.spine(m2);
+        let TermRow::Const(c, _) = self.t.terms[mh as usize] else { return None };
+        let key = self.t.decls[c as usize].key;
+        let Info::Ctor { params: cp, fields, .. } = self.t.decls[c as usize].info else { return None };
+        if margs.len() != (cp + fields) as usize {
+            return None;
+        }
+        let rule = rules.iter().find(|x| x.ctor == key)?.clone();
+        let (cong, e2) = if m2 == major { (self.refl(g, e), e) } else { self.replace_arg(g, e, at, args.len(), pm) };
+        let (prem, rhs) = if decl.levels == 0 {
+            (vec![], rule.rhs)
+        } else {
+            let (p, r) = self.linst(rule.rhs, ls);
+            (vec![p], r)
+        };
+        let mut want: Vec<Ix> = args[..before].to_vec();
+        want.extend_from_slice(&margs[cp as usize..]);
+        want.extend_from_slice(&args[at + 1..]);
+        let b = self.apps(rhs, &want);
+        let step = self.add(Fact::Eq { g, a: e2, b }, Rule::Iota, prem);
+        Some((self.trans(cong, step), b))
+    }
+
     fn step(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
+        if let Some(r) = self.iota(g, e) {
+            return Some(r);
+        }
         match self.t.terms[e as usize].clone() {
             TermRow::App(f, x) => {
                 if let TermRow::Lam(_, body) = self.t.terms[f as usize] {

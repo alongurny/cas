@@ -310,6 +310,29 @@ impl<'a> Checker<'a> {
             f => Err(format!("premise {j} is {f:?}, not a typing")),
         }
     }
+    /// The head of an application and its arguments, in order.
+    fn spine(&self, mut e: Ix) -> Result<(Ix, Vec<Ix>), String> {
+        let mut args = vec![];
+        while let TermRow::App(f, x) = *self.term(e)? {
+            args.push(x);
+            e = f;
+        }
+        args.reverse();
+        Ok((e, args))
+    }
+
+    /// `e` as a head applied to exactly `n` arguments.
+    fn peel(&self, mut e: Ix, n: usize) -> Result<(Ix, Vec<Ix>), String> {
+        let mut args = vec![];
+        for _ in 0..n {
+            let TermRow::App(f, x) = *self.term(e)? else { return Err("too few arguments".into()) };
+            args.push(x);
+            e = f;
+        }
+        args.reverse();
+        Ok((e, args))
+    }
+
     fn sort_of(&self, e: Ix) -> Result<Ix, String> {
         match self.term(e)? {
             TermRow::Sort(l) => Ok(*l),
@@ -496,6 +519,39 @@ impl<'a> Checker<'a> {
                     let r = self.linst(i, 0, v, ls)?;
                     need(self.same(r, b), "not the value at these levels")
                 }
+            }
+            Iota => {
+                let (head, args) = self.spine(a)?;
+                let TermRow::Const(r, ls) = *self.term(head)? else { return Err("not a recursor applied".into()) };
+                let decl = &self.t.decls[r as usize];
+                let Info::Rec { params, motives, minors, indices, rules } = &decl.info else {
+                    return Err("not a recursor".into());
+                };
+                need(decl.kind == DeclKind::Recursor, "not a recursor")?;
+                need(self.list(ls)?.len() == decl.levels as usize, "wrong number of levels")?;
+                let before = (params + motives + minors) as usize;
+                let at = before + *indices as usize;
+                let major = *args.get(at).ok_or("too few arguments for the major premise")?;
+                let (mh, margs) = self.spine(major)?;
+                let TermRow::Const(c, _) = *self.term(mh)? else { return Err("the major premise is not built".into()) };
+                let cdecl = &self.t.decls[c as usize];
+                let Info::Ctor { params: cp, fields, .. } = cdecl.info else {
+                    return Err("the major premise is not a constructor applied".into());
+                };
+                need(cp == *params && margs.len() == (cp + fields) as usize, "the constructor's arguments")?;
+                let rule = rules.iter().find(|x| x.ctor == cdecl.key).ok_or("no rule for the constructor")?;
+                need(rule.fields == fields, "the rule's fields")?;
+                let rhs = if decl.levels == 0 && self.t.rows[i].premises.is_empty() {
+                    rule.rhs
+                } else {
+                    self.linst(i, 0, rule.rhs, ls)?
+                };
+                let mut want: Vec<Ix> = args[..before].to_vec();
+                want.extend_from_slice(&margs[cp as usize..]);
+                want.extend_from_slice(&args[at + 1..]);
+                let (bh, bargs) = self.peel(b, want.len())?;
+                need(self.same(bh, rhs), "not the rule's right-hand side")?;
+                need(bargs.iter().zip(&want).all(|(x, y)| self.same(*x, *y)), "not the arguments the rule takes")
             }
             Zeta => {
                 let TermRow::Let(_, v, body) = ta else { return Err("not a let".into()) };

@@ -56,6 +56,32 @@ pub enum DeclKind {
     Definition,
     Theorem,
     Opaque,
+    /// An inductive type, a constructor or a recursor: introduced by an
+    /// inductive block, whose own proof checks them.
+    Inductive,
+    Constructor,
+    Recursor,
+}
+
+/// What a constructor or recursor row adds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Info {
+    #[default]
+    None,
+    /// A constructor of the inductive type `induct`.
+    Ctor { induct: Key, params: u32, fields: u32 },
+    /// A recursor: how many parameters, motives, minor premises and indices
+    /// precede the major premise, and one reduction rule per constructor.
+    Rec { params: u32, motives: u32, minors: u32, indices: u32, rules: Vec<RecRule> },
+}
+
+/// The right-hand side `rhs` (closed over parameters, motives, minors and
+/// then the constructor's fields) when the major premise is built by `ctor`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RecRule {
+    pub ctor: Key,
+    pub fields: u32,
+    pub rhs: Ix,
 }
 
 /// A cited declaration: its key, kind, number of level parameters, type,
@@ -68,6 +94,7 @@ pub struct DeclRow {
     pub levels: u32,
     pub ty: Ix,
     pub value: Option<Ix>,
+    pub info: Info,
 }
 
 /// What a judgement row claims.
@@ -110,6 +137,7 @@ pub enum Rule {
     Beta,
     Delta,
     Zeta,
+    Iota,
     CongApp,
     CongLam,
     CongPi,
