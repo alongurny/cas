@@ -22,8 +22,10 @@ pub enum E {
     Lam(X, X),
     Pi(X, X),
     Let(X, X, X),
-    /// A literal: its row, which is closed.
-    Lit(Ix),
+    /// A natural-number literal (little-endian bytes, no trailing zeros)
+    /// and a string literal (UTF-8).
+    Nat(Vec<u8>),
+    Str(Vec<u8>),
     Proj(Key, u32, X),
 }
 
@@ -63,7 +65,8 @@ pub fn from_row(t: &Tables, e: Ix, memo: &mut HashMap<Ix, X>) -> X {
         TermRow::Lam(a, b) => Lam(r(a), r(b)),
         TermRow::Pi(a, b) => Pi(r(a), r(b)),
         TermRow::Let(a, v, b) => Let(r(a), r(v), r(b)),
-        TermRow::Lit(_) | TermRow::Str(_) => Lit(e),
+        TermRow::Lit(n) => Nat(n),
+        TermRow::Str(s) => Str(s),
         TermRow::Proj(d, n, x) => Proj(t.decls[d as usize].key, n, r(x)),
     });
     memo.insert(e, x.clone());

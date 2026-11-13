@@ -36,7 +36,8 @@ impl Builder {
             E::Lam(a, b) => TermRow::Lam(self.row_of(a)?, self.row_of(b)?),
             E::Pi(a, b) => TermRow::Pi(self.row_of(a)?, self.row_of(b)?),
             E::Let(a, v, b) => TermRow::Let(self.row_of(a)?, self.row_of(v)?, self.row_of(b)?),
-            E::Lit(i) => return Ok(*i),
+            E::Nat(n) => TermRow::Lit(n.clone()),
+            E::Str(s) => TermRow::Str(s.clone()),
             E::Proj(k, n, x) => TermRow::Proj(d(self, k)?, *n, self.row_of(x)?),
         };
         Ok(self.term(r))

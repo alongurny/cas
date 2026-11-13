@@ -840,7 +840,16 @@ impl<'a> Checker<'a> {
             E::Lam(a, b) => p.id(&[Num(5), Id(self.eid(a, memo)), Id(self.eid(b, memo))]),
             E::Pi(a, b) => p.id(&[Num(6), Id(self.eid(a, memo)), Id(self.eid(b, memo))]),
             E::Let(a, v, b) => p.id(&[Num(7), Id(self.eid(a, memo)), Id(self.eid(v, memo)), Id(self.eid(b, memo))]),
-            E::Lit(i) => self.tid[*i as usize],
+            E::Nat(n) => {
+                let mut f = vec![Num(8)];
+                limbs(n, &mut f);
+                p.id(&f)
+            }
+            E::Str(s) => {
+                let mut f = vec![Num(9)];
+                limbs(s, &mut f);
+                p.id(&f)
+            }
             E::Proj(k, n, x) => {
                 let mut f = vec![Num(10)];
                 limbs(k, &mut f);
