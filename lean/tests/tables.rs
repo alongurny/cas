@@ -577,3 +577,89 @@ fn a_recursor_on_a_structure_reduces_on_a_variable() {
     assert!(t.rows.iter().any(|r| r.rule == Rule::Iota));
     assert!(t.rows.iter().any(|r| r.rule == Rule::EtaStruct));
 }
+
+/// `Quot.lift f h (Quot.mk r a)` computes to `f a`. The type of `h` is
+/// simplified (`(a b : α) -> r a b -> r a b`) to keep the test free of `Eq`.
+#[test]
+fn a_function_lifted_to_a_quotient_computes() {
+    use cas_lean::tables::{Info, QuotKind};
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let (prop, type0) = (b.sort(z), b.sort(one));
+    let (_, _, p, n0, h0, _) = boxed(&mut b, type0);
+    let n = match b.t.terms[n0 as usize] {
+        TermRow::Const(d, _) => b.t.decls[d as usize].ty,
+        _ => unreachable!(),
+    };
+    let (u, v) = (b.param(0), b.param(1));
+    let (su, sv) = (b.sort(u), b.sort(v));
+    let vs: Vec<u32> = (0..6).map(|i| b.bvar(i)).collect();
+    let quot = |b: &mut Builder, k: u8, levels, ty, kind| {
+        b.decl(DeclRow { key: key(k), kind: DeclKind::Quot, levels, ty, value: None, info: Info::Quot(kind) })
+    };
+    // Quot.{u} : {α : Sort u} -> (α -> α -> Prop) -> Sort u
+    let r_ty = {
+        let inner = b.pi(vs[1], prop);
+        b.pi(vs[0], inner)
+    };
+    let q_ty = {
+        let inner = b.pi(r_ty, su);
+        b.pi(su, inner)
+    };
+    let dq = quot(&mut b, 20, 1, q_ty, QuotKind::Type);
+    let quot_u = b.constant(dq, &[u]);
+    // Quot.mk.{u} : {α : Sort u} -> (r : α -> α -> Prop) -> α -> Quot r
+    let mk_ty = {
+        let qr = b.apps(quot_u, &[vs[2], vs[1]]);
+        let last = b.pi(vs[1], qr);
+        let inner = b.pi(r_ty, last);
+        b.pi(su, inner)
+    };
+    let dmk = quot(&mut b, 21, 1, mk_ty, QuotKind::Mk);
+    // Quot.lift.{u,v} : {α} -> {r} -> {β : Sort v} -> (f : α -> β) -> h -> Quot r -> β
+    let h_ty = {
+        let rab = b.apps(vs[4], &[vs[1], vs[0]]);
+        let rab2 = b.apps(vs[5], &[vs[2], vs[1]]);
+        let i = b.pi(rab, rab2);
+        let i = b.pi(vs[4], i);
+        b.pi(vs[3], i)
+    };
+    let lift_ty = {
+        let qr = b.apps(quot_u, &[vs[4], vs[3]]);
+        let last = b.pi(qr, vs[3]);
+        let i = b.pi(h_ty, last);
+        let f_ty = b.pi(vs[2], vs[1]);
+        let i = b.pi(f_ty, i);
+        let i = b.pi(sv, i);
+        let i = b.pi(r_ty, i);
+        b.pi(su, i)
+    };
+    let dlift = quot(&mut b, 22, 2, lift_ty, QuotKind::Lift);
+    // axiom R : N -> N -> Prop
+    let rel_ty = {
+        let i = b.pi(n, prop);
+        b.pi(n, i)
+    };
+    let dr = axiom(&mut b, 23, 0, rel_ty);
+    let rel = b.constant(dr, &[]);
+    // theorem : P (Quot.lift.{1,1} N R N (fun x => x) (fun a b p => p) (Quot.mk.{1} N R n0)) := h0
+    let id = b.lam(n, vs[0]);
+    let hstub = {
+        let rab = b.apps(rel, &[vs[1], vs[0]]);
+        let i = b.lam(rab, vs[0]);
+        let i = b.lam(n, i);
+        b.lam(n, i)
+    };
+    let mk1 = b.constant(dmk, &[one]);
+    let built = b.apps(mk1, &[n, rel, n0]);
+    let lift11 = b.constant(dlift, &[one, one]);
+    let lifted = b.apps(lift11, &[n, rel, n, id, hstub, built]);
+    let ty = b.app(p, lifted);
+    let (t, goal) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(h0));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::QuotLift));
+    // Quot.mk marked as Quot.ind no longer computes.
+    let mut bad = t.clone();
+    bad.decls[dmk as usize].info = Info::Quot(QuotKind::Ind);
+    assert!(Checker::check(&bad, &goal).is_err());
+}

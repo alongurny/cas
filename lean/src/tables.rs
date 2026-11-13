@@ -63,6 +63,9 @@ pub enum DeclKind {
     Inductive,
     Constructor,
     Recursor,
+    /// One of the four constants of quotients (`Quot`, `Quot.mk`,
+    /// `Quot.lift`, `Quot.ind`), which Lean's kernel adds with fixed types.
+    Quot,
 }
 
 /// What a constructor or recursor row adds.
@@ -77,6 +80,16 @@ pub enum Info {
     /// A recursor: how many parameters, motives, minor premises and indices
     /// precede the major premise, and one reduction rule per constructor.
     Rec { params: u32, motives: u32, minors: u32, indices: u32, rules: Vec<RecRule> },
+    /// Which quotient constant.
+    Quot(QuotKind),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum QuotKind {
+    Type,
+    Mk,
+    Lift,
+    Ind,
 }
 
 /// The right-hand side `rhs` (closed over parameters, motives, minors and
@@ -144,6 +157,7 @@ pub enum Rule {
     Zeta,
     Iota,
     ProjCtor,
+    QuotLift,
     CongProj,
     EtaStruct,
     UnitLike,

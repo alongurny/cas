@@ -492,8 +492,35 @@ impl Builder {
         }
     }
 
+    /// `Quot.lift f h q` or `Quot.ind h q` (with more arguments) whose q
+    /// reduces to `Quot.mk r a`.
+    fn quot(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
+        let (head, args) = self.spine(e);
+        let TermRow::Const(d, _) = self.t.terms[head as usize] else { return None };
+        let at = match self.t.decls[d as usize].info {
+            Info::Quot(QuotKind::Lift) => 5,
+            Info::Quot(QuotKind::Ind) => 4,
+            _ => return None,
+        };
+        let q = *args.get(at)?;
+        let (pq, q2) = self.whnf(g, q);
+        let (mh, margs) = self.spine(q2);
+        let TermRow::Const(m, _) = self.t.terms[mh as usize] else { return None };
+        if self.t.decls[m as usize].info != Info::Quot(QuotKind::Mk) || margs.len() != 3 {
+            return None;
+        }
+        let (cong, e2) = if q2 == q { (self.refl(g, e), e) } else { self.replace_arg(g, e, at, args.len(), pq) };
+        let fa = self.app(args[3], margs[2]);
+        let b = self.apps(fa, &args[at + 1..]);
+        let step = self.add(Fact::Eq { g, a: e2, b }, Rule::QuotLift, vec![]);
+        Some((self.trans(cong, step), b))
+    }
+
     fn step(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {
         if let Some(r) = self.iota(g, e) {
+            return Some(r);
+        }
+        if let Some(r) = self.quot(g, e) {
             return Some(r);
         }
         match self.t.terms[e as usize].clone() {

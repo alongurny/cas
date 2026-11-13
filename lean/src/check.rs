@@ -714,6 +714,29 @@ impl<'a> Checker<'a> {
                     _ => Err("the constructor has fields".into()),
                 }
             }
+            QuotLift => {
+                // Quot.lift f h (Quot.mk r a) = f a, Quot.ind h (Quot.mk r a) = h a,
+                // with the arguments after the quotient kept.
+                let (head, args) = self.spine(a)?;
+                let TermRow::Const(d, _) = *self.term(head)? else { return Err("not Quot.lift or Quot.ind".into()) };
+                let at = match self.t.decls[d as usize] {
+                    DeclRow { kind: DeclKind::Quot, info: Info::Quot(QuotKind::Lift), .. } => 5,
+                    DeclRow { kind: DeclKind::Quot, info: Info::Quot(QuotKind::Ind), .. } => 4,
+                    _ => return Err("not Quot.lift or Quot.ind".into()),
+                };
+                let q = *args.get(at).ok_or("too few arguments")?;
+                let (mh, margs) = self.spine(q)?;
+                let ok = matches!(*self.term(mh)?, TermRow::Const(m, _)
+                    if self.t.decls[m as usize].kind == DeclKind::Quot
+                        && self.t.decls[m as usize].info == Info::Quot(QuotKind::Mk));
+                need(ok && margs.len() == 3, "the quotient is not Quot.mk applied")?;
+                let (bh, bargs) = self.peel(b, args.len() - at - 1)?;
+                need(
+                    matches!(*self.term(bh)?, TermRow::App(f, x) if self.same(f, args[3]) && self.same(x, margs[2])),
+                    "not the function at the element",
+                )?;
+                need(bargs.iter().zip(&args[at + 1..]).all(|(x, y)| self.same(*x, *y)), "the arguments after")
+            }
             Zeta => {
                 let TermRow::Let(_, v, body) = ta else { return Err("not a let".into()) };
                 let r = self.inst(i, 0, body, 0, v)?;

@@ -181,7 +181,8 @@ same table, found by lookup.
 - **proj-ctor**: `proj S i (ctor ps fs)` equals field i.
 - **quot**: `Quot.lift f h (Quot.mk r a)` equals `f a`, and
   `Quot.ind h (Quot.mk r a)` equals `h a`, with the levels and arguments of
-  the cited quotient constants.
+  the cited quotient constants (rows of kind quot, marked type, mk, lift
+  or ind; the arguments after the quotient are kept).
 - **eta**: `Eq(G, lam A (app f (bvar 0)), f)` when `lbr(f) = 0`, from
   `Infer(G, f, F)` and `Eq(G, F, pi A' B)` with `Eq(G, A, A')`.
 - **eta-struct**: `Eq(G, e, ctor ps fs)` from `Infer(G, e, E)`,
