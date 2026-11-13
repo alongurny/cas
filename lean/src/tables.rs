@@ -41,6 +41,8 @@ pub enum TermRow {
     /// A natural number, as little-endian bytes without trailing zeros.
     Lit(Vec<u8>),
     Str(Vec<u8>),
+    /// Field `i` of `e`, whose type is the structure declared in the row.
+    Proj(Ix, u32, Ix),
 }
 
 /// A context: empty, or a context with one more entry of this type.
@@ -68,6 +70,8 @@ pub enum DeclKind {
 pub enum Info {
     #[default]
     None,
+    /// An inductive type: its parameters, indices and constructors.
+    Induct { params: u32, indices: u32, ctors: Vec<Key> },
     /// A constructor of the inductive type `induct`.
     Ctor { induct: Key, params: u32, fields: u32 },
     /// A recursor: how many parameters, motives, minor premises and indices
@@ -131,6 +135,7 @@ pub enum Rule {
     Let,
     LitNat,
     LitStr,
+    Proj,
     Refl,
     Symm,
     Trans,
@@ -138,6 +143,10 @@ pub enum Rule {
     Delta,
     Zeta,
     Iota,
+    ProjCtor,
+    CongProj,
+    InstProj,
+    LInstProj,
     CongApp,
     CongLam,
     CongPi,

@@ -292,3 +292,95 @@ fn a_recursor_computes_on_constructors() {
     }
     assert!(Checker::check(&bad, &goal).is_err());
 }
+
+/// Axioms `N : Type`, `n0 : N`, `P : N -> Prop`, `h : P n0`, and a
+/// structure `mk : (v : N) -> P v -> S` living in `sort`, with a dependent
+/// second field.
+fn boxed(b: &mut Builder, sort: u32) -> (u32, u32, u32, u32, u32, u32) {
+    use cas_lean::tables::Info;
+    let z = b.zero();
+    let one = b.succ(z);
+    let (prop, type0) = (b.sort(z), b.sort(one));
+    let dn = axiom(b, 1, 0, type0);
+    let n = b.constant(dn, &[]);
+    let dn0 = axiom(b, 2, 0, n);
+    let n0 = b.constant(dn0, &[]);
+    let p_ty = b.pi(n, prop);
+    let dp = axiom(b, 3, 0, p_ty);
+    let p = b.constant(dp, &[]);
+    let pn0 = b.app(p, n0);
+    let dh = axiom(b, 4, 0, pn0);
+    let h = b.constant(dh, &[]);
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(6)] };
+    let ds = b.decl(DeclRow { key: key(5), kind: DeclKind::Inductive, levels: 0, ty: sort, value: None, info: induct });
+    let s = b.constant(ds, &[]);
+    let v0 = b.bvar(0);
+    let pv = b.app(p, v0);
+    let rest = b.pi(pv, s);
+    let mk_ty = b.pi(n, rest);
+    let info = Info::Ctor { induct: key(5), params: 0, fields: 2 };
+    let dmk = b.decl(DeclRow { key: key(6), kind: DeclKind::Constructor, levels: 0, ty: mk_ty, value: None, info });
+    let mk = b.constant(dmk, &[]);
+    let built = b.apps(mk, &[n0, h]);
+    (ds, s, p, n0, h, built)
+}
+
+#[test]
+fn projections_are_typed_and_computed() {
+    use cas_lean::tables::Rule;
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let (ds, s, p, _, h, built) = boxed(&mut b, type0);
+    // theorem : (x : S) -> P x.0 := fun x => x.1
+    let v0 = b.bvar(0);
+    let f0 = b.term(TermRow::Proj(ds, 0, v0));
+    let f1 = b.term(TermRow::Proj(ds, 1, v0));
+    let pf0 = b.app(p, f0);
+    let ty = b.pi(s, pf0);
+    let value = b.lam(s, f1);
+    let (t, goal) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(value));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::Proj));
+    // A wrong field is refused: claim the type of field 1 is N.
+    let mut bad = t.clone();
+    let i = bad.rows.iter().position(|r| r.rule == Rule::Proj).unwrap();
+    if let Fact::Infer { t, .. } = &mut bad.rows[i].fact {
+        *t = 0;
+    }
+    assert!(Checker::check(&bad, &goal).is_err());
+    // theorem : P (mk n0 h).0 := h, by computing the projection.
+    let mut b2 = Builder::new();
+    let z = b2.zero();
+    let one = b2.succ(z);
+    let type0 = b2.sort(one);
+    let (ds, _, p, _, h2, built2) = boxed(&mut b2, type0);
+    let _ = (h, built);
+    let proj = b2.term(TermRow::Proj(ds, 0, built2));
+    let ty = b2.app(p, proj);
+    let (t, _) = accepted(&mut b2, DeclKind::Theorem, 0, ty, Some(h2));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::ProjCtor));
+}
+
+#[test]
+fn data_is_not_projected_out_of_a_proposition() {
+    let mut b = Builder::new();
+    let z = b.zero();
+    let prop = b.sort(z);
+    let (ds, s, _, n0, _, _) = boxed(&mut b, prop);
+    let n_ty = match b.t.terms[n0 as usize] {
+        TermRow::Const(d, _) => b.t.decls[d as usize].ty,
+        _ => unreachable!(),
+    };
+    // def : S -> N := fun x => x.0, refused by the kernel ...
+    let v0 = b.bvar(0);
+    let f0 = b.term(TermRow::Proj(ds, 0, v0));
+    let ty = b.pi(s, n_ty);
+    let value = b.lam(s, f0);
+    assert!(b.check_decl(DeclKind::Definition, 0, ty, Some(value)).is_err());
+    // ... and, when the tables are written anyway, by the checker.
+    b.lax = true;
+    let goal = b.check_decl(DeclKind::Definition, 0, ty, Some(value)).expect("written");
+    let err = Checker::check(&b.t, &goal).unwrap_err();
+    assert!(err.contains("a field of a proposition is data"), "{err}");
+}

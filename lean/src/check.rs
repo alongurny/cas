@@ -156,6 +156,14 @@ impl<'a> Checker<'a> {
                     limbs(s, &mut f);
                     (f, Meta::default())
                 }
+                TermRow::Proj(d, n, x) => {
+                    before(*d, t.decls.len(), "declaration")?;
+                    let meta = m(*x)?;
+                    let mut f = vec![Num(10)];
+                    limbs(&t.decls[*d as usize].key, &mut f);
+                    f.extend([Num(*n as u64), Id(self.tid[*x as usize])]);
+                    (f, meta)
+                }
             };
             self.tid.push(p.id(&f));
             self.meta.push(meta);
@@ -458,10 +466,88 @@ impl<'a> Checker<'a> {
                 let (b3, t2) = self.infer(i, 5, g)?;
                 need(self.same(b2, b3) && self.same(t, t2), "premises")
             }
+            (TermRow::Proj(s, idx, x), Proj) => self.proj_type(i, g, s, idx, x, t),
             (TermRow::Lit(_), LitNat) => self.prelude_type(t, self.t.nat),
             (TermRow::Str(_), LitStr) => self.prelude_type(t, self.t.string),
             (e, r) => Err(format!("{r:?} does not type {e:?}")),
         }
+    }
+
+    /// The declaration row cited with this key.
+    fn decl_by_key(&self, key: &Key) -> Result<&DeclRow, String> {
+        self.t.decls.iter().find(|d| &d.key == key).ok_or_else(|| "a constructor is not cited".into())
+    }
+
+    /// `Infer(g, proj S idx x, t)`. Premises, in order: `Infer(g, x, E)`,
+    /// `Eq(g, E, I ps)`, `Infer(g, E, SE)`, `Eq(g, SE, sort l)`, the
+    /// constructor's type at the levels `LInst(C, ls, r)`; then for each
+    /// parameter `Eq(g, r, pi)` and `Inst(body, 0, p, r')`; for each field
+    /// before idx `Eq(g, r, pi)`, the proposition check of its type when l
+    /// is zero and the rest depends on it, and `Inst(body, 0, proj S j x, r')`;
+    /// last `Eq(g, r, pi)` whose domain is t, and its proposition check.
+    /// A proposition check is `Infer(g, A, S)` and `Eq(g, S, sort zero)`.
+    fn proj_type(&self, i: usize, g: Ix, s: Ix, idx: u32, x: Ix, t: Ix) -> R {
+        let (x2, e) = self.infer(i, 0, g)?;
+        let (e2, iapp) = self.eq(i, 1, g)?;
+        let (e3, se) = self.infer(i, 2, g)?;
+        let (se2, sort) = self.eq(i, 3, g)?;
+        need(self.same(x, x2) && self.same(e, e2) && self.same(e, e3) && self.same(se, se2), "premises")?;
+        let is_prop = equivalent(&self.level(self.sort_of(sort)?)?, &Level::Zero);
+        let (head, ps) = self.spine(iapp)?;
+        let TermRow::Const(d, ls) = *self.term(head)? else { return Err("the type is not an inductive type".into()) };
+        let induct = &self.t.decls[d as usize];
+        need(induct.key == self.t.decls[s as usize].key, "the type is not the structure projected")?;
+        let Info::Induct { params, indices, ctors } = &induct.info else { return Err("not an inductive type".into()) };
+        need(induct.kind == DeclKind::Inductive, "not an inductive type")?;
+        need(ctors.len() == 1 && ps.len() == (params + indices) as usize, "not a structure applied to its arguments")?;
+        let ctor = self.decl_by_key(&ctors[0])?;
+        need(ctor.kind == DeclKind::Constructor && self.list(ls)?.len() == ctor.levels as usize, "the constructor")?;
+        let mut r = self.linst(i, 4, ctor.ty, ls)?;
+        let mut j = 5;
+        let pi = |j: &mut usize, r: Ix| -> Result<(Ix, Ix), String> {
+            let (r2, w) = self.eq(i, *j, g)?;
+            need(self.same(r, r2), "premises")?;
+            *j += 1;
+            match *self.term(w)? {
+                TermRow::Pi(a, b) => Ok((a, b)),
+                _ => Err("the constructor's type has too few binders".into()),
+            }
+        };
+        let prop = |j: &mut usize, a: Ix| -> R {
+            let (a2, s) = self.infer(i, *j, g)?;
+            let (s2, z) = self.eq(i, *j + 1, g)?;
+            *j += 2;
+            need(self.same(a, a2) && self.same(s, s2), "premises")?;
+            need(self.t.levels[self.sort_of(z)? as usize] == LevelRow::Zero, "a field of a proposition is data")
+        };
+        for p in &ps[..*params as usize] {
+            let (_, body) = pi(&mut j, r)?;
+            r = self.inst(i, j, body, 0, *p)?;
+            j += 1;
+        }
+        for k in 0..idx {
+            let (a, body) = pi(&mut j, r)?;
+            if is_prop && self.meta[body as usize].lbr > 0 {
+                prop(&mut j, a)?;
+            }
+            r = match self.p(i, j)? {
+                Fact::Inst { e, k: 0, a: pj, r }
+                    if self.same(e, body)
+                        && matches!(*self.term(pj)?, TermRow::Proj(s2, k2, x2)
+                            if k2 == k && self.same(x2, x) && self.t.decls[s2 as usize].key == induct.key) =>
+                {
+                    r
+                }
+                f => return Err(format!("premise {j} is {f:?}, not the field replaced by its projection")),
+            };
+            j += 1;
+        }
+        let (a, _) = pi(&mut j, r)?;
+        need(self.same(a, t), "not the field's type")?;
+        if is_prop {
+            prop(&mut j, a)?;
+        }
+        need(j == self.t.rows[i].premises.len(), "extra premises")
     }
 
     fn prelude_type(&self, t: Ix, decl: Option<Ix>) -> R {
@@ -552,6 +638,25 @@ impl<'a> Checker<'a> {
                 let (bh, bargs) = self.peel(b, want.len())?;
                 need(self.same(bh, rhs), "not the rule's right-hand side")?;
                 need(bargs.iter().zip(&want).all(|(x, y)| self.same(*x, *y)), "not the arguments the rule takes")
+            }
+            ProjCtor => {
+                let TermRow::Proj(s, idx, x) = ta else { return Err("not a projection".into()) };
+                let (h, args) = self.spine(x)?;
+                let TermRow::Const(c, _) = *self.term(h)? else { return Err("not a constructor applied".into()) };
+                let Info::Ctor { induct, params, fields } = self.t.decls[c as usize].info else {
+                    return Err("not a constructor applied".into());
+                };
+                need(induct == self.t.decls[s as usize].key, "a constructor of another type")?;
+                need(args.len() == (params + fields) as usize && idx < fields, "the constructor's arguments")?;
+                need(self.same(args[(params + idx) as usize], b), "not the field")
+            }
+            CongProj => {
+                let (TermRow::Proj(s, n, x), TermRow::Proj(s2, n2, y)) = (ta, tb) else {
+                    return Err("not projections".into());
+                };
+                need(self.t.decls[s as usize].key == self.t.decls[s2 as usize].key && n == n2, "different fields")?;
+                let (p, q) = self.eq(i, 0, g)?;
+                need(self.same(x, p) && self.same(y, q), "premises")
             }
             Zeta => {
                 let TermRow::Let(_, v, body) = ta else { return Err("not a let".into()) };
@@ -648,6 +753,10 @@ impl<'a> Checker<'a> {
                 let (r1, r2) = (self.inst(i, 0, d, k, a)?, self.inst(i, 1, b, k + 1, a)?);
                 need(self.same(r1, d2) && self.same(r2, b2), "the parts")
             }
+            (InstProj, TermRow::Proj(s, n, x), TermRow::Proj(s2, n2, x2)) => {
+                need(self.t.decls[s as usize].key == self.t.decls[s2 as usize].key && n == n2, "different fields")?;
+                need(self.same(self.inst(i, 0, x, k, a)?, x2), "the part")
+            }
             (InstLet, TermRow::Let(t, v, b), TermRow::Let(t2, v2, b2)) => {
                 let (r1, r2, r3) =
                     (self.inst(i, 0, t, k, a)?, self.inst(i, 1, v, k, a)?, self.inst(i, 2, b, k + 1, a)?);
@@ -679,6 +788,10 @@ impl<'a> Checker<'a> {
             | (LInstBind, TermRow::Pi(f, x), TermRow::Pi(f2, x2)) => {
                 let (r1, r2) = (self.linst(i, 0, f, ls)?, self.linst(i, 1, x, ls)?);
                 need(self.same(r1, f2) && self.same(r2, x2), "the parts")
+            }
+            (LInstProj, TermRow::Proj(s, n, x), TermRow::Proj(s2, n2, x2)) => {
+                need(self.t.decls[s as usize].key == self.t.decls[s2 as usize].key && n == n2, "different fields")?;
+                need(self.same(self.linst(i, 0, x, ls)?, x2), "the part")
             }
             (LInstLet, TermRow::Let(t, v, b), TermRow::Let(t2, v2, b2)) => {
                 let (r1, r2, r3) = (self.linst(i, 0, t, ls)?, self.linst(i, 1, v, ls)?, self.linst(i, 2, b, ls)?);

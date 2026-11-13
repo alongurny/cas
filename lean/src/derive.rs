@@ -28,6 +28,9 @@ pub struct Builder {
     infers: HashMap<(Ix, Ix), (Ix, Ix)>,
     meta: Vec<Meta>,
     clen: Vec<u32>,
+    /// For tests only: write tables that project data out of a
+    /// proposition, which the checker must refuse.
+    pub lax: bool,
 }
 
 pub type Res<T> = Result<T, String>;
@@ -100,6 +103,7 @@ impl Builder {
                 lbr: m(a).lbr.max(m(v).lbr).max(m(b).lbr.saturating_sub(1)),
                 fv: m(a).fv.max(m(v).fv).max(m(b).fv),
             },
+            TermRow::Proj(_, _, x) => m(x),
         };
         let i = self.t.terms.len() as Ix;
         self.t.terms.push(e.clone());
@@ -199,6 +203,10 @@ impl Builder {
                 let ((p, t2), (q, v2), (s, b2)) = (self.inst(t, k, a), self.inst(v, k, a), self.inst(b, k + 1, a));
                 (Rule::InstLet, vec![p, q, s], self.term(TermRow::Let(t2, v2, b2)))
             }
+            TermRow::Proj(s, n, x) => {
+                let (p, x2) = self.inst(x, k, a);
+                (Rule::InstProj, vec![p], self.term(TermRow::Proj(s, n, x2)))
+            }
             _ => unreachable!("closed terms are handled above"),
         };
         (self.add(Fact::Inst { e, k, a, r }, rule, prem), r)
@@ -228,6 +236,10 @@ impl Builder {
                 let b2 = self.abstract_fvar(b, n, depth + 1);
                 self.term(TermRow::Let(t2, v2, b2))
             }
+            TermRow::Proj(s, k, x) => {
+                let x2 = self.abstract_fvar(x, n, depth);
+                self.term(TermRow::Proj(s, k, x2))
+            }
             _ => e,
         }
     }
@@ -238,6 +250,7 @@ impl Builder {
             TermRow::Const(_, ls) => self.levels_of(*ls).iter().any(|l| self.level_has_params(*l)),
             TermRow::App(a, b) | TermRow::Lam(a, b) | TermRow::Pi(a, b) => self.has_params(*a) || self.has_params(*b),
             TermRow::Let(a, v, b) => self.has_params(*a) || self.has_params(*v) || self.has_params(*b),
+            TermRow::Proj(_, _, x) => self.has_params(*x),
             _ => false,
         }
     }
@@ -298,6 +311,10 @@ impl Builder {
             TermRow::Let(a, v, b) => {
                 let ((p, a2), (q, v2), (s, b2)) = (self.linst(a, ls), self.linst(v, ls), self.linst(b, ls));
                 (Rule::LInstLet, vec![p, q, s], self.term(TermRow::Let(a2, v2, b2)))
+            }
+            TermRow::Proj(s, n, x) => {
+                let (p, x2) = self.linst(x, ls);
+                (Rule::LInstProj, vec![p], self.term(TermRow::Proj(s, n, x2)))
             }
             _ => unreachable!("no levels"),
         };
@@ -461,6 +478,24 @@ impl Builder {
                 let (p, r) = self.inst(body, 0, v);
                 Some((self.add(Fact::Eq { g, a: e, b: r }, Rule::Zeta, vec![p]), r))
             }
+            TermRow::Proj(s, idx, x) => {
+                let (p, x2) = self.whnf(g, x);
+                let (h, args) = self.spine(x2);
+                let TermRow::Const(c, _) = self.t.terms[h as usize] else { return None };
+                let Info::Ctor { params, fields, .. } = self.t.decls[c as usize].info else { return None };
+                if args.len() != (params + fields) as usize || idx >= fields {
+                    return None;
+                }
+                let e2 = self.term(TermRow::Proj(s, idx, x2));
+                let cong = if x2 == x {
+                    self.refl(g, e)
+                } else {
+                    self.add(Fact::Eq { g, a: e, b: e2 }, Rule::CongProj, vec![p])
+                };
+                let r = args[(params + idx) as usize];
+                let pc = self.add(Fact::Eq { g, a: e2, b: r }, Rule::ProjCtor, vec![]);
+                Some((self.trans(cong, pc), r))
+            }
             _ => None,
         }
     }
@@ -540,6 +575,11 @@ impl Builder {
                 let (q2, o2) = self.inst(b2, 0, fvar);
                 let Some(r) = self.defeq(ext, o1, o2)? else { return Ok(None) };
                 Some(self.add(fact, rule, vec![p, q2, q1, r]))
+            }
+            (TermRow::Proj(s, n, x), TermRow::Proj(s2, n2, y))
+                if n == n2 && self.t.decls[s as usize].key == self.t.decls[s2 as usize].key =>
+            {
+                self.defeq(g, x, y)?.map(|p| self.add(fact, Rule::CongProj, vec![p]))
             }
             (TermRow::Lam(d, _), _) => self.eta(g, a, d, b)?,
             (_, TermRow::Lam(d, _)) => self.eta(g, b, d, a)?.map(|p| self.symm(p)),
@@ -641,11 +681,71 @@ impl Builder {
                 let d = self.t.string.ok_or("no String for literals")?;
                 (Rule::LitStr, vec![], self.constant(d, &[]))
             }
+            TermRow::Proj(s, idx, x) => {
+                let (prem, t) = self.proj_type(g, s, idx, x)?;
+                (Rule::Proj, prem, t)
+            }
             TermRow::BVar(_) => return Err("a loose bound variable".into()),
         };
         let r = (self.add(Fact::Infer { g, e, t }, rule, prem), t);
         self.infers.insert((g, e), r);
         Ok(r)
+    }
+
+    /// The premises of `Infer(g, proj s idx x, t)` (see the checker's
+    /// `proj_type` for their order) and t.
+    fn proj_type(&mut self, g: Ix, s: Ix, idx: u32, x: Ix) -> Res<(Vec<Ix>, Ix)> {
+        let (p0, e) = self.infer(g, x)?;
+        let (p1, iapp) = self.whnf(g, e);
+        let (p2, se) = self.infer(g, e)?;
+        let (p3, _, l) = self.sort_whnf(g, se)?;
+        let is_prop = equivalent(&self.to_level(l), &Level::Zero);
+        let (head, ps) = self.spine(iapp);
+        let TermRow::Const(d, ls) = self.t.terms[head as usize] else { return Err("not a structure".into()) };
+        let induct = self.t.decls[d as usize].clone();
+        let Info::Induct { params, ctors, .. } = &induct.info else { return Err("not an inductive type".into()) };
+        if induct.key != self.t.decls[s as usize].key || ctors.len() != 1 {
+            return Err("not the structure projected".into());
+        }
+        let c = *self.decls.get(&ctors[0]).ok_or("the constructor is not cited")?;
+        let (p4, mut r) = self.linst(self.t.decls[c as usize].ty, ls);
+        let mut prem = vec![p0, p1, p2, p3, p4];
+        let pi = |b: &mut Builder, prem: &mut Vec<Ix>, r: Ix| -> Res<(Ix, Ix)> {
+            let (p, w) = b.whnf(g, r);
+            prem.push(p);
+            match b.t.terms[w as usize] {
+                TermRow::Pi(a, body) => Ok((a, body)),
+                _ => Err("the constructor's type has too few binders".into()),
+            }
+        };
+        let prop = |b: &mut Builder, prem: &mut Vec<Ix>, a: Ix| -> Res<()> {
+            let (p, s) = b.infer(g, a)?;
+            let (q, z) = b.whnf(g, s);
+            let ok = matches!(b.t.terms[z as usize], TermRow::Sort(l) if b.t.levels[l as usize] == LevelRow::Zero);
+            prem.extend([p, q]);
+            if ok || b.lax { Ok(()) } else { Err("projecting data out of a proposition".into()) }
+        };
+        for p in &ps[..*params as usize] {
+            let (_, body) = pi(self, &mut prem, r)?;
+            let (q, r2) = self.inst(body, 0, *p);
+            prem.push(q);
+            r = r2;
+        }
+        for k in 0..idx {
+            let (a, body) = pi(self, &mut prem, r)?;
+            if is_prop && self.meta[body as usize].lbr > 0 {
+                prop(self, &mut prem, a)?;
+            }
+            let pk = self.term(TermRow::Proj(s, k, x));
+            let (q, r2) = self.inst(body, 0, pk);
+            prem.push(q);
+            r = r2;
+        }
+        let (a, _) = pi(self, &mut prem, r)?;
+        if is_prop {
+            prop(self, &mut prem, a)?;
+        }
+        Ok((prem, a))
     }
 
     /// Checks a declaration and returns the goal its tables establish.

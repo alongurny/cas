@@ -150,9 +150,15 @@ same table, found by lookup.
 - **lit**: `lit n` has type `const Nat []`, `str s` has `const String []`;
   the keys of Nat and String are those of the cited prelude.
 - **proj**: `Infer(G, proj S i e, T)` from `Infer(G, e, E)`, `Eq(G, E, I ps)`
-  with I a structure (one constructor, no indices), the constructor's type
-  instantiated with the levels and ps, and fields 0 to i - 1 replaced by
-  `proj S j e` with `Inst` rows; T is the type of field i.
+  with I the structure S (an inductive type with one constructor, applied to
+  its parameters and indices), `Infer(G, E, SE)` and `Eq(G, SE, sort l)`,
+  the constructor's type at the levels (`LInst`), then for each parameter an
+  `Eq` to a pi and an `Inst` with the parameter, for fields 0 to i - 1 an
+  `Eq` to a pi and an `Inst` with `proj S j e`, and last an `Eq` to a pi
+  whose domain is T. When l is equivalent to zero (S is a proposition), T
+  and the type of every earlier field that a later one depends on must be
+  propositions: `Infer(G, A, S')` and `Eq(G, S', sort zero)`, as Lean's
+  kernel requires.
 
 ### Equality
 
