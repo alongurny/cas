@@ -207,6 +207,45 @@ pub fn equivalent(a: &Level, b: &Level) -> bool {
     a == b || normalize(a) == normalize(b)
 }
 
+
+fn is_zero(l: &Level) -> bool {
+    *l == Zero
+}
+
+fn geq_core(l1: &Level, l2: &Level) -> bool {
+    if l1 == l2 || is_zero(l2) {
+        return true;
+    }
+    if let Max(a, b) = l2 {
+        return geq(l1, a) && geq(l1, b);
+    }
+    if let Max(a, b) = l1
+        && (geq(a, l2) || geq(b, l2))
+    {
+        return true;
+    }
+    if let IMax(a, b) = l2 {
+        return geq(l1, a) && geq(l1, b);
+    }
+    if let IMax(_, b) = l1 {
+        return geq(b, l2);
+    }
+    let ((p1, k1), (p2, k2)) = (l1.to_offset(), l2.to_offset());
+    if p1 == p2 || is_zero(p2) {
+        return k1 >= k2;
+    }
+    if k1 == k2 && k1 > 0 {
+        return geq(p1, p2);
+    }
+    false
+}
+
+/// `is_geq` of level.cpp: `l1` is at least `l2` for every assignment, as
+/// far as Lean's kernel can tell (it checks that constructor fields fit
+/// their inductive type's universe).
+pub fn geq(l1: &Level, l2: &Level) -> bool {
+    geq_core(&normalize(l1), &normalize(l2))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,5 +260,9 @@ mod tests {
         assert!(equivalent(&Level::imax(u.clone(), v.clone().succ()), &Level::max(u.clone(), v.clone().succ())));
         assert!(!equivalent(&u, &v));
         assert!(!equivalent(&u.clone().succ(), &u));
+        assert!(geq(&Level::max(u.clone(), v.clone()), &u));
+        assert!(geq(&u.clone().succ(), &u));
+        assert!(!geq(&u, &v));
+        assert!(geq(&Level::imax(u.clone(), v.clone()), &v));
     }
 }
