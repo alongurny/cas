@@ -350,3 +350,37 @@ impl Tables {
         }
     }
 }
+
+impl Prim {
+    /// The name of the Lean constant this primitive is.
+    pub fn lean_name(self) -> &'static str {
+        use Prim::*;
+        match self {
+            Nat => "Nat",
+            NatZero => "Nat.zero",
+            NatSucc => "Nat.succ",
+            NatAdd => "Nat.add",
+            NatSub => "Nat.sub",
+            NatMul => "Nat.mul",
+            NatPow => "Nat.pow",
+            NatGcd => "Nat.gcd",
+            NatMod => "Nat.mod",
+            NatDiv => "Nat.div",
+            NatBeq => "Nat.beq",
+            NatBle => "Nat.ble",
+            NatLand => "Nat.land",
+            NatLor => "Nat.lor",
+            NatXor => "Nat.xor",
+            NatShiftLeft => "Nat.shiftLeft",
+            NatShiftRight => "Nat.shiftRight",
+            BoolTrue => "Bool.true",
+            BoolFalse => "Bool.false",
+            String => "String",
+            StringMk => "String.mk",
+            Char => "Char",
+            CharOfNat => "Char.ofNat",
+            ListNil => "List.nil",
+            ListCons => "List.cons",
+        }
+    }
+}

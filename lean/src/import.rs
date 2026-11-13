@@ -307,34 +307,35 @@ use crate::tables::{DeclKind, Info, Prim};
 
 fn prim_named(name: &str) -> Option<Prim> {
     use Prim::*;
-    Some(match name {
-        "Nat" => Nat,
-        "Nat.zero" => NatZero,
-        "Nat.succ" => NatSucc,
-        "Nat.add" => NatAdd,
-        "Nat.sub" => NatSub,
-        "Nat.mul" => NatMul,
-        "Nat.pow" => NatPow,
-        "Nat.gcd" => NatGcd,
-        "Nat.mod" => NatMod,
-        "Nat.div" => NatDiv,
-        "Nat.beq" => NatBeq,
-        "Nat.ble" => NatBle,
-        "Nat.land" => NatLand,
-        "Nat.lor" => NatLor,
-        "Nat.xor" => NatXor,
-        "Nat.shiftLeft" => NatShiftLeft,
-        "Nat.shiftRight" => NatShiftRight,
-        "Bool.true" => BoolTrue,
-        "Bool.false" => BoolFalse,
-        "String" => String,
-        "String.mk" => StringMk,
-        "Char" => Char,
-        "Char.ofNat" => CharOfNat,
-        "List.nil" => ListNil,
-        "List.cons" => ListCons,
-        _ => return None,
-    })
+    [
+        Nat,
+        NatZero,
+        NatSucc,
+        NatAdd,
+        NatSub,
+        NatMul,
+        NatPow,
+        NatGcd,
+        NatMod,
+        NatDiv,
+        NatBeq,
+        NatBle,
+        NatLand,
+        NatLor,
+        NatXor,
+        NatShiftLeft,
+        NatShiftRight,
+        BoolTrue,
+        BoolFalse,
+        String,
+        StringMk,
+        Char,
+        CharOfNat,
+        ListNil,
+        ListCons,
+    ]
+    .into_iter()
+    .find(|p| p.lean_name() == name)
 }
 
 impl Env {

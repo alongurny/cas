@@ -51,8 +51,12 @@ impl Builder {
     fn reduce_proj(&mut self, g: Ix, e: Ix, s: Ix, idx: u32, x: Ix, cheap: bool) -> Option<(Ix, Ix)> {
         let (p, c) = if cheap { self.whnf_core(g, x, cheap) } else { self.whnf(g, x) };
         let (p, c) = if matches!(self.t.terms[c as usize], TermRow::Str(_)) {
+            // `whnf(string_lit_to_constructor(c))`: String.mk is a
+            // definition (of String.ofByteArray) in recent Lean.
             let (q, c2) = self.lit_as_ctor(g, c)?;
-            (self.trans(p, q), c2)
+            let (r, c3) = self.whnf(g, c2);
+            let qr = self.trans(q, r);
+            (self.trans(p, qr), c3)
         } else {
             (p, c)
         };

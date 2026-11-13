@@ -483,8 +483,13 @@ impl Builder {
     /// or by eta for a structure that is not a proposition (Lean's
     /// `to_cnstr_when_K` and `to_cnstr_when_structure`).
     fn as_ctor(&mut self, g: Ix, m: Ix, rules: &[RecRule]) -> Option<(Ix, Ix)> {
-        if let Some(r) = self.lit_as_ctor(g, m) {
-            return Some(r);
+        if let Some((p, c)) = self.lit_as_ctor(g, m) {
+            if matches!(self.t.terms[m as usize], TermRow::Str(_)) {
+                // `whnf(string_lit_to_constructor(major))`, as in Lean.
+                let (q, w) = self.whnf(g, c);
+                return Some((self.trans(p, q), w));
+            }
+            return Some((p, c));
         }
         let (h, _) = self.spine(m);
         if let TermRow::Const(c, _) = self.t.terms[h as usize]
@@ -550,6 +555,10 @@ impl Builder {
     // ---- Literals ----
 
     fn prim_const(&mut self, p: Prim, levels: &[Ix]) -> Option<Ix> {
+        // Lean's kernel knows these by name: cite one the first time.
+        if !self.prims.contains_key(&p) && self.source.is_some() {
+            self.cite(&crate::tables::lean_key(p.lean_name())).ok()?;
+        }
         let d = *self.prims.get(&p)?;
         Some(self.constant(d, levels))
     }
