@@ -6,7 +6,7 @@ CAS=$(realpath "${CAS:-$(dirname "$0")/../target/release/cas}")
 SRC=$(realpath "${1:?usage: git-vs-cas.sh GIT-REPO [EMPTY-WORKDIR]}")
 B=${2:-$(mktemp -d)}
 F=${F:-src/02-preliminaries.tex}
-mkdir -p "$B"; [ -z "$(ls -A "$B")" ] || { echo "$B is not empty" >&2; exit 1; }; cd "$B"
+mkdir -p "$B"; [ -z "$(ls -A "$B")" ] || { echo "$B is not empty" >&2; exit 1; }; B=$(realpath "$B"); cd "$B"
 TIMEFORMAT=%R
 t() { { time "$@" >/dev/null 2>&1; } 2>&1 | tail -1; }
 row() { printf '%s\t%s\t%s\n' "$1" "$2" "$3"; }

@@ -257,10 +257,10 @@ impl Type {
 }
 
 /// A name: 1 to 255 bytes, each a letter `A` to `Z` or `a` to `z`, a digit,
-/// `.`, `-`, `_` or a space; not `.` alone, and no two dots in a row.
+/// `+`, `.`, `-`, `_` or a space; not `.` alone, and no two dots in a row.
 pub fn name_fits(b: &[u8]) -> bool {
     (1..=255).contains(&b.len())
-        && b.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'-' | b'_' | b' '))
+        && b.iter().all(|&c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'.' | b'-' | b'_' | b' '))
         && b != b"."
         && !b.windows(2).any(|w| w == b"..")
 }

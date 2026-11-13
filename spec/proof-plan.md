@@ -46,6 +46,19 @@ Both lookups are one-to-one or of a count known from the manifest (each
 key of a listed blob is matched once), so the bus works as it is, with
 table ids and blob indices in coordinates of their own (review, finding 1).
 
+## A limit of flat blobs
+
+BLAKE3 hashes each chunk with its position (the chunk counter). An edit
+that keeps the length, such as a changed key in a directory entry, changes
+one chunk and the parents above it, so the new blob's proof can reuse the
+old tree's other chunk values. An insertion or a removal shifts every later
+byte, so every later chunk value changes and nothing after it is reused.
+Most directory changes in a history are of that kind (a file added or
+removed). For them the gain of #8 is in reading the counterpart (point 2
+above), not in reusing its tree. Records may also cross a chunk boundary,
+and the sort order is checked between neighbours, so a chunk row checks
+the record it starts in and the first key of the next one.
+
 ## Order of work
 
 1. Chunk-with-path rows in Flock (#8): a row that opens one 1024-byte chunk

@@ -23,8 +23,8 @@ a fixed place in its record; and each value has exactly one encoding.
 - **integer** is a whole number from 0 up to 2^64, in 8 bytes, most
   significant byte first. **time** is an integer of seconds since
   1970-01-01 00:00 UTC. There is no other number type.
-- **name** is 1 to 255 bytes, each an ASCII letter, a digit, `.`, `-`, `_`
-  or a space; it is not `.` alone and has no two dots in a row. The list of bytes is short on purpose,
+- **name** is 1 to 255 bytes, each an ASCII letter, a digit, `+`, `.`, `-`,
+  `_` or a space; it is not `.` alone and has no two dots in a row. The list of bytes is short on purpose,
   for now: it is what is needed. It is written as one byte holding its length and then
   its bytes.
 - **text** is UTF-8 with no control character. **prose** is UTF-8 with no

@@ -405,8 +405,12 @@ impl DiskBackend {
                             }
                             continue;
                         }
-                        // Its base is gone or its chain too deep: store it whole.
-                        None => (file_of(n)?, None),
+                        // Its base is gone or its chain too deep: try its hint
+                        // like a new name, else store it whole.
+                        None => match new_entry(n)? {
+                            Tried::New(file, delta) => (file, delta),
+                            _ => unreachable!("new_entry makes a new entry"),
+                        },
                     },
                     Tried::Reuse(f) => {
                         let d = match &f.base {

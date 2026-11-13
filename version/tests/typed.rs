@@ -234,7 +234,9 @@ fn the_views_a_blob_holds_follow_from_its_type() {
 #[test]
 fn names_are_a_short_list_of_bytes() {
     use cas_version::typed::name_fits;
-    for good in ["a", "main.tex", ".gitignore", "a b", "A-b_9.tar.gz", "a.", &"x".repeat(255)] {
+    for good in
+        ["a", "main.tex", ".gitignore", "a b", "A-b_9.tar.gz", "a.", "git-lost+found.txt", "c++", &"x".repeat(255)]
+    {
         assert!(name_fits(good.as_bytes()), "{good}");
     }
     for bad in ["", ".", "..", "a..b", "a/b", "a$", "é", "a\tb", "~", &"x".repeat(256)] {

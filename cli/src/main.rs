@@ -447,7 +447,10 @@ fn run(a: Args) -> Res<()> {
                 // Like git gc: rewrite into one pack, with deltas against each
                 // path's previous version.
                 if disk.chunked() {
-                    let (order, hints) = gc::delta_hints(s, &|k| disk.sealed(k).unwrap_or(false)).map_err(e)?;
+                    // A full run hints everything again: a frame it would
+                    // reuse may lose its base in this run.
+                    let (order, hints) =
+                        gc::delta_hints(s, &|k| !a.full && disk.sealed(k).unwrap_or(false)).map_err(e)?;
                     let r = disk.repack_with(&order, &hints, a.full).map_err(e)?;
                     out!("repacked: {} deltas, {} whole", r.deltas, r.whole);
                 }

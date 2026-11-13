@@ -45,9 +45,9 @@ fn the_circuit_and_the_parser_agree_on_directories() {
             refused += 1;
         }
     }
-    // Letters, digits, `.`, `-`, `_` and the space, in four places (a dot
+    // Letters, digits, `+`, `.`, `-`, `_` and the space, in four places (a dot
     // alone and a dot after a dot are refused), and four kinds.
-    let valid_names = (26 + 26 + 10 + 4) * 4 - 2;
+    let valid_names = (26 + 26 + 10 + 5) * 4 - 2;
     assert_eq!(valid, valid_names + 4);
     assert!(refused > 600);
 }
