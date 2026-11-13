@@ -182,12 +182,15 @@ same table, found by lookup.
   the cited quotient constants.
 - **eta**: `Eq(G, lam A (app f (bvar 0)), f)` when `lbr(f) = 0`, from
   `Infer(G, f, F)` and `Eq(G, F, pi A' B)` with `Eq(G, A, A')`.
-- **eta-struct**: e equals `ctor ps (proj S 0 e) ... (proj S (k-1) e)` when
-  the type of e is the structure S applied to ps.
+- **eta-struct**: `Eq(G, e, ctor ps fs)` from `Infer(G, e, E)`,
+  `Infer(G, ctor ps fs, C)`, `Eq(G, E, C)` and `Eq(G, proj S i e, f_i)` for
+  each field, when S is structure-like (one constructor, no indices, not
+  recursive, as Lean's kernel requires).
 - **proof irrelevance**: `Eq(G, p, q)` from `Infer(G, p, P)`,
   `Infer(G, q, Q)`, `Eq(G, P, Q)`, `Infer(G, P, S)` and `Eq(G, S, sort zero)`.
-- **unit-like**: `Eq(G, a, b)` when both have type I ps, I an inductive type
-  with no indices and one constructor without fields.
+- **unit-like**: `Eq(G, a, b)` from `Infer(G, a, A)`, `Eq(G, A, I ps)`,
+  `Infer(G, b, B)` and `Eq(G, I ps, B)`, when I is structure-like and its
+  constructor has no fields.
 - **nat literals**: `lit 0 = const Nat.zero []`; `lit (n + 1) = app
   (const Nat.succ []) (lit n)`; `Nat.add`, `sub`, `mul`, `div`, `mod`,
   `gcd`, `beq`, `ble`, `land`, `lor`, `xor`, `shiftLeft`, `shiftRight`,

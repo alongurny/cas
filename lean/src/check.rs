@@ -473,6 +473,23 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The constructor of a structure-like inductive type (one constructor,
+    /// no indices, not recursive), as Lean's kernel requires for eta for
+    /// structures and unit-like types.
+    fn structure_ctor(&self, induct: &Key) -> Result<&DeclRow, String> {
+        let d = self.decl_by_key(induct)?;
+        match &d.info {
+            Info::Induct { indices: 0, ctors, recursive: false, .. }
+                if d.kind == DeclKind::Inductive && ctors.len() == 1 =>
+            {
+                let c = self.decl_by_key(&ctors[0])?;
+                need(c.kind == DeclKind::Constructor, "not a constructor")?;
+                Ok(c)
+            }
+            _ => Err("not a structure-like type".into()),
+        }
+    }
+
     /// The declaration row cited with this key.
     fn decl_by_key(&self, key: &Key) -> Result<&DeclRow, String> {
         self.t.decls.iter().find(|d| &d.key == key).ok_or_else(|| "a constructor is not cited".into())
@@ -497,7 +514,9 @@ impl<'a> Checker<'a> {
         let TermRow::Const(d, ls) = *self.term(head)? else { return Err("the type is not an inductive type".into()) };
         let induct = &self.t.decls[d as usize];
         need(induct.key == self.t.decls[s as usize].key, "the type is not the structure projected")?;
-        let Info::Induct { params, indices, ctors } = &induct.info else { return Err("not an inductive type".into()) };
+        let Info::Induct { params, indices, ctors, .. } = &induct.info else {
+            return Err("not an inductive type".into());
+        };
         need(induct.kind == DeclKind::Inductive, "not an inductive type")?;
         need(ctors.len() == 1 && ps.len() == (params + indices) as usize, "not a structure applied to its arguments")?;
         let ctor = self.decl_by_key(&ctors[0])?;
@@ -657,6 +676,43 @@ impl<'a> Checker<'a> {
                 need(self.t.decls[s as usize].key == self.t.decls[s2 as usize].key && n == n2, "different fields")?;
                 let (p, q) = self.eq(i, 0, g)?;
                 need(self.same(x, p) && self.same(y, q), "premises")
+            }
+            EtaStruct => {
+                // b is a constructor applied; premises: Infer(g, a, A),
+                // Infer(g, b, B), Eq(g, A, B), then Eq(g, proj I i a, field i).
+                let (h, args) = self.spine(b)?;
+                let TermRow::Const(c, _) = *self.term(h)? else { return Err("not a constructor applied".into()) };
+                let Info::Ctor { induct, params, fields } = self.t.decls[c as usize].info else {
+                    return Err("not a constructor applied".into());
+                };
+                need(self.structure_ctor(&induct)?.key == self.t.decls[c as usize].key, "not its constructor")?;
+                need(args.len() == (params + fields) as usize, "the constructor's arguments")?;
+                let (a2, ty_a) = self.infer(i, 0, g)?;
+                let (b2, ty_b) = self.infer(i, 1, g)?;
+                let (x, y) = self.eq(i, 2, g)?;
+                need(self.same(a, a2) && self.same(b, b2) && self.same(x, ty_a) && self.same(y, ty_b), "premises")?;
+                for k in 0..fields {
+                    let (p, f) = self.eq(i, 3 + k as usize, g)?;
+                    let ok = matches!(*self.term(p)?, TermRow::Proj(s, k2, x)
+                        if k2 == k && self.same(x, a) && self.t.decls[s as usize].key == induct);
+                    need(ok && self.same(f, args[(params + k) as usize]), "a field is not its projection")?;
+                }
+                need(self.t.rows[i].premises.len() == 3 + fields as usize, "extra premises")
+            }
+            UnitLike => {
+                // Infer(g, a, A), Eq(g, A, I ps), Infer(g, b, B), Eq(g, I ps, B).
+                let (a2, ty_a) = self.infer(i, 0, g)?;
+                let (x, w) = self.eq(i, 1, g)?;
+                let (b2, ty_b) = self.infer(i, 2, g)?;
+                let (w2, y) = self.eq(i, 3, g)?;
+                need(self.same(a, a2) && self.same(b, b2) && self.same(x, ty_a) && self.same(y, ty_b), "premises")?;
+                need(self.same(w, w2), "premises")?;
+                let (h, _) = self.spine(w)?;
+                let TermRow::Const(d, _) = *self.term(h)? else { return Err("not an inductive type".into()) };
+                match self.structure_ctor(&self.t.decls[d as usize].key)?.info {
+                    Info::Ctor { fields: 0, .. } => Ok(()),
+                    _ => Err("the constructor has fields".into()),
+                }
             }
             Zeta => {
                 let TermRow::Let(_, v, body) = ta else { return Err("not a let".into()) };

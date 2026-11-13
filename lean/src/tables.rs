@@ -71,7 +71,7 @@ pub enum Info {
     #[default]
     None,
     /// An inductive type: its parameters, indices and constructors.
-    Induct { params: u32, indices: u32, ctors: Vec<Key> },
+    Induct { params: u32, indices: u32, ctors: Vec<Key>, recursive: bool },
     /// A constructor of the inductive type `induct`.
     Ctor { induct: Key, params: u32, fields: u32 },
     /// A recursor: how many parameters, motives, minor premises and indices
@@ -145,6 +145,8 @@ pub enum Rule {
     Iota,
     ProjCtor,
     CongProj,
+    EtaStruct,
+    UnitLike,
     InstProj,
     LInstProj,
     CongApp,

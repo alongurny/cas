@@ -311,7 +311,7 @@ fn boxed(b: &mut Builder, sort: u32) -> (u32, u32, u32, u32, u32, u32) {
     let pn0 = b.app(p, n0);
     let dh = axiom(b, 4, 0, pn0);
     let h = b.constant(dh, &[]);
-    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(6)] };
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(6)], recursive: false };
     let ds = b.decl(DeclRow { key: key(5), kind: DeclKind::Inductive, levels: 0, ty: sort, value: None, info: induct });
     let s = b.constant(ds, &[]);
     let v0 = b.bvar(0);
@@ -383,4 +383,83 @@ fn data_is_not_projected_out_of_a_proposition() {
     let goal = b.check_decl(DeclKind::Definition, 0, ty, Some(value)).expect("written");
     let err = Checker::check(&b.t, &goal).unwrap_err();
     assert!(err.contains("a field of a proposition is data"), "{err}");
+}
+
+fn set_recursive(t: &mut Tables, k: [u8; 32]) {
+    use cas_lean::tables::Info;
+    for d in &mut t.decls {
+        if d.key == k
+            && let Info::Induct { recursive, .. } = &mut d.info
+        {
+            *recursive = true;
+        }
+    }
+}
+
+#[test]
+fn a_structure_equals_its_fields_rebuilt() {
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let (prop, type0) = (b.sort(z), b.sort(one));
+    let (ds, s, _, _, _, _) = boxed(&mut b, type0);
+    let mk = match b
+        .t
+        .terms
+        .iter()
+        .position(|t| matches!(t, TermRow::Const(d, _) if b.t.decls[*d as usize].key == key(6)))
+    {
+        Some(i) => i as u32,
+        None => unreachable!(),
+    };
+    // axiom Q : S -> Prop; theorem : (x : S) -> Q x -> Q (mk x.0 x.1) := fun x q => q
+    let q_ty = b.pi(s, prop);
+    let dq = axiom(&mut b, 7, 0, q_ty);
+    let q = b.constant(dq, &[]);
+    let (v0, v1) = (b.bvar(0), b.bvar(1));
+    let qx0 = b.app(q, v0);
+    let (f0, f1) = (b.term(TermRow::Proj(ds, 0, v1)), b.term(TermRow::Proj(ds, 1, v1)));
+    let rebuilt = b.apps(mk, &[f0, f1]);
+    let q_rebuilt = b.app(q, rebuilt);
+    let inner = b.pi(qx0, q_rebuilt);
+    let ty = b.pi(s, inner);
+    let qx = b.app(q, v0);
+    let body = b.lam(qx, v0);
+    let value = b.lam(s, body);
+    let (mut t, goal) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(value));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::EtaStruct));
+    set_recursive(&mut t, key(5));
+    assert!(Checker::check(&t, &goal).is_err());
+}
+
+#[test]
+fn values_of_a_unit_type_are_equal() {
+    use cas_lean::tables::Info;
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let (prop, type0) = (b.sort(z), b.sort(one));
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(2)], recursive: false };
+    let du =
+        b.decl(DeclRow { key: key(1), kind: DeclKind::Inductive, levels: 0, ty: type0, value: None, info: induct });
+    let u = b.constant(du, &[]);
+    let info = Info::Ctor { induct: key(1), params: 0, fields: 0 };
+    b.decl(DeclRow { key: key(2), kind: DeclKind::Constructor, levels: 0, ty: u, value: None, info });
+    // axiom R : U -> Prop; theorem : (x y : U) -> R x -> R y := fun x y r => r
+    let r_ty = b.pi(u, prop);
+    let dr = axiom(&mut b, 3, 0, r_ty);
+    let r = b.constant(dr, &[]);
+    let (v0, v1) = (b.bvar(0), b.bvar(1));
+    // Under x and y, x is bvar 1; under the arrow's binder too, y is bvar 1.
+    let r1 = b.app(r, v1);
+    let arrow = b.pi(r1, r1);
+    let inner = b.pi(u, arrow);
+    let ty = b.pi(u, inner);
+    let body = b.lam(r1, v0);
+    let inner = b.lam(u, body);
+    let value = b.lam(u, inner);
+    let (mut t, goal) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(value));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::UnitLike));
+    set_recursive(&mut t, key(1));
+    assert!(Checker::check(&t, &goal).is_err());
 }

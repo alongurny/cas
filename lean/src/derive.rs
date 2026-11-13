@@ -548,7 +548,7 @@ impl Builder {
         }
         let (ta, tb) = (self.t.terms[a as usize].clone(), self.t.terms[b as usize].clone());
         let fact = Fact::Eq { g, a, b };
-        Ok(match (ta, tb) {
+        let r = match (ta, tb) {
             (TermRow::Sort(l), TermRow::Sort(m)) => self.leq(l, m).map(|p| self.add(fact, Rule::CongSort, vec![p])),
             (TermRow::Const(d, ls), TermRow::Const(d2, ms))
                 if self.t.decls[d as usize].key == self.t.decls[d2 as usize].key =>
@@ -584,7 +584,67 @@ impl Builder {
             (TermRow::Lam(d, _), _) => self.eta(g, a, d, b)?,
             (_, TermRow::Lam(d, _)) => self.eta(g, b, d, a)?.map(|p| self.symm(p)),
             _ => None,
-        })
+        };
+        if r.is_some() {
+            return Ok(r);
+        }
+        if let Some(p) = self.eta_struct(g, a, b)? {
+            return Ok(Some(p));
+        }
+        if let Some(p) = self.eta_struct(g, b, a)? {
+            return Ok(Some(self.symm(p)));
+        }
+        self.unit_like(g, a, b)
+    }
+
+    /// The constructor row of a structure-like type with this key.
+    fn structure_ctor(&self, induct: &Key) -> Option<Ix> {
+        let d = &self.t.decls[*self.decls.get(induct)? as usize];
+        match &d.info {
+            Info::Induct { indices: 0, ctors, recursive: false, .. } if ctors.len() == 1 => {
+                self.decls.get(&ctors[0]).copied()
+            }
+            _ => None,
+        }
+    }
+
+    /// `Eq(g, t, s)` when s is the constructor of a structure applied and
+    /// each field equals the projection of t.
+    fn eta_struct(&mut self, g: Ix, t: Ix, s: Ix) -> Res<Option<Ix>> {
+        let (h, args) = self.spine(s);
+        let TermRow::Const(c, _) = self.t.terms[h as usize] else { return Ok(None) };
+        let Info::Ctor { induct, params, fields } = self.t.decls[c as usize].info else { return Ok(None) };
+        if self.structure_ctor(&induct).is_none() || args.len() != (params + fields) as usize {
+            return Ok(None);
+        }
+        let d = self.decls[&induct];
+        let (p0, ty_t) = self.infer(g, t)?;
+        let (p1, ty_s) = self.infer(g, s)?;
+        let Some(p2) = self.defeq(g, ty_t, ty_s)? else { return Ok(None) };
+        let mut prem = vec![p0, p1, p2];
+        for k in 0..fields {
+            let pk = self.term(TermRow::Proj(d, k, t));
+            let Some(q) = self.defeq(g, pk, args[(params + k) as usize])? else { return Ok(None) };
+            prem.push(q);
+        }
+        Ok(Some(self.add(Fact::Eq { g, a: t, b: s }, Rule::EtaStruct, prem)))
+    }
+
+    /// `Eq(g, a, b)` when their type is a structure whose constructor has
+    /// no fields.
+    fn unit_like(&mut self, g: Ix, a: Ix, b: Ix) -> Res<Option<Ix>> {
+        let (p0, ty_a) = self.infer(g, a)?;
+        let (p1, w) = self.whnf(g, ty_a);
+        let (h, _) = self.spine(w);
+        let TermRow::Const(d, _) = self.t.terms[h as usize] else { return Ok(None) };
+        let key = self.t.decls[d as usize].key;
+        let Some(c) = self.structure_ctor(&key) else { return Ok(None) };
+        if !matches!(self.t.decls[c as usize].info, Info::Ctor { fields: 0, .. }) {
+            return Ok(None);
+        }
+        let (p2, ty_b) = self.infer(g, b)?;
+        let Some(p3) = self.defeq(g, w, ty_b)? else { return Ok(None) };
+        Ok(Some(self.add(Fact::Eq { g, a, b }, Rule::UnitLike, vec![p0, p1, p2, p3])))
     }
 
     /// `Eq(g, lam, f)` through `lam d (f (bvar 0))`.
