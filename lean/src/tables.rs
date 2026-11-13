@@ -272,3 +272,20 @@ pub enum Prim {
     ListNil,
     ListCons,
 }
+
+/// What an inductive block's check establishes: its inductive types (each
+/// with its constructors, named in its info) and its recursors are what
+/// Lean's kernel adds for the block (inductive.cpp, `add_inductive`).
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BlockGoal {
+    pub levels: u32,
+    pub params: u32,
+    /// The declaration rows of the types, in the block's order.
+    pub types: Vec<Ix>,
+    /// The declaration rows of their recursors, in the same order.
+    pub recursors: Vec<Ix>,
+    /// The judgement rows the check consults, in the order it consults
+    /// them (each `whnf`, `infer`, `instantiate` and `is_def_eq` of the
+    /// kernel's procedure).
+    pub tape: Vec<Ix>,
+}

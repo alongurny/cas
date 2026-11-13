@@ -18,29 +18,37 @@ struct Meta {
 }
 
 pub struct Checker<'a> {
-    t: &'a Tables,
-    goal: &'a Goal,
-    lid: Vec<Id>,
-    lparam: Vec<bool>,
-    listid: Vec<Id>,
-    tid: Vec<Id>,
+    pub(crate) t: &'a Tables,
+    /// How many level parameters the declarations being checked have.
+    pub(crate) levels: u32,
+    pub(crate) point: Point,
+    pub(crate) lid: Vec<Id>,
+    pub(crate) lparam: Vec<bool>,
+    pub(crate) listid: Vec<Id>,
+    pub(crate) tid: Vec<Id>,
     meta: Vec<Meta>,
-    cid: Vec<Id>,
-    clen: Vec<u32>,
+    pub(crate) cid: Vec<Id>,
+    pub(crate) clen: Vec<u32>,
 }
 
-type R = Result<(), String>;
+pub(crate) type R = Result<(), String>;
 
-fn need(ok: bool, what: &str) -> R {
+pub(crate) fn need(ok: bool, what: &str) -> R {
     if ok { Ok(()) } else { Err(what.to_string()) }
 }
 
 impl<'a> Checker<'a> {
-    /// Checks `goal` against `tables`.
-    pub fn check(tables: &'a Tables, goal: &'a Goal) -> R {
+    /// The ids of all rows, from a point drawn from the tables and the goal,
+    /// and every judgement row checked.
+    pub(crate) fn new(tables: &'a Tables, levels: u32, goal: &str) -> Result<Checker<'a>, String> {
+        let mut commit = blake3::Hasher::new();
+        commit.update(&tables.commitment());
+        commit.update(goal.as_bytes());
+        let point = Point::from_commitment(commit.finalize().as_bytes());
         let mut c = Checker {
             t: tables,
-            goal,
+            levels,
+            point,
             lid: vec![],
             lparam: vec![],
             listid: vec![],
@@ -49,18 +57,21 @@ impl<'a> Checker<'a> {
             cid: vec![],
             clen: vec![],
         };
-        let mut commit = blake3::Hasher::new();
-        commit.update(&tables.commitment());
-        commit.update(format!("{goal:?}").as_bytes());
-        let point = Point::from_commitment(commit.finalize().as_bytes());
-        c.ids(&point)?;
+        c.ids()?;
         for i in 0..tables.rows.len() {
             c.row(i).map_err(|e| format!("row {i} ({:?} by {:?}): {e}", tables.rows[i].fact, tables.rows[i].rule))?;
         }
-        c.goal().map_err(|e| format!("goal: {e}"))
+        Ok(c)
     }
 
-    fn ids(&mut self, p: &Point) -> R {
+    /// Checks `goal` against `tables`.
+    pub fn check(tables: &'a Tables, goal: &'a Goal) -> R {
+        let c = Checker::new(tables, goal.levels, &format!("{goal:?}"))?;
+        c.goal(goal).map_err(|e| format!("goal: {e}"))
+    }
+
+    fn ids(&mut self) -> R {
+        let p = self.point;
         use Field::*;
         let t = self.t;
         let before = |i: Ix, n: usize, what: &str| need((i as usize) < n, &format!("{what} {i} is not an earlier row"));
@@ -188,7 +199,7 @@ impl<'a> Checker<'a> {
     }
 
     /// The levels of a list, in order.
-    fn list(&self, mut ls: Ix) -> Result<Vec<Ix>, String> {
+    pub(crate) fn list(&self, mut ls: Ix) -> Result<Vec<Ix>, String> {
         let mut out = vec![];
         loop {
             match self.t.lists.get(ls as usize).ok_or("no such list")? {
@@ -201,7 +212,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn level(&self, l: Ix) -> Result<Level, String> {
+    pub(crate) fn level(&self, l: Ix) -> Result<Level, String> {
         Ok(match *self.t.levels.get(l as usize).ok_or("no such level")? {
             LevelRow::Zero => Level::Zero,
             LevelRow::Succ(a) => self.level(a)?.succ(),
@@ -220,7 +231,7 @@ impl<'a> Checker<'a> {
                 self.params_in_range(a)?;
                 self.params_in_range(b)
             }
-            LevelRow::Param(n) => need(n < self.goal.levels, "a level parameter is out of range"),
+            LevelRow::Param(n) => need(n < self.levels, "a level parameter is out of range"),
         }
     }
 
@@ -964,8 +975,7 @@ impl<'a> Checker<'a> {
         }
     }
 
-    fn goal(&self) -> R {
-        let g = self.goal;
+    fn goal(&self, g: &Goal) -> R {
         let fact = |k: Ix| -> Result<Fact, String> { Ok(self.t.rows.get(k as usize).ok_or("no such row")?.fact) };
         let empty = |c: Ix| self.t.ctxs.get(c as usize) == Some(&CtxRow::Empty);
         let Fact::Infer { g: c, e, t: s } = fact(g.ty_is_type.0)? else { return Err("not a typing".into()) };

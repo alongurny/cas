@@ -885,3 +885,201 @@ fn a_string_literal_is_its_characters() {
     bad.terms[i] = TermRow::Str(b"he".to_vec());
     assert!(Checker::check(&bad, &goal).is_err());
 }
+
+/// `inductive N | zero | succ (n : N)`: the block's own check, with the
+/// recursor built by the kernel and compared by the checker.
+#[test]
+fn an_inductive_block_is_checked_and_its_recursor_built() {
+    use cas_lean::tables::{BlockGoal, Info};
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let cite = |b: &mut Builder, k: u8, kind, ty| {
+        b.decl(DeclRow { key: key(k), kind, levels: 0, ty, value: None, info: Info::None })
+    };
+    let dn = cite(&mut b, 1, DeclKind::Inductive, type0);
+    let n = b.constant(dn, &[]);
+    let dz = cite(&mut b, 2, DeclKind::Constructor, n);
+    let nn = b.pi(n, n);
+    let ds = cite(&mut b, 3, DeclKind::Constructor, nn);
+    let goal: BlockGoal = b.inductive_block(0, 0, &[dn], &[vec![dz, ds]], &[key(4)]).expect("the kernel accepts it");
+    let t = b.t.clone();
+    Checker::check_block(&t, &goal).expect("the checker accepts the block");
+    let rec = &t.decls[goal.recursors[0] as usize];
+    assert_eq!(rec.levels, 1);
+    // A recursor with its rules swapped is refused.
+    let mut bad = t.clone();
+    if let Info::Rec { rules, .. } = &mut bad.decls[goal.recursors[0] as usize].info {
+        let (a, c) = (rules[0].rhs, rules[1].rhs);
+        rules[0].rhs = c;
+        rules[1].rhs = a;
+    }
+    assert!(Checker::check_block(&bad, &goal).is_err());
+    // A negative occurrence is refused: `bad : (N' -> N') -> N'`.
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let dn = cite(&mut b, 1, DeclKind::Inductive, type0);
+    let n = b.constant(dn, &[]);
+    let nn = b.pi(n, n);
+    let neg = b.pi(nn, n);
+    let dc = cite(&mut b, 2, DeclKind::Constructor, neg);
+    assert!(b.inductive_block(0, 0, &[dn], &[vec![dc]], &[key(4)]).is_err());
+}
+
+fn cite_as(b: &mut Builder, k: u8, kind: DeclKind, levels: u32, ty: u32) -> u32 {
+    b.decl(DeclRow { key: key(k), kind, levels, ty, value: None, info: Default::default() })
+}
+
+/// `List.{u} (α : Type u)`, mutual `Even`/`Odd` on `N` with indices, and
+/// a reflexive `T | sup (f : N -> T)`: each block checked, and the
+/// recursor's universe as Lean decides it.
+#[test]
+fn parameters_indices_mutual_and_reflexive_blocks() {
+    use cas_lean::tables::BlockGoal;
+    // Each block has its own tables, as each declaration does.
+    let nat = |b: &mut Builder| {
+        let z = b.zero();
+        let one = b.succ(z);
+        let type0 = b.sort(one);
+        let dn = cite_as(b, 1, DeclKind::Inductive, 0, type0);
+        let n = b.constant(dn, &[]);
+        let dz = cite_as(b, 2, DeclKind::Constructor, 0, n);
+        let nn = b.pi(n, n);
+        let ds = cite_as(b, 3, DeclKind::Constructor, 0, nn);
+        b.inductive_block(0, 0, &[dn], &[vec![dz, ds]], &[key(4)]).unwrap();
+        let (zero, succ) = (b.constant(dz, &[]), b.constant(ds, &[]));
+        (n, zero, succ)
+    };
+    let checked = |b: &Builder, g: &BlockGoal| {
+        let t = b.t.clone();
+        Checker::check_block(&t, g).expect("the checker accepts the block");
+        t
+    };
+    // List.{u} (α : Type u) : Type u | nil | cons (a : α) (t : List α)
+    let mut b = Builder::new();
+    let u = b.param(0);
+    let su1 = {
+        let s = b.succ(u);
+        b.sort(s)
+    };
+    let list_ty = b.pi(su1, su1);
+    let dl = cite_as(&mut b, 10, DeclKind::Inductive, 1, list_ty);
+    let list_u = b.constant(dl, &[u]);
+    let (v0, v1, v2) = (b.bvar(0), b.bvar(1), b.bvar(2));
+    let nil_ty = {
+        let l = b.app(list_u, v0);
+        b.pi(su1, l)
+    };
+    let dnil = cite_as(&mut b, 11, DeclKind::Constructor, 1, nil_ty);
+    let cons_ty = {
+        let l1 = b.app(list_u, v1);
+        let l2 = b.app(list_u, v2);
+        let i = b.pi(l1, l2);
+        let i = b.pi(v0, i);
+        b.pi(su1, i)
+    };
+    let dcons = cite_as(&mut b, 12, DeclKind::Constructor, 1, cons_ty);
+    let g = b.inductive_block(1, 1, &[dl], &[vec![dnil, dcons]], &[key(13)]).unwrap();
+    let t = checked(&b, &g);
+    assert_eq!(t.decls[g.recursors[0] as usize].levels, 2, "List.rec has the elimination level and u");
+    // mutual Even Odd : N -> Prop
+    let mut b = Builder::new();
+    let (n, zero, succ) = nat(&mut b);
+    let z = b.zero();
+    let prop = b.sort(z);
+    let (v0, v1) = (b.bvar(0), b.bvar(1));
+    let pred = b.pi(n, prop);
+    let de = cite_as(&mut b, 20, DeclKind::Inductive, 0, pred);
+    let dodd = cite_as(&mut b, 21, DeclKind::Inductive, 0, pred);
+    let (even, odd) = (b.constant(de, &[]), b.constant(dodd, &[]));
+    let ez = b.app(even, zero);
+    let dez = cite_as(&mut b, 22, DeclKind::Constructor, 0, ez);
+    let sn = b.app(succ, v1);
+    let es = {
+        let on = b.app(odd, v0);
+        let e1 = b.app(even, sn);
+        let i = b.pi(on, e1);
+        b.pi(n, i)
+    };
+    let des = cite_as(&mut b, 23, DeclKind::Constructor, 0, es);
+    let os = {
+        let en = b.app(even, v0);
+        let o1 = b.app(odd, sn);
+        let i = b.pi(en, o1);
+        b.pi(n, i)
+    };
+    let dos = cite_as(&mut b, 24, DeclKind::Constructor, 0, os);
+    let g = b.inductive_block(0, 0, &[de, dodd], &[vec![dez, des], vec![dos]], &[key(25), key(26)]).unwrap();
+    let t = checked(&b, &g);
+    let lv = |i: usize| t.decls[g.recursors[i] as usize].levels;
+    assert_eq!((lv(0), lv(1)), (0, 0), "Even.rec eliminates only into Prop");
+    let mut bad = t.clone();
+    bad.decls[g.recursors[0] as usize].levels = 1;
+    assert!(Checker::check_block(&bad, &g).is_err(), "a recursor at the wrong universe");
+    // T | sup (f : N -> T)
+    let mut b = Builder::new();
+    let (n, _, _) = nat(&mut b);
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let dt = cite_as(&mut b, 30, DeclKind::Inductive, 0, type0);
+    let t_ = b.constant(dt, &[]);
+    let nt = b.pi(n, t_);
+    let sup = b.pi(nt, t_);
+    let dsup = cite_as(&mut b, 31, DeclKind::Constructor, 0, sup);
+    let g = b.inductive_block(0, 0, &[dt], &[vec![dsup]], &[key(32)]).unwrap();
+    let t = checked(&b, &g);
+    assert_eq!(t.decls[g.recursors[0] as usize].levels, 1);
+}
+
+/// The recursor the block check builds for `N` is the one Lean prints:
+/// `N.rec.{u} : {motive : N -> Sort u} -> motive N.zero ->
+/// ((n : N) -> motive n -> motive n.succ) -> (t : N) -> motive t`, with the
+/// rules `fun motive zero succ => zero` and
+/// `fun motive zero succ n => succ n (N.rec zero succ n)`.
+#[test]
+fn the_built_recursor_is_leans() {
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let dn = cite_as(&mut b, 1, DeclKind::Inductive, 0, type0);
+    let n = b.constant(dn, &[]);
+    let dz = cite_as(&mut b, 2, DeclKind::Constructor, 0, n);
+    let nn = b.pi(n, n);
+    let ds = cite_as(&mut b, 3, DeclKind::Constructor, 0, nn);
+    let g = b.inductive_block(0, 0, &[dn], &[vec![dz, ds]], &[key(4)]).unwrap();
+    let dr = g.recursors[0];
+    let (zero, succ) = (b.constant(dz, &[]), b.constant(ds, &[]));
+    let u = b.param(0);
+    let su = b.sort(u);
+    let motive_ty = b.pi(n, su);
+    let v: Vec<u32> = (0..4).map(|i| b.bvar(i)).collect();
+    let zero_minor = b.app(v[0], zero);
+    let mn = b.app(v[2], v[0]);
+    let sn = b.app(succ, v[1]);
+    let msn = b.app(v[3], sn);
+    let ih = b.pi(mn, msn);
+    let succ_minor = b.pi(n, ih);
+    let result = b.app(v[3], v[0]);
+    let t = b.pi(n, result);
+    let s = b.pi(succ_minor, t);
+    let zz = b.pi(zero_minor, s);
+    let rec_ty = b.pi(motive_ty, zz);
+    assert_eq!(b.t.decls[dr as usize].ty, rec_ty, "the recursor's type");
+    let l3 = b.lam(succ_minor, v[1]);
+    let l2 = b.lam(zero_minor, l3);
+    let rhs_zero = b.lam(motive_ty, l2);
+    let rec_u = b.constant(dr, &[u]);
+    let recur = b.apps(rec_u, &[v[3], v[2], v[1], v[0]]);
+    let body = b.apps(v[1], &[v[0], recur]);
+    let l4 = b.lam(n, body);
+    let l3 = b.lam(succ_minor, l4);
+    let l2 = b.lam(zero_minor, l3);
+    let rhs_succ = b.lam(motive_ty, l2);
+    let cas_lean::tables::Info::Rec { rules, .. } = &b.t.decls[dr as usize].info else { panic!() };
+    assert_eq!((rules[0].rhs, rules[1].rhs), (rhs_zero, rhs_succ), "the rules");
+}

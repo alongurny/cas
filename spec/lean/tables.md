@@ -222,15 +222,29 @@ same table, found by lookup.
 - **definition, theorem**: also `Infer([], v, V)` and `Eq([], V, T)`; a
   theorem's type is a proposition (u = zero).
 - **mutual definitions**: each one, with the others cited by key.
-- **inductive block**: the types are well formed with the declared
-  parameters and indices; each constructor's type ends in its inductive type
-  applied to the parameters; every recursive occurrence is strictly
-  positive; the universe of each constructor argument fits the inductive's
-  universe (or the type is a proposition); and the recursors and reduction
-  rules stored in the blob are exactly the ones Lean generates, checked term
-  by term against their construction. Nested types are first translated to a
-  mutual block, as the kernel does, and the translation is stored and
-  checked too.
+- **inductive block**: a block goal names the types (rows of kind
+  inductive, each listing its constructors), the recursors, the number of
+  parameters and level parameters, and a tape of judgement rows. The
+  checker runs Lean's `add_inductive` (kernel/inductive.cpp) step by step
+  and answers each `whnf`, `infer`, `instantiate` and `is_def_eq` it makes
+  with the next row of the tape, which must be about the term it asks
+  for (each row's own check is that of any row). So it checks, as Lean
+  does: the types' telescopes after whnf, shared parameters, one universe
+  for all types; each constructor's parameters, that each field's universe
+  is at most the block's (`is_geq`) unless the block is a proposition,
+  strict positivity, and that it returns its type applied to the
+  parameters and to indices free of the block; whether the block is
+  recursive; the elimination universe (Prop only, or a new level
+  parameter placed first, which moves the block's parameters up by one);
+  and the recursive fields and their arguments. It then builds each
+  recursor's type and rules as `declare_recursors` does, computing ids of
+  terms with variables bound directly (no rows needed), and compares them
+  with the recursor rows given. K-like reduction needs no flag, since it
+  is derived from proof irrelevance. Nested inductive types (a block type
+  under another type, as in `Array Syntax`) are not covered yet: Lean
+  first translates them to a mutual block, and that translation and its
+  inverse still have to be written as checks; until then their
+  occurrences fail the positivity check.
 - **quotient**: the four quotient constants with their fixed types.
 
 The claim of a declaration is that its own check passes given the rows of

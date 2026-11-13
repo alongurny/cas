@@ -6,6 +6,7 @@
 //! fingerprints ([`fp`]), so the tables need no hashing and no check that
 //! rows are distinct. The same checks are meant to become a circuit.
 
+pub mod block;
 pub mod check;
 pub mod derive;
 pub mod fp;

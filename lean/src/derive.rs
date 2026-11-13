@@ -6,6 +6,8 @@
 //! It unfolds definitions eagerly, unlike Lean's lazy delta reduction: it is
 //! here to produce tables for tests and to count rows, not to be fast.
 
+mod block;
+
 use crate::level::{Level, equivalent};
 use crate::nat;
 use crate::tables::*;

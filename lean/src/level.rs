@@ -54,7 +54,7 @@ impl Level {
         matches!(self.to_offset().0, Zero)
     }
 
-    fn is_not_zero(&self) -> bool {
+    pub fn is_not_zero(&self) -> bool {
         match self {
             Zero | Param(_) => false,
             Succ(_) => true,
@@ -206,7 +206,6 @@ pub fn normalize(l: &Level) -> Level {
 pub fn equivalent(a: &Level, b: &Level) -> bool {
     a == b || normalize(a) == normalize(b)
 }
-
 
 fn is_zero(l: &Level) -> bool {
     *l == Zero
