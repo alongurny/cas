@@ -1,0 +1,207 @@
+diff --git a/src/kernel/environment.cpp b/src/kernel/environment.cpp
+index 1e8514e..a77d919 100644
+--- a/src/kernel/environment.cpp
++++ b/src/kernel/environment.cpp
+@@ -7,6 +7,9 @@ Author: Leonardo de Moura
+ #include <utility>
+ #include <vector>
+ #include <limits>
++#include <cstdio>
++#include <cstdlib>
++#include <string>
+ #include "runtime/sstream.h"
+ #include "runtime/thread.h"
+ #include "runtime/sharecommon.h"
+@@ -15,6 +18,7 @@ Author: Leonardo de Moura
+ #include "kernel/environment.h"
+ #include "kernel/kernel_exception.h"
+ #include "kernel/type_checker.h"
++#include "kernel/kstats.h"
+ #include "kernel/quot.h"
+ 
+ namespace lean {
+@@ -272,12 +276,39 @@ environment environment::add(declaration const & d, bool check) const {
+ addDeclCore (env : Environment) (maxHeartbeats : USize) (decl : @& Declaration)
+   (cancelTk? : @& Option IO.CancelToken) : Except Kernel.Exception Environment
+ */
++void report_kstats(declaration const & d) {
++    static char const * path = getenv("LEAN_KERNEL_STATS");
++    kernel_stats s = g_kstats();
++    g_kstats() = kernel_stats();
++    if (!path) return;
++    static char const * kinds[] = {"axiom", "def", "thm", "opaque", "quot", "mutual", "inductive"};
++    std::string nm = "-";
++    switch (d.kind()) {
++    case declaration_kind::Axiom: case declaration_kind::Definition:
++    case declaration_kind::Theorem: case declaration_kind::Opaque:
++        nm = static_cast<constant_val const &>(cnstr_get_ref(cnstr_get_ref(d, 0), 0)).get_name().to_string(); break;
++    case declaration_kind::MutualDefinition:
++        nm = head(d.to_definition_vals()).get_name().to_string(); break;
++    default: break;
++    }
++    FILE * f = fopen(path, "a");
++    if (!f) return;
++    fprintf(f, "%s\t%s\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu\n", kinds[static_cast<int>(d.kind())], nm.c_str(),
++            s.infer_check, s.infer_only, s.infer_hit, s.whnf_core, s.whnf_core_hit, s.whnf, s.whnf_hit,
++            s.defeq_core, s.defeq_true, s.defeq_equiv_hit, s.defeq_fail, s.unfold, s.nat);
++    fclose(f);
++}
++
+ extern "C" LEAN_EXPORT object * lean_add_decl(object * env, size_t max_heartbeat, object * decl,
+     object * opt_cancel_tk) {
+     scope_max_heartbeat s(max_heartbeat);
+     scope_cancel_tk s2(is_scalar(opt_cancel_tk) ? nullptr : cnstr_get(opt_cancel_tk, 0));
++    g_kstats() = kernel_stats();
++    declaration dd(decl, true);
+     return catch_kernel_exceptions<environment>([&]() {
+-            return environment(env).add(declaration(decl, true));
++            environment r = environment(env).add(dd);
++            report_kstats(dd);
++            return r;
+         });
+ }
+ 
+diff --git a/src/kernel/kstats.h b/src/kernel/kstats.h
+new file mode 100644
+index 0000000..01234e2
+--- /dev/null
++++ b/src/kernel/kstats.h
+@@ -0,0 +1,14 @@
++#pragma once
++// Counters for measuring how much work the kernel does per declaration
++// (local instrumentation for the zkPi row-count measurement).
++namespace lean {
++struct kernel_stats {
++    unsigned long long infer_check = 0, infer_only = 0, infer_hit = 0;
++    unsigned long long whnf_core = 0, whnf_core_hit = 0, whnf = 0, whnf_hit = 0;
++    unsigned long long defeq_core = 0, defeq_true = 0, defeq_equiv_hit = 0, defeq_fail = 0;
++    unsigned long long unfold = 0, nat = 0;
++};
++kernel_stats & g_kstats();
++class declaration;
++void report_kstats(declaration const & d);
++}
+diff --git a/src/kernel/type_checker.cpp b/src/kernel/type_checker.cpp
+index 20b2c77..aaf226c 100644
+--- a/src/kernel/type_checker.cpp
++++ b/src/kernel/type_checker.cpp
+@@ -11,6 +11,7 @@ Author: Leonardo de Moura
+ #include "runtime/flet.h"
+ #include "util/lbool.h"
+ #include "kernel/type_checker.h"
++#include "kernel/kstats.h"
+ #include "kernel/expr_maps.h"
+ #include "kernel/instantiate.h"
+ #include "kernel/kernel_exception.h"
+@@ -21,6 +22,7 @@ Author: Leonardo de Moura
+ #include "kernel/inductive.h"
+ 
+ namespace lean {
++kernel_stats & g_kstats() { static thread_local kernel_stats s; return s; }
+ static name * g_kernel_fresh = nullptr;
+ static expr * g_dont_care    = nullptr;
+ static name * g_bool_true    = nullptr;
+@@ -275,7 +277,8 @@ expr type_checker::infer_type_core(expr const & e, bool infer_only) {
+ 
+     auto it = m_st->m_infer_type[infer_only].find(e);
+     if (it != m_st->m_infer_type[infer_only].end())
+-        return it->second;
++        { g_kstats().infer_hit++; return it->second; }
++    if (infer_only) g_kstats().infer_only++; else g_kstats().infer_check++;
+ 
+     expr r;
+     switch (e.kind()) {
+@@ -422,7 +425,8 @@ expr type_checker::whnf_core(expr const & e, bool cheap_rec, bool cheap_proj) {
+     // check cache
+     auto it = m_st->m_whnf_core.find(e);
+     if (it != m_st->m_whnf_core.end())
+-        return it->second;
++        { g_kstats().whnf_core_hit++; return it->second; }
++    g_kstats().whnf_core++;
+ 
+     // do the actual work
+     expr r;
+@@ -501,6 +505,7 @@ optional<expr> type_checker::unfold_definition_core(expr const & e) {
+                 if (m_diag) {
+                     m_diag->record_unfold(d->get_name());
+                 }
++                g_kstats().unfold++;
+                 return some_expr(instantiate_value_lparams(*d, const_levels(e)));
+             }
+         }
+@@ -650,7 +655,8 @@ expr type_checker::whnf(expr const & e) {
+     // check cache
+     auto it = m_st->m_whnf.find(e);
+     if (it != m_st->m_whnf.end())
+-        return it->second;
++        { g_kstats().whnf_hit++; return it->second; }
++    g_kstats().whnf++;
+ 
+     expr t = e;
+     while (true) {
+@@ -659,6 +665,7 @@ expr type_checker::whnf(expr const & e) {
+             m_st->m_whnf.insert(mk_pair(e, *v));
+             return *v;
+         } else if (auto v = reduce_nat(t1)) {
++            g_kstats().nat++;
+             m_st->m_whnf.insert(mk_pair(e, *v));
+             return *v;
+         } else if (auto next_t = unfold_definition(t1)) {
+@@ -729,6 +736,7 @@ bool type_checker::is_def_eq(levels const & ls1, levels const & ls2) {
+ 
+ /** \brief This is an auxiliary method for is_def_eq. It handles the "easy cases". */
+ lbool type_checker::quick_is_def_eq(expr const & t, expr const & s, bool use_hash) {
++    if (m_st->m_eqv_manager.is_equiv(t, s, use_hash)) g_kstats().defeq_equiv_hit++;
+     if (m_st->m_eqv_manager.is_equiv(t, s, use_hash))
+         return l_true;
+     if (t.kind() == s.kind()) {
+@@ -846,6 +854,7 @@ bool type_checker::failed_before(expr const & t, expr const & s) const {
+ }
+ 
+ void type_checker::cache_failure(expr const & t, expr const & s) {
++    g_kstats().defeq_fail++;
+     if (hash(t) <= hash(s))
+         m_st->m_failure.insert(mk_pair(t, s));
+     else
+@@ -1045,6 +1054,7 @@ bool type_checker::is_def_eq_unit_like(expr const & t, expr const & s) {
+ }
+ 
+ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
++    g_kstats().defeq_core++;
+     check_system("is_definitionally_equal", /* do_check_interrupted */ true);
+     bool use_hash = true;
+     lbool r = quick_is_def_eq(t, s, use_hash);
+@@ -1123,6 +1133,7 @@ bool type_checker::is_def_eq_core(expr const & t, expr const & s) {
+ 
+ bool type_checker::is_def_eq(expr const & t, expr const & s) {
+     bool r = is_def_eq_core(t, s);
++    if (r) g_kstats().defeq_true++;
+     if (r)
+         m_st->m_eqv_manager.add_equiv(t, s);
+     return r;
+diff --git a/src/library/elab_environment.cpp b/src/library/elab_environment.cpp
+index 49ef3e6..5a135eb 100644
+--- a/src/library/elab_environment.cpp
++++ b/src/library/elab_environment.cpp
+@@ -8,6 +8,7 @@ Authors: Leonardo de Moura, Sebastian Ullrich
+ #include "kernel/type_checker.h"
+ #include "kernel/kernel_exception.h"
+ #include "library/elab_environment.h"
++#include "kernel/kstats.h"
+ 
+ namespace lean {
+ /* updateBaseAfterKernelAdd (env : Environment) (base : Kernel.Environment) (decl : Declaration) : Environment
+@@ -28,8 +29,12 @@ extern "C" LEAN_EXPORT object * lean_elab_add_decl(object * env, size_t max_hear
+     object * opt_cancel_tk) {
+     scope_max_heartbeat s(max_heartbeat);
+     scope_cancel_tk s2(is_scalar(opt_cancel_tk) ? nullptr : cnstr_get(opt_cancel_tk, 0));
++    g_kstats() = kernel_stats();
+     return catch_kernel_exceptions<elab_environment>([&]() {
+-            return elab_environment(env).add(declaration(decl, true));
++            declaration dd(decl, true);
++            elab_environment r = elab_environment(env).add(dd);
++            report_kstats(dd);
++            return r;
+         });
+ }
+ 
