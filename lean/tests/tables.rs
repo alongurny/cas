@@ -463,3 +463,117 @@ fn values_of_a_unit_type_are_equal() {
     set_recursive(&mut t, key(1));
     assert!(Checker::check(&t, &goal).is_err());
 }
+
+/// `T.rec.{u} : (motive : T -> Sort u) -> motive intro -> (t : T) -> motive t`
+/// reduces on any proof `t` of the proposition `T` (K-like reduction).
+#[test]
+fn a_recursor_on_a_proposition_reduces_on_any_proof() {
+    use cas_lean::tables::{Info, RecRule};
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let prop = b.sort(z);
+    let type0 = b.sort(one);
+    let (_, _, p, n0, h, _) = boxed(&mut b, type0);
+    let n = match b.t.terms[n0 as usize] {
+        TermRow::Const(d, _) => b.t.decls[d as usize].ty,
+        _ => unreachable!(),
+    };
+    let induct = Info::Induct { params: 0, indices: 0, ctors: vec![key(11)], recursive: false };
+    let dt =
+        b.decl(DeclRow { key: key(10), kind: DeclKind::Inductive, levels: 0, ty: prop, value: None, info: induct });
+    let t_ty = b.constant(dt, &[]);
+    let info = Info::Ctor { induct: key(10), params: 0, fields: 0 };
+    let di = b.decl(DeclRow { key: key(11), kind: DeclKind::Constructor, levels: 0, ty: t_ty, value: None, info });
+    let intro = b.constant(di, &[]);
+    let u = b.param(0);
+    let su = b.sort(u);
+    let motive_ty = b.pi(t_ty, su);
+    let (v0, v2) = (b.bvar(0), b.bvar(2));
+    let minor_ty = b.app(v0, intro);
+    let result = b.app(v2, v0);
+    let last = b.pi(t_ty, result);
+    let rest = b.pi(minor_ty, last);
+    let rec_ty = b.pi(motive_ty, rest);
+    let inner = b.lam(minor_ty, v0);
+    let rhs = b.lam(motive_ty, inner);
+    let rules = vec![RecRule { ctor: key(11), fields: 0, rhs }];
+    let info = Info::Rec { params: 0, motives: 1, minors: 1, indices: 0, rules };
+    let dr = b.decl(DeclRow { key: key(12), kind: DeclKind::Recursor, levels: 1, ty: rec_ty, value: None, info });
+    let dax = axiom(&mut b, 13, 0, t_ty);
+    let t = b.constant(dax, &[]);
+    // theorem : P (T.rec.{1} (fun _ => N) n0 t) := h
+    let motive = b.lam(t_ty, n);
+    let rec1 = b.constant(dr, &[one]);
+    let app = b.apps(rec1, &[motive, n0, t]);
+    let ty = b.app(p, app);
+    let (t, _) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(h));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::Iota));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::ProofIrrel));
+}
+
+/// `S.rec` reduces on a variable of the structure S, through eta.
+#[test]
+fn a_recursor_on_a_structure_reduces_on_a_variable() {
+    use cas_lean::tables::{Info, RecRule};
+    let mut b = Builder::new();
+    let z = b.zero();
+    let one = b.succ(z);
+    let type0 = b.sort(one);
+    let (ds, s, p, n0, _, _) = boxed(&mut b, type0);
+    let n = match b.t.terms[n0 as usize] {
+        TermRow::Const(d, _) => b.t.decls[d as usize].ty,
+        _ => unreachable!(),
+    };
+    let mk = b.term(TermRow::Const(ds + 1, 0));
+    let mk = match b.t.terms[mk as usize] {
+        TermRow::Const(d, _) if b.t.decls[d as usize].key == key(6) => mk,
+        _ => unreachable!(),
+    };
+    let u = b.param(0);
+    let su = b.sort(u);
+    let motive_ty = b.pi(s, su);
+    let (v0, v1, v2, v3) = (b.bvar(0), b.bvar(1), b.bvar(2), b.bvar(3));
+    let pv0 = b.app(p, v0);
+    let built = b.apps(mk, &[v1, v0]);
+    let m_built = b.app(v2, built);
+    let minor_ty = {
+        let inner = b.pi(pv0, m_built);
+        b.pi(n, inner)
+    };
+    let result = b.app(v2, v0);
+    let last = b.pi(s, result);
+    let rest = b.pi(minor_ty, last);
+    let rec_ty = b.pi(motive_ty, rest);
+    let body = b.apps(v2, &[v1, v0]);
+    let rhs = {
+        let l4 = b.lam(pv0, body);
+        let l3 = b.lam(n, l4);
+        let l2 = b.lam(minor_ty, l3);
+        b.lam(motive_ty, l2)
+    };
+    let _ = v3;
+    let rules = vec![RecRule { ctor: key(6), fields: 2, rhs }];
+    let info = Info::Rec { params: 0, motives: 1, minors: 1, indices: 0, rules };
+    let dr = b.decl(DeclRow { key: key(8), kind: DeclKind::Recursor, levels: 1, ty: rec_ty, value: None, info });
+    // theorem : (x : S) -> P (S.rec.{1} (fun _ => N) (fun v _ => v) x) -> P x.0 := fun x h => h
+    let motive = b.lam(s, n);
+    let first = {
+        let l = b.lam(pv0, v1);
+        b.lam(n, l)
+    };
+    let rec1 = b.constant(dr, &[one]);
+    let app = b.apps(rec1, &[motive, first, v0]);
+    let p_app = b.app(p, app);
+    let x0 = b.term(TermRow::Proj(ds, 0, v1));
+    let p_x0 = b.app(p, x0);
+    let inner = b.pi(p_app, p_x0);
+    let ty = b.pi(s, inner);
+    let value = {
+        let l = b.lam(p_app, v0);
+        b.lam(s, l)
+    };
+    let (t, _) = accepted(&mut b, DeclKind::Theorem, 0, ty, Some(value));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::Iota));
+    assert!(t.rows.iter().any(|r| r.rule == Rule::EtaStruct));
+}

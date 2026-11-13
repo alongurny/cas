@@ -422,6 +422,10 @@ impl Builder {
         let at = before + indices as usize;
         let major = *args.get(at)?;
         let (pm, m2) = self.whnf(g, major);
+        let (pm, m2) = match self.as_ctor(g, m2, &rules) {
+            Some((p, c)) => (self.trans(pm, p), c),
+            None => (pm, m2),
+        };
         let (mh, margs) = self.spine(m2);
         let TermRow::Const(c, _) = self.t.terms[mh as usize] else { return None };
         let key = self.t.decls[c as usize].key;
@@ -443,6 +447,49 @@ impl Builder {
         let b = self.apps(rhs, &want);
         let step = self.add(Fact::Eq { g, a: e2, b }, Rule::Iota, prem);
         Some((self.trans(cong, step), b))
+    }
+
+    /// A major premise `m` in weak head normal form that is not a
+    /// constructor applied, shown equal to one: by proof irrelevance for a
+    /// proposition with one constructor without fields (K-like reduction),
+    /// or by eta for a structure that is not a proposition (Lean's
+    /// `to_cnstr_when_K` and `to_cnstr_when_structure`).
+    fn as_ctor(&mut self, g: Ix, m: Ix, rules: &[RecRule]) -> Option<(Ix, Ix)> {
+        let (h, _) = self.spine(m);
+        if let TermRow::Const(c, _) = self.t.terms[h as usize]
+            && matches!(self.t.decls[c as usize].info, Info::Ctor { .. })
+        {
+            return None;
+        }
+        let (_, ty) = self.infer(g, m).ok()?;
+        let (_, w) = self.whnf(g, ty);
+        let (ih, iargs) = self.spine(w);
+        let TermRow::Const(i, ls) = self.t.terms[ih as usize] else { return None };
+        let (_, s) = self.infer(g, w).ok()?;
+        let (_, s) = self.whnf(g, s);
+        let is_prop =
+            matches!(self.t.terms[s as usize], TermRow::Sort(l) if self.t.levels[l as usize] == LevelRow::Zero);
+        let ikey = self.t.decls[i as usize].key;
+        if is_prop {
+            let [rule] = rules else { return None };
+            let c = *self.decls.get(&rule.ctor)?;
+            let Info::Ctor { params, fields: 0, .. } = self.t.decls[c as usize].info else { return None };
+            let head = self.term(TermRow::Const(c, ls));
+            let built = self.apps(head, iargs.get(..params as usize)?);
+            let p = self.proof_irrel(g, m, built).ok()??;
+            Some((p, built))
+        } else {
+            let c = self.structure_ctor(&ikey)?;
+            let Info::Ctor { params, fields, .. } = self.t.decls[c as usize].info else { return None };
+            let head = self.term(TermRow::Const(c, ls));
+            let mut built = self.apps(head, iargs.get(..params as usize)?);
+            for k in 0..fields {
+                let pk = self.term(TermRow::Proj(i, k, m));
+                built = self.app(built, pk);
+            }
+            let p = self.eta_struct(g, m, built).ok()??;
+            Some((p, built))
+        }
     }
 
     fn step(&mut self, g: Ix, e: Ix) -> Option<(Ix, Ix)> {

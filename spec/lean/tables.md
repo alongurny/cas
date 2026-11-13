@@ -173,9 +173,11 @@ same table, found by lookup.
   and a major premise that is a constructor application (with the right
   number of parameters) equals the matching rule's right-hand side,
   instantiated with the levels, the parameters, motives and minors, and the
-  constructor's fields. For a recursor with K-like reduction (a Prop with
-  one constructor and no fields), the major premise may be any term whose
-  type equals the constructor's type.
+  constructor's fields. Lean's K-like reduction (a proposition with one
+  constructor without fields) and its reduction on a structure that is not
+  built need no rule of their own: the major premise is first shown equal
+  to a constructor application by proof irrelevance or by eta for
+  structures, and congruence carries that into the recursor's arguments.
 - **proj-ctor**: `proj S i (ctor ps fs)` equals field i.
 - **quot**: `Quot.lift f h (Quot.mk r a)` equals `f a`, and
   `Quot.ind h (Quot.mk r a)` equals `h a`, with the levels and arguments of
