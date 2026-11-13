@@ -186,7 +186,7 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
             "manifest",
             include_str!("../../spec/formats/manifest.md"),
             Kind::Leaf(crate::typed::check_manifest),
-            &[include_str!("../../spec/formats/manifest-v1.md")],
+            &[include_str!("../../spec/formats/manifest-v1.md"), include_str!("../../spec/formats/manifest-v2.md")],
         ),
     ]
 });

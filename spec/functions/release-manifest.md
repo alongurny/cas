@@ -11,7 +11,9 @@ through an earlier release, are left out.
 "In the same place" is decided as in [manifest](manifest.md), with the
 releases it follows in the place of a commit's parents: the version is
 looked at against their versions and the tag against their tags, and a
-changelog is always the release's own.
+changelog is always the release's own. The releases it follows are its
+**parent** records, and their blobs looked at as counterparts are
+**opened**.
 
 So every blob a release history reaches that is not a file is listed by the
 manifest of a release in it, and a proof of each of those manifests says

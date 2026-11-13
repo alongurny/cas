@@ -577,10 +577,18 @@ fn manifest_of(s: &dyn Store, alias: &str, key: &str) -> Res<View> {
 fn print_manifest(s: &dyn Store, alias: &str, key: &str) -> Res<()> {
     let view = manifest_of(s, alias, key)?;
     let m = proofs::read(s, view.key()).map_err(e)?;
-    for (key, (alias, len)) in &m.blobs {
-        out!("{alias:10} {} {len}", cas_version::typed::key_text(key));
+    for (key, alias, len, role) in m.records() {
+        let role = ["", " opened", " parent"][role as usize];
+        out!("{alias:10} {} {len}{role}", cas_version::typed::key_text(&key));
     }
-    out!("{} blobs, {} bytes, manifest {}", m.blobs.len(), m.bytes(), view.key());
+    out!(
+        "{} blobs, {} bytes, {} opened from {} parents, manifest {}",
+        m.blobs.len(),
+        m.bytes(),
+        m.opened.len(),
+        m.parents.len(),
+        view.key()
+    );
     Ok(())
 }
 
@@ -598,7 +606,13 @@ fn prove_or_verify(a: &Args, s: &dyn Store, cmd: &str, alias: &str, nodes: &[Str
     };
     let mut manifests = Vec::new();
     let mut blobs = 0;
-    for k in nodes {
+    // A proof holds given its parents' proofs: verify checks those too.
+    let mut todo: Vec<String> = nodes.to_vec();
+    let mut seen: std::collections::BTreeSet<String> = todo.iter().cloned().collect();
+    let mut next = 0;
+    while next < todo.len() {
+        let k = &todo[next].clone();
+        next += 1;
         let view = manifest_of(s, alias, k)?;
         let proven = derived::cached(s, &proofs::PROOF, &view).map_err(e)?.is_some();
         if cmd == "verify" && !proven {
@@ -620,13 +634,22 @@ fn prove_or_verify(a: &Args, s: &dyn Store, cmd: &str, alias: &str, nodes: &[Str
             }
         }
         if cmd == "verify" || !proven {
-            blobs += proofs::read(s, view.key()).map_err(e)?.blobs.len();
+            let m = proofs::read(s, view.key()).map_err(e)?;
+            blobs += m.blobs.len();
             manifests.push(view.key().to_string());
+            if cmd == "verify" {
+                for p in m.parents.keys() {
+                    let p = cas_version::typed::key_text(p);
+                    if seen.insert(p.clone()) {
+                        todo.push(p);
+                    }
+                }
+            }
         }
     }
     let plural = if alias == "release" { "releases" } else { "commits" };
     if manifests.is_empty() {
-        out!("{} {plural}, all proven already", nodes.len());
+        out!("{} {plural}, all proven already", todo.len());
         return Ok(());
     }
     flush_out();

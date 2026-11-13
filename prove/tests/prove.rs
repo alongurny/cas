@@ -18,10 +18,10 @@ fn store() -> Session {
     CoreStore::new(MemBackend::new(), AllowAll, Policy::permissive()).session(Who::anonymous())
 }
 
-/// A commit of a small tree; its key and its version.
-fn commit(s: &dyn Store) -> (String, View) {
+/// A small tree whose `src/deep/b.rs` holds `b`.
+fn tree(s: &dyn Store, b: &str) -> View {
     let mut files = BTreeMap::new();
-    for (path, text) in [("README", "hi\n"), ("src/a.rs", "fn a() {}\n"), ("src/deep/b.rs", "fn b() {}\n")] {
+    for (path, text) in [("README", "hi\n"), ("src/a.rs", "fn a() {}\n"), ("src/deep/b.rs", b)] {
         files.insert(Path::new(path).unwrap(), Node::File(put(s, b3(), "raw", text.as_bytes()).unwrap()));
     }
     // Enough entries that the root directory is more than one BLAKE3 chunk.
@@ -29,7 +29,12 @@ fn commit(s: &dyn Store) -> (String, View) {
         let name = format!("a file with a fairly long name number {i:03}.txt");
         files.insert(Path::new(name).unwrap(), Node::File(put(s, b3(), "raw", b"x").unwrap()));
     }
-    let v = build(s, b3(), by_alias("directory").unwrap(), &files).unwrap();
+    build(s, b3(), by_alias("directory").unwrap(), &files).unwrap()
+}
+
+/// A commit of a small tree; its key and its version.
+fn commit(s: &dyn Store) -> (String, View) {
+    let v = tree(s, "fn b() {}\n");
     let author = commits::put_text(s, b3(), "author", "Dana Ünïcode").unwrap();
     let c = Commit { version: v.key().to_string(), author, notes: None, time: 7, parents: BTreeMap::new() };
     (commits::write(s, b3(), &c).unwrap(), v)
@@ -102,10 +107,15 @@ fn what_is_not_valid_gets_no_proof() {
     let mut m = Manifest::default();
     m.blobs.insert(key_bytes(&bad_key).unwrap(), ("directory", bad.len() as u64));
     assert!(prove(&m).unwrap_err().contains("is not a valid directory"));
-    // And the honest manifest of the same store still proves.
+    // A commit and its root directory, without the directories under it:
+    // the keys of those are held but found nowhere.
     let mut m = Manifest::default();
     m.blobs.insert(commit_key, ("commit", read_blob(&s, &c).unwrap().len() as u64));
     m.blobs.insert(dir_key, ("directory", dir_len));
+    assert!(prove(&m).unwrap_err().contains("neither brought nor in a parent"));
+    // And the honest manifest of the same store still proves.
+    let m = proofs::of_commit(&s, &c).unwrap();
+    assert!(m.blobs.contains_key(&dir_key) && m.blobs.contains_key(&commit_key));
     let proof = prove(&m).unwrap();
     cas_prove::verify_bytes(&m.encode(), &proof).unwrap();
     assert!(proofs::read(&s, &write_blob(&s, b3(), &m.encode()).unwrap()).is_ok());
@@ -191,4 +201,34 @@ fn releases_are_proven() {
         cas_prove::prove_and_record(&s, view.key()).unwrap();
         cas_prove::verify(&s, view.key()).unwrap();
     }
+}
+
+/// A second commit changes one file under `src/deep`: it brings the
+/// directories on that path, opens their counterparts in the parent, and
+/// finds the unchanged `README` entry's siblings there.
+#[test]
+fn a_child_finds_what_it_shares_in_its_parent() {
+    let s = store();
+    let (c, v) = commit(&s);
+    let v2 = tree(&s, "fn b2() {}\n");
+    let author = commits::put_text(&s, b3(), "author", "Dana Ünïcode").unwrap();
+    let mut parents = BTreeMap::new();
+    parents.insert(c.clone(), None);
+    let c2 = commits::write(&s, b3(), &Commit { version: v2.key().to_string(), author, notes: None, time: 8, parents })
+        .unwrap();
+    let m = proofs::of_commit(&s, &c2).unwrap();
+    assert_eq!(m.parents.keys().copied().collect::<Vec<_>>(), vec![key_bytes(&c).unwrap()]);
+    assert!(m.opened.contains_key(&key_bytes(v.key()).unwrap()), "the parent's root is opened");
+    // src and src/deep and the root are new; the author is found in the parent.
+    assert_eq!(m.blobs.values().filter(|(a, _)| *a == "directory").count(), 3);
+    let key = write_blob(&s, b3(), &m.encode()).unwrap();
+    let proof = cas_prove::prove(&s, &key).unwrap();
+    cas_prove::verify_bytes(&m.encode(), &proof).unwrap();
+    // Without the parent, what the child shares with it is found nowhere.
+    let mut orphan = m.clone();
+    orphan.parents.clear();
+    let key = write_blob(&s, b3(), &orphan.encode()).unwrap();
+    assert!(cas_prove::prove(&s, &key).is_err());
+    // A proof made with the parent does not hold for a manifest without it.
+    assert!(cas_prove::verify_bytes(&orphan.encode(), &proof).is_err());
 }

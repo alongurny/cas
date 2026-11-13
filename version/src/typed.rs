@@ -318,6 +318,10 @@ pub const PROVEN: &[&str] =
 /// The kinds of change between two releases, in tag order.
 pub const CHANGES: &[&str] = &["breaking", "feature", "patch", "security"];
 
+/// What a blob is to a proof (spec/formats/manifest.md): brought by it,
+/// opened from a parent to find the keys new blobs hold, or a parent.
+pub const ROLES: &[&str] = &["new", "opened", "parent"];
+
 static TYPES: LazyLock<Vec<Type>> = LazyLock::new(|| {
     vec![
         // directory = sorted<{ child: key<raw | symlink | directory>, name: name }> by name
@@ -414,14 +418,14 @@ static TYPES: LazyLock<Vec<Type>> = LazyLock::new(|| {
             )),
             nonempty: false,
         },
-        // manifest = sorted<{ blob: key<...>, length: integer }> by blob
+        // manifest = sorted<{ blob: key<...>, role, length: integer }> by blob
         Type {
             alias: "manifest",
             head: None,
             list: Some((
                 Rec {
                     keys: vec![key("blob", PROVEN)],
-                    choices: vec![],
+                    choices: vec![ChoiceF { name: "role", kinds: ROLES }],
                     ints: vec![IntF { name: "length", positive: false }],
                     name: false,
                 },

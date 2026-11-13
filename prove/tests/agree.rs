@@ -51,3 +51,37 @@ fn the_circuit_and_the_parser_agree_on_directories() {
     assert_eq!(valid, valid_names + 4);
     assert!(refused > 600);
 }
+
+/// The code the circuit gives each key's target is the manifest's tag byte
+/// of that type, or 0 for what the key lookup leaves alone: a file, and a
+/// parent (a commit's parents, the releases a release follows).
+#[test]
+fn the_circuit_and_the_parser_agree_on_what_keys_name() {
+    use cas_version::typed::PROVEN;
+    let code = |alias: &str| match alias {
+        "commit" | "release" => 0,
+        a => PROVEN.iter().position(|p| *p == a).map_or(0, |i| i as u8 + 1),
+    };
+    let mut fields = 0;
+    for t in cas_ir::types().iter().filter(|t| t.text.is_none()) {
+        let parser = by_type(t.alias).unwrap();
+        let recs = [
+            (t.head.as_ref(), parser.head.as_ref()),
+            (t.list.as_ref().map(|l| &l.0), parser.list.as_ref().map(|l| &l.0)),
+        ];
+        for (circuit, parsed) in recs {
+            let (Some(c), Some(p)) = (circuit, parsed) else {
+                assert!(circuit.is_none() && parsed.is_none(), "{}", t.alias);
+                continue;
+            };
+            assert_eq!(c.keys.len(), p.keys.len(), "{}", t.alias);
+            for (ck, pk) in c.keys.iter().zip(&p.keys) {
+                let want: Vec<u8> = pk.targets.iter().map(|a| code(a)).collect();
+                assert_eq!(ck.targets, &want[..], "{}.{}", t.alias, pk.name);
+                assert_eq!(ck.optional, pk.optional, "{}.{}", t.alias, pk.name);
+                fields += 1;
+            }
+        }
+    }
+    assert_eq!(fields, 16);
+}

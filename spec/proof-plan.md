@@ -104,3 +104,17 @@ directories again.
 Next: multiplicities on Flock's bus (a bit-decomposed multiplicity column,
 `∏ (β + φ)^(2^i m_i)` on the supply side), then the request and supply
 ports on the typed rows, then `cas verify` from the manifest alone.
+
+## #1 built (2026-11-13)
+
+Flock's bus has multiplicities (alon/flock `cas`, b756764: each count bit
+is a product group, proven with a zero check of `m² + m` in one sumcheck).
+The manifest now names, besides the new blobs, the parents and the blobs
+opened from them (spec/formats/manifest.md, roles `new | opened | parent`).
+The circuit adds a table of key rows: one for each blob's own key and each
+key a row holds, with the code of its type (the row circuits output it,
+from the field's target or its tag byte). A key row asks for its
+(key, code) once when it must be found (a key a new blob holds, or an
+opened blob's own key) and gives it as often as it is asked for when it
+may (a new blob's own key, a key an opened blob or a parent holds). `cas
+verify` follows the parents' proofs back to the first commit.

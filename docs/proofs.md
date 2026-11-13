@@ -25,15 +25,22 @@ Each commit has a **manifest** ([../spec/formats/manifest.md](../spec/formats/ma
 the blobs it brings that its parents do not have in the same place, each
 with its type and its length. `cas manifest` prints it. It lists the commit
 itself, its directories, its author, its notes and the line diffs they are
-on. It does not list files (any bytes are a valid file) and does not list a
-parent commit, which has a manifest of its own.
+on. It does not list files (any bytes are a valid file). It names the
+parent commits, which have manifests of their own, and the blobs of the
+parents that the new blobs were compared with ("opened").
 
 A **proof** for a manifest says that each blob listed
 
 - has the length listed,
 - hashes, with BLAKE3, to the key listed, and
 - is valid in the type listed: parsing it succeeds and printing the result
-  gives the same bytes.
+  gives the same bytes;
+
+and that each key a new blob holds (not a file, not a parent) is the key of
+a new blob or is held by an opened blob or a parent, in a field of the same
+type, and each opened blob is held by an opened blob or a parent. So if the
+parents are valid, everything the commit reaches is: `cas verify` checks
+the parents' proofs as well, back to the first commit.
 
 The manifest is all a verifier needs beside the proof. Both are kept as
 derived data ([../spec/derived.md](../spec/derived.md)): the manifest is the
@@ -60,10 +67,11 @@ commits its versions came from.
 
 ## What is not proven
 
-- That the manifest is the right one for its commit. `cas verify` works the
-  manifest out again from the commit, which reads the blobs. A client that
-  wants to trust a manifest it did not work out needs a proof of that too;
-  there is none yet.
+- That the manifest is exactly the one its commit gives. It need not be:
+  the proof shows every key the new blobs hold is found, so a verifier that
+  holds a manifest listing the commit, its proof and its parents' proofs
+  knows everything the commit reaches is valid. `cas verify` still works the
+  manifest out from the commit, which reads the blobs.
 - One proof for a whole history. Each commit has its own proof, and
   `--all` checks them one by one.
 - Nothing is proven in a remote store from outside: `prove` and `verify` run

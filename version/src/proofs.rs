@@ -4,26 +4,42 @@
 //! output is kept as the derived result [`PROOF`].
 
 use crate::derived::Function;
-use crate::typed::{NONE, PROVEN, Rec, RecV, Type, Value, by_type, key_bytes, key_text};
+use crate::typed::{NONE, PROVEN, ROLES, Rec, RecV, Type, Value, by_type, key_bytes, key_text};
 use crate::{Error, Result, View, malformed, read_blob};
 use cas_core::Store;
 use cas_core::algo::Algorithm;
 use std::collections::BTreeMap;
 
-/// The blobs a proof covers: for each key, its type and its length in bytes.
+/// The blobs a proof covers: for each key, its type and its length in
+/// bytes; a blob is new (brought by the proof), opened from a parent, or a
+/// parent (spec/formats/manifest.md).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Manifest {
     pub blobs: BTreeMap<[u8; 32], (&'static str, u64)>,
+    pub opened: BTreeMap<[u8; 32], (&'static str, u64)>,
+    pub parents: BTreeMap<[u8; 32], (&'static str, u64)>,
 }
 
 impl Manifest {
+    /// Every record in key order: key, type, length, role (an index in
+    /// [`ROLES`]).
+    pub fn records(&self) -> Vec<([u8; 32], &'static str, u64, u8)> {
+        let mut all: Vec<_> = [&self.blobs, &self.opened, &self.parents]
+            .into_iter()
+            .enumerate()
+            .flat_map(|(role, m)| m.iter().map(move |(k, &(alias, len))| (*k, alias, len, role as u8)))
+            .collect();
+        all.sort_by_key(|r| r.0);
+        all
+    }
+
     pub fn encode(&self) -> Vec<u8> {
         let list = self
-            .blobs
-            .iter()
-            .map(|(k, (alias, len))| {
-                let tag = PROVEN.iter().position(|a| a == alias).expect("a type a proof can cover") as u8 + 1;
-                RecV { keys: vec![*k], kinds: vec![tag], ints: vec![*len], ..Default::default() }
+            .records()
+            .into_iter()
+            .map(|(k, alias, len, role)| {
+                let tag = PROVEN.iter().position(|a| *a == alias).expect("a type a proof can cover") as u8 + 1;
+                RecV { keys: vec![k], kinds: vec![tag, role + 1], ints: vec![len], ..Default::default() }
             })
             .collect();
         by_type("manifest").unwrap().print(&Value { head: None, list })
@@ -35,12 +51,25 @@ impl Manifest {
         if t.print(&v) != b {
             return Err("not the one encoding of its value".into());
         }
-        Ok(Manifest {
-            blobs: v.list.iter().map(|r| (r.keys[0], (PROVEN[r.kinds[0] as usize - 1], r.ints[0]))).collect(),
-        })
+        let mut m = Manifest::default();
+        for r in &v.list {
+            let what = (PROVEN[r.kinds[0] as usize - 1], r.ints[0]);
+            match ROLES[r.kinds[1] as usize - 1] {
+                "new" => m.blobs.insert(r.keys[0], what),
+                "opened" => m.opened.insert(r.keys[0], what),
+                _ => m.parents.insert(r.keys[0], what),
+            };
+        }
+        if m.blobs.is_empty() {
+            return Err("a manifest brings at least one blob".into());
+        }
+        if m.parents.values().any(|(alias, _)| *alias != "commit" && *alias != "release") {
+            return Err("a parent is a commit or a release".into());
+        }
+        Ok(m)
     }
 
-    /// The bytes all the listed blobs have together.
+    /// The bytes all the new blobs have together.
     pub fn bytes(&self) -> u64 {
         self.blobs.values().map(|(_, len)| len).sum()
     }
@@ -74,6 +103,9 @@ impl Walk<'_> {
             let text = key_text(key);
             let bytes = read_blob(self.store, &text)?;
             let value = Some(t.parse(&bytes).map_err(|e| malformed(&text, e))?);
+            // A counterpart is opened: the keys it holds are where the new
+            // blobs find the keys they share with it.
+            self.out.opened.insert(*key, (t.alias, bytes.len() as u64));
             self.parsed.insert(*key, value);
         }
         Ok(&self.parsed[key])
@@ -165,6 +197,17 @@ fn of_node(store: &dyn Store, alias: &'static str, key: &str) -> Result<Manifest
     let (lr, _) = t.list.as_ref().unwrap();
     for e in &v.list {
         w.fields(lr, e, &[])?;
+    }
+    // The nodes it follows are parents, valid by proofs of their own; a
+    // blob it brings that is also opened is found through the parents.
+    for e in &v.list {
+        if let Some(p) = w.out.opened.remove(&e.keys[0]) {
+            w.out.parents.insert(e.keys[0], p);
+        }
+    }
+    let opened: Vec<[u8; 32]> = w.out.opened.keys().copied().collect();
+    for k in opened {
+        w.out.blobs.remove(&k);
     }
     Ok(w.out)
 }
