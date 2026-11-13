@@ -3,7 +3,7 @@
 A Lean 4 declaration is accepted when a derivation, written by an
 untrusted prover, passes the local checks below. The derivation is one in a
 declarative type system, stored as tables of rows: it records only steps that hold,
-never a failed attempt, and never claim that a term is in normal form. The
+never a failed attempt, and never claims that a term is in normal form. The
 same checks are meant to run natively (a small independent checker) and
 inside a proof (issue #10). The design is "Extending zkPi efficiently"
 (https://claude.ai/artifact/F6rfFCUd6g7bQisYDpZ6NJ).
