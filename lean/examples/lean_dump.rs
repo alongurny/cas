@@ -294,25 +294,38 @@ fn main() {
     drop(text);
     let dir = std::path::Path::new(&args[2]);
     std::fs::create_dir_all(dir).unwrap();
-    for name in &args[3..] {
-        let d = env.find(name).unwrap_or_else(|| panic!("no {name}"));
-        let mut b = Builder::new();
-        b.source = Some(std::rc::Rc::new(Shared(env.clone())));
-        b.budget = 50_000_000;
-        let mut memo = HashMap::new();
-        let (kind, _) = env.kind_info(d);
-        let ty = env.term(d.ty, &d.lparams, &mut memo).unwrap();
-        let ty = b.row_of(&ty).unwrap();
-        let value = match d.kind {
-            Kind::Def { value, .. } | Kind::Thm { value } | Kind::Opaque { value } => {
-                Some(b.row_of(&env.term(value, &d.lparams, &mut memo).unwrap()).unwrap())
+    // Names on the command line, or `--names FILE`, one per line.
+    let names: Vec<String> = if args[3] == "--names" {
+        std::fs::read_to_string(&args[4]).unwrap().lines().map(str::to_string).collect()
+    } else {
+        args[3..].to_vec()
+    };
+    std::panic::set_hook(Box::new(|_| {}));
+    for name in &names {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<(usize, usize, String)> {
+            let d = env.find(name)?;
+            let mut b = Builder::new();
+            b.source = Some(std::rc::Rc::new(Shared(env.clone())));
+            b.budget = 25_000_000;
+            let mut memo = HashMap::new();
+            let (kind, _) = env.kind_info(d);
+            let ty = b.row_of(&env.term(d.ty, &d.lparams, &mut memo).ok()?).ok()?;
+            let value = match d.kind {
+                Kind::Def { value, .. } | Kind::Thm { value } | Kind::Opaque { value } => {
+                    Some(b.row_of(&env.term(value, &d.lparams, &mut memo).ok()?).ok()?)
+                }
+                _ => None,
+            };
+            let goal = b.check_decl(kind, d.lparams.len() as u32, ty, value).ok()?;
+            cas_lean::Checker::check(&b.t, &goal).ok()?;
+            Some((b.t.rows.len(), b.t.terms.len(), dump(&b.t)))
+        }));
+        match r {
+            Ok(Some((rows, terms, s))) => {
+                std::fs::write(dir.join(format!("{name}.rows")), s).unwrap();
+                eprintln!("{name}: {rows} facts, {terms} terms");
             }
-            _ => None,
-        };
-        let goal = b.check_decl(kind, d.lparams.len() as u32, ty, value).unwrap();
-        cas_lean::Checker::check(&b.t, &goal).unwrap();
-        let s = dump(&b.t);
-        std::fs::write(dir.join(format!("{name}.rows")), s).unwrap();
-        eprintln!("{name}: {} facts, {} terms", b.t.rows.len(), b.t.terms.len());
+            _ => eprintln!("{name}: skipped"),
+        }
     }
 }
