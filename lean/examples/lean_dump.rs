@@ -155,8 +155,140 @@ fn dump(t: &Derivation) -> String {
     out
 }
 
+/// Structural 128-bit hashes of every fact of a derivation, independent of
+/// row numbering, so facts can be compared across declarations.
+fn fact_hashes(t: &Derivation) -> Vec<u128> {
+    fn h(parts: &[u128]) -> u128 {
+        let mut b = blake3::Hasher::new();
+        for p in parts {
+            b.update(&p.to_le_bytes());
+        }
+        u128::from_le_bytes(b.finalize().as_bytes()[..16].try_into().unwrap())
+    }
+    let mut lv: Vec<u128> = Vec::new();
+    for l in &t.levels {
+        let x = match l {
+            LevelRow::Zero => h(&[0]),
+            LevelRow::Succ(a) => h(&[1, lv[*a as usize]]),
+            LevelRow::Max(a, b) => h(&[2, lv[*a as usize], lv[*b as usize]]),
+            LevelRow::IMax(a, b) => h(&[3, lv[*a as usize], lv[*b as usize]]),
+            LevelRow::Param(n) => h(&[4, *n as u128]),
+        };
+        lv.push(x);
+    }
+    let mut ls: Vec<u128> = Vec::new();
+    for l in &t.lists {
+        let x = match l {
+            ListRow::Nil => h(&[5]),
+            ListRow::Cons(a, r) => h(&[6, lv[*a as usize], ls[*r as usize]]),
+        };
+        ls.push(x);
+    }
+    let dc: Vec<u128> = t.decls.iter().map(|d| u128::from_le_bytes(d.key[..16].try_into().unwrap())).collect();
+    let mut tm: Vec<u128> = Vec::new();
+    for e in &t.terms {
+        let m = |i: &u32| tm[*i as usize];
+        let x = match e {
+            TermRow::BVar(j) => h(&[10, *j as u128]),
+            TermRow::FVar(n) => h(&[11, *n as u128]),
+            TermRow::Sort(l) => h(&[12, lv[*l as usize]]),
+            TermRow::Const(d, l) => h(&[13, dc[*d as usize], ls[*l as usize]]),
+            TermRow::App(a, b) => h(&[14, m(a), m(b)]),
+            TermRow::Lam(a, b) => h(&[15, m(a), m(b)]),
+            TermRow::Pi(a, b) => h(&[16, m(a), m(b)]),
+            TermRow::Let(a, v, b) => h(&[17, m(a), m(v), m(b)]),
+            TermRow::Lit(n) => h(&[18, h64(n) as u128]),
+            TermRow::Str(s) => h(&[19, h64(s) as u128]),
+            TermRow::Proj(d, n, x) => h(&[20, dc[*d as usize], *n as u128, m(x)]),
+        };
+        tm.push(x);
+    }
+    let mut cx: Vec<u128> = Vec::new();
+    for g in &t.ctxs {
+        let x = match g {
+            CtxRow::Empty => h(&[30]),
+            CtxRow::Push(q, a) => h(&[31, cx[*q as usize], tm[*a as usize]]),
+        };
+        cx.push(x);
+    }
+    t.rows
+        .iter()
+        .map(|r| match r.fact {
+            Fact::Has { g, n, a } => h(&[40, cx[g as usize], n as u128, tm[a as usize]]),
+            Fact::Infer { g, e, t } => h(&[41, cx[g as usize], tm[e as usize], tm[t as usize]]),
+            Fact::Eq { g, a, b } => h(&[42, cx[g as usize], tm[a as usize], tm[b as usize]]),
+            Fact::Inst { e, k, a, r } => h(&[43, tm[e as usize], k as u128, tm[a as usize], tm[r as usize]]),
+            Fact::LInst { e, ls: l, r } => h(&[44, tm[e as usize], ls[l as usize], tm[r as usize]]),
+            Fact::LInstL { l, ls: m, r } => h(&[45, lv[l as usize], ls[m as usize], lv[r as usize]]),
+            Fact::LEq { l, m } => h(&[46, lv[l as usize], lv[m as usize]]),
+        })
+        .collect()
+}
+
+/// `lean_dump --stats <export> EVERY`: how many facts repeat, within each
+/// declaration and across the sample.
+fn stats(env: &Arc<Env>, every: usize) {
+    let todo: Vec<usize> = (0..env.decls.len())
+        .filter(|&i| {
+            let d = &env.decls[i];
+            !d.unsafe_ && matches!(d.kind, Kind::Axiom | Kind::Def { .. } | Kind::Thm { .. } | Kind::Opaque { .. })
+        })
+        .step_by(every)
+        .collect();
+    let (mut total, mut within, mut decls) = (0usize, 0usize, 0usize);
+    let mut global: std::collections::HashSet<u128> = std::collections::HashSet::new();
+    let mut by_rule: HashMap<String, (usize, usize)> = HashMap::new();
+    std::panic::set_hook(Box::new(|_| {}));
+    for &i in &todo {
+        let d = &env.decls[i];
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut b = Builder::new();
+            b.source = Some(std::rc::Rc::new(Shared(env.clone())));
+            b.budget = 3_000_000;
+            let mut memo = HashMap::new();
+            let (kind, _) = env.kind_info(d);
+            let ty = b.row_of(&env.term(d.ty, &d.lparams, &mut memo).ok()?).ok()?;
+            let value = match d.kind {
+                Kind::Def { value, .. } | Kind::Thm { value } | Kind::Opaque { value } => {
+                    Some(b.row_of(&env.term(value, &d.lparams, &mut memo).ok()?).ok()?)
+                }
+                _ => None,
+            };
+            b.check_decl(kind, d.lparams.len() as u32, ty, value).ok()?;
+            Some(b.t)
+        }));
+        let Ok(Some(t)) = r else { continue };
+        decls += 1;
+        let hs = fact_hashes(&t);
+        let mut local = std::collections::HashSet::new();
+        for (row, x) in t.rows.iter().zip(&hs) {
+            total += 1;
+            let e = by_rule.entry(format!("{:?}", row.rule)).or_default();
+            e.0 += 1;
+            if local.insert(*x) {
+                within += 1;
+            }
+            if global.insert(*x) {
+                e.1 += 1;
+            }
+        }
+    }
+    println!("declarations {decls}\nfacts {total}\ndistinct within each declaration {within}\ndistinct across the sample {}", global.len());
+    let mut v: Vec<_> = by_rule.into_iter().collect();
+    v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
+    for (r, (n, g)) in v.iter().take(25) {
+        println!("{r}\t{n}\t{g}");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args[1] == "--stats" {
+        let text = std::fs::read_to_string(&args[2]).expect("an export");
+        let env = Arc::new(Env::parse(&text).expect("a valid export"));
+        drop(text);
+        return stats(&env, args[3].parse().unwrap());
+    }
     let text = std::fs::read_to_string(&args[1]).expect("an export");
     let env = Arc::new(Env::parse(&text).expect("a valid export"));
     drop(text);

@@ -283,6 +283,31 @@ impl Env {
     }
 
     /// Term i of a declaration with these level parameters.
+    /// The names of the constants term `i` mentions (constants and the
+    /// structures of projections), added to `out`; `seen` holds terms
+    /// already walked.
+    pub fn constants(&self, i: u32, seen: &mut std::collections::HashSet<u32>, out: &mut std::collections::HashSet<u32>) {
+        let mut stack = vec![i];
+        while let Some(i) = stack.pop() {
+            if !seen.insert(i) {
+                continue;
+            }
+            let Some(Item::Expr(e)) = self.items.get(i as usize) else { continue };
+            match e {
+                RawExpr::Const(c, _) => {
+                    out.insert(*c);
+                }
+                RawExpr::App(a, b) | RawExpr::Lam(a, b) | RawExpr::Pi(a, b) => stack.extend([*a, *b]),
+                RawExpr::Let(a, v, b) => stack.extend([*a, *v, *b]),
+                RawExpr::Proj(st, _, x) => {
+                    out.insert(*st);
+                    stack.push(*x);
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn term(&self, i: u32, lparams: &[u32], memo: &mut HashMap<u32, X>) -> Result<X, String> {
         if let Some(x) = memo.get(&i) {
             return Ok(x.clone());
