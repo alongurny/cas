@@ -7,20 +7,32 @@
 //! `<out dir>/<NAME>.rows`, lines:
 //!
 //! ```text
+//! L <i> zero | succ <a> | max <a> <b> | imax <a> <b> | param <n>
+//! S <i> nil | cons <level> <list>
+//! C <i> empty | push <ctx> <term>
 //! T <i> bvar <j>
 //! T <i> leaf <sub> <a> <b>      sub: sort l | const d ls | fvar n | lit h | str h
 //! T <i> app|lam|pi <a> <b>
 //! T <i> let <a> <v> <b>
 //! T <i> proj <d> <n> <x>
-//! D <i> <unfoldable 0|1> <levels> <value or -1>
+//! D <i> <unfoldable 0|1> <levels> <value or -1> <key0> <key1> <kind> <type> <order>
 //! F <i> <Rule> <fact> <x1> <x2> <x3> <x4> : <premises>
+//! G <key0> <key1> <kind> <levels> <type> <value> <ty infer> <ty eq> <value infer> <value eq> <is prop> <order> <empty context>
 //! ```
+//!
+//! A key is the first 16 bytes of the declaration's key as two
+//! little-endian u64; kinds number `DeclKind` from 1 (axiom) in order. The
+//! goal row `G` is the declaration checked, its own key, and the facts that
+//! establish it (-1 where it has none). A declaration's order is its
+//! position in a dependency order (see `topo`); a citation must name a
+//! declaration of smaller order. Usage: `lean_dump <export> <out dir>
+//! [--order FILE] (--names FILE | NAME...)`.
 //!
 //! Facts: has (g n a), infer (g e t), eq (g a b), inst (e k a r), linst
 //! (e ls r), linstl (l ls r), leq (l m); missing fields are 0. Children come
 //! before their parents, and premises before the facts that use them.
 
-use cas_lean::derivation::{CtxRow, DeclKind, Derivation, Fact, Key, LevelRow, ListRow, TermRow};
+use cas_lean::derivation::{CtxRow, DeclKind, Derivation, Fact, Goal, Key, LevelRow, ListRow, TermRow};
 use cas_lean::derive::{Builder, Cited, Source};
 use cas_lean::import::{Env, Kind};
 use std::collections::HashMap;
@@ -60,7 +72,24 @@ fn h64(b: &[u8]) -> u64 {
     u64::from_le_bytes(blake3::hash(b).as_bytes()[..8].try_into().unwrap())
 }
 
-fn dump(t: &Derivation) -> String {
+fn key_words(k: &Key) -> (u64, u64) {
+    (u64::from_le_bytes(k[..8].try_into().unwrap()), u64::from_le_bytes(k[8..16].try_into().unwrap()))
+}
+
+fn kind_no(k: DeclKind) -> u8 {
+    match k {
+        DeclKind::Axiom => 1,
+        DeclKind::Definition => 2,
+        DeclKind::Theorem => 3,
+        DeclKind::Opaque => 4,
+        DeclKind::Inductive => 5,
+        DeclKind::Constructor => 6,
+        DeclKind::Recursor => 7,
+        DeclKind::Quot => 8,
+    }
+}
+
+fn dump(t: &Derivation, goal: &Goal, own: &Key, order: &dyn Fn(&Key) -> i64) -> String {
     let mut out = String::new();
     let mut lv = Canon::new();
     for l in &t.levels {
@@ -72,7 +101,16 @@ fn dump(t: &Derivation) -> String {
             LevelRow::IMax(a, b) => (3, m(a), m(b)),
             LevelRow::Param(n) => (4, *n, 0),
         };
-        lv.push(k);
+        if lv.push(k) {
+            let line = match k {
+                (0, _, _) => "zero".to_string(),
+                (1, a, _) => format!("succ {a}"),
+                (2, a, b) => format!("max {a} {b}"),
+                (3, a, b) => format!("imax {a} {b}"),
+                (_, n, _) => format!("param {n}"),
+            };
+            writeln!(out, "L {} {line}", lv.seen.len() - 1).unwrap();
+        }
     }
     let mut ls = Canon::new();
     for l in &t.lists {
@@ -80,7 +118,13 @@ fn dump(t: &Derivation) -> String {
             ListRow::Nil => None,
             ListRow::Cons(h, r) => Some((lv.map[*h as usize], ls.map[*r as usize])),
         };
-        ls.push(k);
+        if ls.push(k) {
+            let line = match k {
+                None => "nil".to_string(),
+                Some((h, r)) => format!("cons {h} {r}"),
+            };
+            writeln!(out, "S {} {line}", ls.seen.len() - 1).unwrap();
+        }
     }
     let mut dc = Canon::new();
     for d in &t.decls {
@@ -121,7 +165,13 @@ fn dump(t: &Derivation) -> String {
             CtxRow::Empty => None,
             CtxRow::Push(q, a) => Some((cx.map[*q as usize], tm.map[*a as usize])),
         };
-        cx.push(k);
+        if cx.push(k) {
+            let line = match k {
+                None => "empty".to_string(),
+                Some((q, a)) => format!("push {q} {a}"),
+            };
+            writeln!(out, "C {} {line}", cx.seen.len() - 1).unwrap();
+        }
     }
     let mut seen_decl = vec![false; dc.seen.len()];
     for (i, d) in t.decls.iter().enumerate() {
@@ -131,7 +181,9 @@ fn dump(t: &Derivation) -> String {
         }
         let unfold = matches!(d.kind, DeclKind::Definition | DeclKind::Theorem) as u8;
         let v = d.value.map_or(-1, |v| tm.map[v as usize] as i64);
-        writeln!(out, "D {c} {unfold} {} {v}", d.levels).unwrap();
+        let (k0, k1) = key_words(&d.key);
+        let ty = tm.map[d.ty as usize];
+        writeln!(out, "D {c} {unfold} {} {v} {k0} {k1} {} {ty} {}", d.levels, kind_no(d.kind), order(&d.key)).unwrap();
     }
     let (t_, g_, l_, ls_) = (
         |i: u32| tm.map[i as usize],
@@ -152,6 +204,24 @@ fn dump(t: &Derivation) -> String {
         let p: Vec<String> = r.premises.iter().map(|p| p.to_string()).collect();
         writeln!(out, "F {i} {:?} {f} {} {} {} {} : {}", r.rule, x[0], x[1], x[2], x[3], p.join(" ")).unwrap();
     }
+    let (k0, k1) = key_words(own);
+    let o = |x: Option<u32>| x.map_or(-1, |v| v as i64);
+    let value = goal.value.map_or(-1, |v| tm.map[v as usize] as i64);
+    writeln!(
+        out,
+        "G {k0} {k1} {} {} {} {value} {} {} {} {} {} {} {}",
+        kind_no(goal.kind),
+        goal.levels,
+        tm.map[goal.ty as usize],
+        goal.ty_is_type.0,
+        goal.ty_is_type.1,
+        o(goal.value_has_ty.map(|x| x.0)),
+        o(goal.value_has_ty.map(|x| x.1)),
+        o(goal.is_prop),
+        order(own),
+        cx.seen.get(&None).map_or(-1, |&i| i as i64),
+    )
+    .unwrap();
     out
 }
 
@@ -225,6 +295,74 @@ fn fact_hashes(t: &Derivation) -> Vec<u128> {
         .collect()
 }
 
+/// The constants Lean's kernel cites by name: they come first.
+const PRIMS: [&str; 25] = [
+    "Nat", "Nat.zero", "Nat.succ", "Nat.add", "Nat.sub", "Nat.mul", "Nat.pow", "Nat.gcd", "Nat.mod", "Nat.div",
+    "Nat.beq", "Nat.ble", "Nat.land", "Nat.lor", "Nat.xor", "Nat.shiftLeft", "Nat.shiftRight", "Bool.true",
+    "Bool.false", "String", "String.mk", "Char", "Char.ofNat", "List.nil", "List.cons",
+];
+
+/// A dependency order of the declarations reachable from `roots` (after
+/// the primitives): each comes after every constant in its type, value,
+/// constructors and recursor rules, so a check only cites smaller orders.
+/// The same roots give the same order in every process.
+fn topo(env: &Env, roots: &[String]) -> HashMap<Key, i64> {
+    let by_name: HashMap<String, usize> =
+        env.decls.iter().enumerate().map(|(i, d)| (env.name(d.name), i)).collect();
+    let deps = |i: usize| -> Vec<usize> {
+        let d = &env.decls[i];
+        let mut exprs = vec![d.ty];
+        let mut names = std::collections::HashSet::new();
+        match &d.kind {
+            Kind::Def { value, .. } | Kind::Thm { value } | Kind::Opaque { value } => exprs.push(*value),
+            Kind::Induct { ctors, .. } => names.extend(ctors.iter().copied()),
+            Kind::Ctor { induct, .. } => {
+                names.insert(*induct);
+            }
+            Kind::Rec { rules, .. } => {
+                for (c, _, rhs) in rules {
+                    names.insert(*c);
+                    exprs.push(*rhs);
+                }
+            }
+            _ => {}
+        }
+        for e in exprs {
+            env.constants(e, &mut std::collections::HashSet::new(), &mut names);
+        }
+        let mut v: Vec<usize> = names.into_iter().filter_map(|n| env.index_of_name(n)).collect();
+        v.sort();
+        v
+    };
+    let mut state = vec![0u8; env.decls.len()];
+    let mut order = HashMap::new();
+    let mut next = 0i64;
+    for r in PRIMS.iter().map(|s| s.to_string()).chain(roots.iter().cloned()) {
+        let Some(&root) = by_name.get(&r) else { continue };
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack: Vec<(usize, Vec<usize>)> = vec![(root, deps(root))];
+        state[root] = 1;
+        while let Some((i, ds)) = stack.last_mut() {
+            if let Some(j) = ds.pop() {
+                if state[j] == 0 {
+                    state[j] = 1;
+                    let dj = deps(j);
+                    stack.push((j, dj));
+                }
+            } else {
+                let i = *i;
+                state[i] = 2;
+                order.insert(env.key(env.decls[i].name), next);
+                next += 1;
+                stack.pop();
+            }
+        }
+    }
+    order
+}
+
 /// `lean_dump --stats <export> EVERY`: how many facts repeat, within each
 /// declaration and across the sample.
 fn stats(env: &Arc<Env>, every: usize) {
@@ -295,11 +433,20 @@ fn main() {
     let dir = std::path::Path::new(&args[2]);
     std::fs::create_dir_all(dir).unwrap();
     // Names on the command line, or `--names FILE`, one per line.
-    let names: Vec<String> = if args[3] == "--names" {
-        std::fs::read_to_string(&args[4]).unwrap().lines().map(str::to_string).collect()
+    // `--order FILE`: the roots of the dependency order (every process of
+    // one cone must pass the same); by default the names dumped.
+    let mut rest: Vec<String> = args[3..].to_vec();
+    let order_roots: Option<Vec<String>> = (rest.first().is_some_and(|a| a == "--order")).then(|| {
+        let f = rest[1].clone();
+        rest.drain(..2);
+        std::fs::read_to_string(f).unwrap().lines().map(str::to_string).collect()
+    });
+    let names: Vec<String> = if rest[0] == "--names" {
+        std::fs::read_to_string(&rest[1]).unwrap().lines().map(str::to_string).collect()
     } else {
-        args[3..].to_vec()
+        rest.clone()
     };
+    let order = topo(&env, order_roots.as_ref().unwrap_or(&names));
     std::panic::set_hook(Box::new(|_| {}));
     for name in &names {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<(usize, usize, String)> {
@@ -318,7 +465,7 @@ fn main() {
             };
             let goal = b.check_decl(kind, d.lparams.len() as u32, ty, value).ok()?;
             cas_lean::Checker::check(&b.t, &goal).ok()?;
-            Some((b.t.rows.len(), b.t.terms.len(), dump(&b.t)))
+            Some((b.t.rows.len(), b.t.terms.len(), dump(&b.t, &goal, &env.key(d.name), &|k| order.get(k).copied().unwrap_or(-1))))
         }));
         match r {
             Ok(Some((rows, terms, s))) => {

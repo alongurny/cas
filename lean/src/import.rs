@@ -258,8 +258,17 @@ impl Env {
         *h.finalize().as_bytes()
     }
 
+    /// The position of the declaration named by name node `name`.
+    pub fn index_of_name(&self, name: u32) -> Option<usize> {
+        self.by_name.get(&name).copied()
+    }
     pub fn by_name(&self, name: u32) -> Option<&Decl> {
         self.by_name.get(&name).map(|i| &self.decls[*i])
+    }
+    /// The position of the declaration with key `k` in the export, which
+    /// lists every declaration after those it uses.
+    pub fn position(&self, k: &Key) -> Option<usize> {
+        self.by_key.get(k).copied()
     }
     pub fn by_key(&self, k: &Key) -> Option<&Decl> {
         self.by_key.get(k).map(|i| &self.decls[*i])
