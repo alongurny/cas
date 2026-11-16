@@ -9,7 +9,7 @@ pub type Ix = u32;
 /// A BLAKE3 key of a cited declaration.
 pub type Key = [u8; 32];
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LevelRow {
     Zero,
     Succ(Ix),
@@ -20,13 +20,13 @@ pub enum LevelRow {
 }
 
 /// A list of levels: `Nil` or a level and the rest.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ListRow {
     Nil,
     Cons(Ix, Ix),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TermRow {
     BVar(u32),
     FVar(u32),
@@ -46,13 +46,13 @@ pub enum TermRow {
 }
 
 /// A context: empty, or a context with one more entry of this type.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CtxRow {
     Empty,
     Push(Ix, Ix),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DeclKind {
     Axiom,
     Definition,
@@ -69,7 +69,7 @@ pub enum DeclKind {
 }
 
 /// What a constructor or recursor row adds.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Info {
     #[default]
     None,
@@ -85,7 +85,7 @@ pub enum Info {
     Quot(QuotKind),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum QuotKind {
     Type,
     Mk,
@@ -95,7 +95,7 @@ pub enum QuotKind {
 
 /// The right-hand side `rhs` (closed over parameters, motives, minors and
 /// then the constructor's fields) when the major premise is built by `ctor`.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct RecRule {
     pub ctor: Key,
     pub fields: u32,
@@ -105,7 +105,7 @@ pub struct RecRule {
 /// A cited declaration: its key, kind, number of level parameters, type,
 /// and its value when one is unfolded. Its own proof is what makes its type
 /// trustworthy; binding these rows to its blob is the caller's part.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct DeclRow {
     pub key: Key,
     pub kind: DeclKind,
@@ -116,7 +116,7 @@ pub struct DeclRow {
 }
 
 /// What a judgement row claims.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Fact {
     /// Entry `n` of context `g` has type `a`.
     Has { g: Ix, n: u32, a: Ix },
@@ -136,7 +136,7 @@ pub enum Fact {
 
 /// The rule a judgement row uses. Its premises are other judgement rows,
 /// earlier in the table, named in the row.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Rule {
     HasLast,
     HasUp,
@@ -196,7 +196,7 @@ pub enum Rule {
     LEqNorm,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     pub fact: Fact,
     pub rule: Rule,
@@ -206,7 +206,7 @@ pub struct Row {
 /// What is being checked: a declaration of this kind, with this many level
 /// parameters, this type and (for a definition or theorem) this value. The
 /// numbers name the judgement rows that establish it.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Goal {
     pub kind: DeclKind,
     pub levels: u32,
@@ -221,7 +221,7 @@ pub struct Goal {
 }
 
 /// The derivation of one declaration's check: all its tables.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Derivation {
     pub levels: Vec<LevelRow>,
     pub lists: Vec<ListRow>,
@@ -245,7 +245,7 @@ impl Derivation {
 
 /// The constants Lean's kernel computes with: what literals mean, and the
 /// operations on two literals that it evaluates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Prim {
     Nat,
     NatZero,
@@ -277,7 +277,7 @@ pub enum Prim {
 /// What an inductive block's check establishes: its inductive types (each
 /// with its constructors, named in its info) and its recursors are what
 /// Lean's kernel adds for the block (inductive.cpp, `add_inductive`).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlockGoal {
     pub levels: u32,
     pub params: u32,
@@ -295,7 +295,7 @@ pub struct BlockGoal {
 /// "nested inductive blocks"): `aux` is the mutual block Lean's kernel
 /// makes of it, checked as any block, and the types, constructors and
 /// recursors given are that block's rewritten back.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NestedGoal {
     pub levels: u32,
     pub params: u32,

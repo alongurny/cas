@@ -56,6 +56,7 @@ _cas() {
         'annotated:store or print a text with a note on each line'
         'serve:serve the store over HTTPS'
         'access:the access policy of a served store'
+        'lean:store Lean declarations, prove them and check the proofs'
         'signup:make an account, sign in, or change the password'
         'login:make an account, sign in, or change the password'
         'whoami:make an account, sign in, or change the password'
@@ -104,6 +105,7 @@ _cas() {
                 annotated) _arguments $general '1: :_cas_word_or_file make show' '*: :_files' ;;
                 serve) _arguments $general '--cert[the PEM certificate chain to serve with]:<file>:_files' '--key[the PEM private key to serve with]:<file>:_files' '--open[serve to anyone, without an access policy]' '--max-body[the largest request body accepted (default 64 MiB)]:<bytes>:' '--prove[prove each history of commits as it moves (needs cas-prove)]' '*: :_files' ;;
                 access) _arguments $general '1: :(show user grant revoke)' ;;
+                lean) _arguments $general '--root[the Lake project whose Lean exports the modules]:<lake-dir>:_files' '--env[the Lean environment to work in (default\: default)]:<name>:' '--closure[also everything the named declarations rest on]' '--budget[give up on a declaration after this many rows (default 2000000)]:<rows>:' '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' '--failed[list the declarations that were not proved]' '--slowest[list the n declarations that took longest to prove]:<n>:' '1: :_cas_word_or_file import prove check show axioms report' '*: :_files' ;;
                 account) _arguments $general '1: :(edit)' ;;
                 token) _arguments $general '1: :(list make revoke)' ;;
                 org) _arguments $general '1: :(create member)' ;;
@@ -112,7 +114,7 @@ _cas() {
                 issue) _arguments $general '1: :(list open show comment edit close reopen label)' ;;
                 release) _arguments $general '1: :(list publish archive)' ;;
                 mirror) _arguments $general '1: :(add pull)' ;;
-                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
+                help) _arguments $general '1: :(commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access lean signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version)' ;;
                 completions) _arguments $general '1: :(fish bash zsh)' ;;
             esac ;;
     esac

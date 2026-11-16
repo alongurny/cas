@@ -42,6 +42,7 @@ macro_rules! out {
 mod commits;
 mod forge;
 mod help;
+mod lean;
 
 fn flush_out() {
     use std::io::Write;
@@ -242,6 +243,7 @@ fn histories(store: &str) -> Vec<String> {
         if let Some(name) = bytes.and_then(|b| String::from_utf8(b).ok())
             && hex.len() % 2 == 0
             && !name.starts_with("derived/")
+            && !name.starts_with("lean/")
         {
             names.push(name);
         }
@@ -306,6 +308,7 @@ fn run(a: Args) -> Res<()> {
     const MAKES: &[&str] = &["commit", "import-git", "pull", "serve", "access", "annotated"];
     if !a.store.contains("://")
         && !MAKES.contains(&cmd)
+        && !(cmd == "lean" && a.rest.get(1).is_some_and(|w| w == "import"))
         && !forge::COMMANDS.contains(&cmd)
         && !std::path::Path::new(&a.store).join("blobs").is_dir()
     {
@@ -347,6 +350,9 @@ fn run(a: Args) -> Res<()> {
     let remote = Remote { token: token.as_deref(), ca: ca.as_deref() };
     let s = open(&a.store, remote)?;
     let s = &*s;
+    if cmd == "lean" {
+        return lean::run(&a, s);
+    }
     if commits::handles(&a, s)? {
         return commits::run(&a, s);
     }

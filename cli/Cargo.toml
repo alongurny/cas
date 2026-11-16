@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 cas-core = { path = ".." }
 cas-version = { path = "../version" }
+cas-lean = { path = "../lean" }
 mimalloc = "0.1.52"
 serde_json = "1"
 ureq = "3.5.0"

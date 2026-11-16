@@ -85,6 +85,12 @@ pub const OPTIONS: &[Opt] = &[
     opt("--max-body", "<bytes>", "the largest request body accepted (default 64 MiB)"),
     opt("--json", "", "print the forge's answer as JSON"),
     opt("--project", "<owner>/<project>", "the project on the forge, when --store does not name it"),
+    opt("--root", "<lake-dir>", "the Lake project whose Lean exports the modules"),
+    opt("--env", "<name>", "the Lean environment to work in (default: default)"),
+    opt("--closure", "", "also everything the named declarations rest on"),
+    opt("--budget", "<rows>", "give up on a declaration after this many rows (default 2000000)"),
+    opt("--failed", "", "list the declarations that were not proved"),
+    opt("--slowest", "<n>", "list the n declarations that took longest to prove"),
 ];
 
 const fn cmd(
@@ -102,6 +108,7 @@ const READ: &str = "Read a history";
 const JOIN: &str = "Join and share histories";
 const STORE: &str = "The store";
 const FORGE: &str = "On a forge";
+const LEAN: &str = "Lean proofs";
 const TOOL: &str = "The tool";
 
 pub const COMMANDS: &[Cmd] = &[
@@ -396,6 +403,41 @@ pub const COMMANDS: &[Cmd] = &[
              'write var:main'; <who> is a user or '*' for anyone.",
         )
     },
+    Cmd {
+        subs: &["import", "prove", "check", "show", "axioms", "report"],
+        opts: &["--root", "--env", "--closure", "--budget", "--all", "--quiet", "--failed", "--slowest"],
+        words: Words::Path,
+        ..cmd(
+            "lean",
+            LEAN,
+            &[
+                "lean import <export-file>",
+                "lean import --root <lake-dir> <module>...",
+                "lean prove <name>... [--all] [--closure] [--budget <rows>]",
+                "lean check <name>... [--all] [--closure] [--quiet]",
+                "lean show <name>",
+                "lean axioms <name>...",
+                "lean report [--failed] [--slowest <n>]",
+            ],
+            "store Lean declarations, prove them and check the proofs",
+            "import stores each declaration of a Lean export as its own blob, and an environment \
+             naming them all; with --root it runs the exporter in a Lake project, with that \
+             project's Lean. Importing again after an edit writes only the declarations that \
+             changed.\n\n\
+             prove writes, for each declaration, the steps of Lean's kernel that accept it, and \
+             stores them. A proof that is stored and was made against the declarations the \
+             environment has now is kept, so after an edit only what changed and what rests on it \
+             is proved again. An inductive type is proved with its whole block, constructors and \
+             recursors included.\n\n\
+             check trusts nothing stored: it checks every step of a proof, that the proof is of \
+             this declaration, and that each constant the proof cites is the environment's \
+             declaration of that name. With --closure (or --all) it also checks everything the \
+             named declarations rest on. It fails when anything is refused, and says why.\n\n\
+             A declaration can be named by its Lean name or by the key of its blob. show prints \
+             one declaration, axioms the axioms the named ones rest on, and report sums up the \
+             stored results.",
+        )
+    },
     cmd(
         "signup",
         FORGE,
@@ -562,7 +604,7 @@ pub const COMMANDS: &[Cmd] = &[
 pub const SHELLS: &[&str] = &["fish", "bash", "zsh"];
 
 /// The groups, in the order the overview prints them.
-const GROUPS: &[&str] = &[WORK, READ, JOIN, STORE, FORGE, TOOL];
+const GROUPS: &[&str] = &[WORK, READ, JOIN, STORE, FORGE, LEAN, TOOL];
 
 pub fn version() -> String {
     format!("cas {}", env!("CARGO_PKG_VERSION"))

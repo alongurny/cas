@@ -297,9 +297,31 @@ fn fact_hashes(t: &Derivation) -> Vec<u128> {
 
 /// The constants Lean's kernel cites by name: they come first.
 const PRIMS: [&str; 25] = [
-    "Nat", "Nat.zero", "Nat.succ", "Nat.add", "Nat.sub", "Nat.mul", "Nat.pow", "Nat.gcd", "Nat.mod", "Nat.div",
-    "Nat.beq", "Nat.ble", "Nat.land", "Nat.lor", "Nat.xor", "Nat.shiftLeft", "Nat.shiftRight", "Bool.true",
-    "Bool.false", "String", "String.mk", "Char", "Char.ofNat", "List.nil", "List.cons",
+    "Nat",
+    "Nat.zero",
+    "Nat.succ",
+    "Nat.add",
+    "Nat.sub",
+    "Nat.mul",
+    "Nat.pow",
+    "Nat.gcd",
+    "Nat.mod",
+    "Nat.div",
+    "Nat.beq",
+    "Nat.ble",
+    "Nat.land",
+    "Nat.lor",
+    "Nat.xor",
+    "Nat.shiftLeft",
+    "Nat.shiftRight",
+    "Bool.true",
+    "Bool.false",
+    "String",
+    "String.mk",
+    "Char",
+    "Char.ofNat",
+    "List.nil",
+    "List.cons",
 ];
 
 /// A dependency order of the declarations reachable from `roots` (after
@@ -307,8 +329,7 @@ const PRIMS: [&str; 25] = [
 /// constructors and recursor rules, so a check only cites smaller orders.
 /// The same roots give the same order in every process.
 fn topo(env: &Env, roots: &[String]) -> HashMap<Key, i64> {
-    let by_name: HashMap<String, usize> =
-        env.decls.iter().enumerate().map(|(i, d)| (env.name(d.name), i)).collect();
+    let by_name: HashMap<String, usize> = env.decls.iter().enumerate().map(|(i, d)| (env.name(d.name), i)).collect();
     let deps = |i: usize| -> Vec<usize> {
         let d = &env.decls[i];
         let mut exprs = vec![d.ty];
@@ -411,7 +432,10 @@ fn stats(env: &Arc<Env>, every: usize) {
             }
         }
     }
-    println!("declarations {decls}\nfacts {total}\ndistinct within each declaration {within}\ndistinct across the sample {}", global.len());
+    println!(
+        "declarations {decls}\nfacts {total}\ndistinct within each declaration {within}\ndistinct across the sample {}",
+        global.len()
+    );
     let mut v: Vec<_> = by_rule.into_iter().collect();
     v.sort_by_key(|x| std::cmp::Reverse(x.1.0));
     for (r, (n, g)) in v.iter().take(25) {
@@ -465,7 +489,11 @@ fn main() {
             };
             let goal = b.check_decl(kind, d.lparams.len() as u32, ty, value).ok()?;
             cas_lean::Checker::check(&b.t, &goal).ok()?;
-            Some((b.t.rows.len(), b.t.terms.len(), dump(&b.t, &goal, &env.key(d.name), &|k| order.get(k).copied().unwrap_or(-1))))
+            Some((
+                b.t.rows.len(),
+                b.t.terms.len(),
+                dump(&b.t, &goal, &env.key(d.name), &|k| order.get(k).copied().unwrap_or(-1)),
+            ))
         }));
         match r {
             Ok(Some((rows, terms, s))) => {

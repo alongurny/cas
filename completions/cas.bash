@@ -4,7 +4,7 @@ _cas() {
     for ((i = 1; i < COMP_CWORD; i++)); do
         if ((skip)); then skip=0; continue; fi
         case ${COMP_WORDS[i]} in
-            --store|--token-file|--ca|--meta|-j|-H|-n|--author|--notes|--annotate|--as|--tag|--change|--changelog|--from|--cert|--key|--max-body|--project) skip=1 ;;
+            --store|--token-file|--ca|--meta|-j|-H|-n|--author|--notes|--annotate|--as|--tag|--change|--changelog|--from|--cert|--key|--max-body|--project|--root|--env|--budget|--slowest) skip=1 ;;
             -*) ;;
             *) cmd=${COMP_WORDS[i]}; break ;;
         esac
@@ -29,6 +29,10 @@ _cas() {
         --key) COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --max-body) COMPREPLY=(); return ;;
         --project) COMPREPLY=(); return ;;
+        --root) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+        --env) COMPREPLY=(); return ;;
+        --budget) COMPREPLY=(); return ;;
+        --slowest) COMPREPLY=(); return ;;
     esac
     if [[ $cur == -* ]]; then
         local opts='--store --token-file --ca --meta -j -H -n --help --version'
@@ -46,13 +50,14 @@ _cas() {
             import-git) opts+=' --as' ;;
             gc) opts+=' --full' ;;
             serve) opts+=' --cert --key --open --max-body --prove' ;;
+            lean) opts+=' --root --env --closure --budget --all --quiet --failed --slowest' ;;
         esac
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
         return
     fi
     case $cmd in
-        '') COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
-        help) COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
+        '') COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access lean signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
+        help) COMPREPLY=($(compgen -W 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access lean signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version' -- "$cur")) ;;
         merge|rebase) COMPREPLY=($(compgen -W "$(command cas __histories 2>/dev/null)" -- "$cur")) ;;
         commit) COMPREPLY=($(compgen -f -- "$cur")) ;;
         status) COMPREPLY=($(compgen -f -- "$cur")) ;;
@@ -68,6 +73,7 @@ _cas() {
         annotated) COMPREPLY=($(compgen -W 'make show' -- "$cur") $(compgen -f -- "$cur")) ;;
         serve) COMPREPLY=($(compgen -f -- "$cur")) ;;
         access) COMPREPLY=($(compgen -W 'show user grant revoke' -- "$cur") ) ;;
+        lean) COMPREPLY=($(compgen -W 'import prove check show axioms report' -- "$cur") $(compgen -f -- "$cur")) ;;
         account) COMPREPLY=($(compgen -W 'edit' -- "$cur") ) ;;
         token) COMPREPLY=($(compgen -W 'list make revoke' -- "$cur") ) ;;
         org) COMPREPLY=($(compgen -W 'create member' -- "$cur") ) ;;

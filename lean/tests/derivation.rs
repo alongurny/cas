@@ -1280,3 +1280,37 @@ fn nested_occurrences_inside_nested_ones_and_local_parameters() {
     let err = b.nested_block(0, 0, &[ds], &[vec![dmk]], &[key(92), key(93)]).unwrap_err();
     assert!(err.contains("local variables"), "{err}");
 }
+
+mod units {
+    use cas_lean::derivation::TermRow;
+    use cas_lean::import::Env;
+    use cas_lean::unit;
+    use std::sync::Arc;
+
+    /// `axiom A : Sort 1`, `axiom B : Sort 1`, `axiom a : A`, `def b : A := a`.
+    const TEXT: &str = "N 1 0 s 41\nL 2 z\nL 3 s 2\nE 4 s 3\nD 1 4 0 | axiom\nN 9 0 s 42\nD 9 4 0 | axiom\n\
+        N 5 0 s 61\nE 6 c 1\nD 5 6 0 | axiom\nN 7 0 s 62\nE 8 c 5\nD 7 6 0 | def 8 o\n";
+
+    #[test]
+    fn a_proof_is_bound_to_its_environment() {
+        let env = Arc::new(Env::parse(TEXT).unwrap());
+        let b = env.index_of("b").unwrap();
+        let p = unit::prove(&env, b, 0).unwrap();
+        unit::check(&env, b, &p).unwrap();
+        let q: unit::Proof = unit::decode(&unit::encode(&p)).unwrap();
+        assert_eq!(p, q);
+        // The proof is of b, not of a.
+        assert!(unit::check(&env, env.index_of("a").unwrap(), &p).is_err());
+        // In an environment where a has another type, the cited row is not
+        // the environment's, though the derivation itself still checks.
+        let other = Env::parse(&TEXT.replace("E 6 c 1\nD 5 6 0", "E 6 c 1\nE 10 c 9\nD 5 10 0")).unwrap();
+        let e = unit::check(&other, other.index_of("b").unwrap(), &p).unwrap_err();
+        assert!(e.contains("a: the cited type"), "{e}");
+        // A cited row changed in the proof is refused too.
+        let mut t = p.clone();
+        let sort = t.derivation.terms.iter().position(|r| matches!(r, TermRow::Sort(_))).unwrap() as u32;
+        let a = t.derivation.decls.iter().position(|r| r.key == env.key(env.decls[env.index_of("a").unwrap()].name));
+        t.derivation.decls[a.unwrap()].ty = sort;
+        assert!(unit::check(&env, b, &t).is_err());
+    }
+}

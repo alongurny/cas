@@ -15,13 +15,14 @@ fn main() {
         Some(i) => args[3..i].iter().chain(&args[i + 2..]).collect(),
         None => args[3..].iter().collect(),
     };
-    let rows: HashMap<String, (String, u64)> = (if args[2] == "-" { String::new() } else { std::fs::read_to_string(&args[2]).unwrap() })
-        .lines()
-        .filter_map(|l| {
-            let f: Vec<&str> = l.split('\t').collect();
-            Some((f[0].to_string(), (f[2].to_string(), f.get(3)?.parse().ok()?)))
-        })
-        .collect();
+    let rows: HashMap<String, (String, u64)> =
+        (if args[2] == "-" { String::new() } else { std::fs::read_to_string(&args[2]).unwrap() })
+            .lines()
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                Some((f[0].to_string(), (f[2].to_string(), f.get(3)?.parse().ok()?)))
+            })
+            .collect();
     let mut seen_terms = HashSet::new();
     let mut done: HashSet<u32> = HashSet::new();
     let mut todo: Vec<u32> = names.iter().map(|n| env.find(n).unwrap_or_else(|| panic!("no {n}")).name).collect();
@@ -82,5 +83,8 @@ fn main() {
         std::fs::write(format!("{f}.blocks"), blocks.join("\n") + "\n").unwrap();
     }
     let all: u64 = rows.values().map(|r| r.1).sum();
-    println!("closure {decls} declarations, {checked} with rows ({missing} without), {total} rows of {all} in the file ({:.1}%)", 100.0 * total as f64 / all as f64);
+    println!(
+        "closure {decls} declarations, {checked} with rows ({missing} without), {total} rows of {all} in the file ({:.1}%)",
+        100.0 * total as f64 / all as f64
+    );
 }

@@ -545,6 +545,39 @@ The event log of a project.
 
 --follow waits for new events.
 
+## Lean proofs
+
+### lean
+
+```
+cas lean import <export-file>
+cas lean import --root <lake-dir> <module>...
+cas lean prove <name>... [--all] [--closure] [--budget <rows>]
+cas lean check <name>... [--all] [--closure] [--quiet]
+cas lean show <name>
+cas lean axioms <name>...
+cas lean report [--failed] [--slowest <n>]
+```
+
+Store Lean declarations, prove them and check the proofs.
+
+import stores each declaration of a Lean export as its own blob, and an environment naming them all; with --root it runs the exporter in a Lake project, with that project's Lean. Importing again after an edit writes only the declarations that changed.
+
+prove writes, for each declaration, the steps of Lean's kernel that accept it, and stores them. A proof that is stored and was made against the declarations the environment has now is kept, so after an edit only what changed and what rests on it is proved again. An inductive type is proved with its whole block, constructors and recursors included.
+
+check trusts nothing stored: it checks every step of a proof, that the proof is of this declaration, and that each constant the proof cites is the environment's declaration of that name. With --closure (or --all) it also checks everything the named declarations rest on. It fails when anything is refused, and says why.
+
+A declaration can be named by its Lean name or by the key of its blob. show prints one declaration, axioms the axioms the named ones rest on, and report sums up the stored results.
+
+- `--root <lake-dir>`: the Lake project whose Lean exports the modules
+- `--env <name>`: the Lean environment to work in (default: default)
+- `--closure`: also everything the named declarations rest on
+- `--budget <rows>`: give up on a declaration after this many rows (default 2000000)
+- `--all`: every commit the commit reaches, not only the commit itself
+- `--quiet`: print the outcome only, not a line for each proof
+- `--failed`: list the declarations that were not proved
+- `--slowest <n>`: list the n declarations that took longest to prove
+
 ## The tool
 
 ### help

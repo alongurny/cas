@@ -11,7 +11,7 @@ use num_bigint::BigUint;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum Item {
     None,
     /// Parent, then a string or a number.
@@ -20,7 +20,7 @@ enum Item {
     Expr(RawExpr),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum RawLevel {
     Zero,
     Succ(u32),
@@ -29,7 +29,7 @@ enum RawLevel {
     Param(u32),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum RawExpr {
     BVar(u32),
     Sort(u32),
@@ -80,6 +80,10 @@ pub struct Env {
     pub decls: Vec<Decl>,
     by_name: HashMap<u32, usize>,
     by_key: HashMap<Key, usize>,
+    /// For [`Env::absorb`]: the node of each item, so that declarations
+    /// read one at a time share their names, levels and terms again.
+    intern: HashMap<Item, u32>,
+    by_text: HashMap<String, usize>,
 }
 
 fn unhex(s: &str) -> Result<Vec<u8>, String> {
@@ -94,6 +98,7 @@ impl Env {
         }
         for (i, d) in env.decls.iter().enumerate() {
             env.by_name.insert(d.name, i);
+            env.by_text.insert(env.name(d.name), i);
         }
         for i in 0..env.decls.len() {
             let k = env.key(env.decls[i].name);
@@ -273,6 +278,10 @@ impl Env {
     pub fn by_key(&self, k: &Key) -> Option<&Decl> {
         self.by_key.get(k).map(|i| &self.decls[*i])
     }
+    /// The declaration with this name as Lean prints it.
+    pub fn find_name(&self, name: &str) -> Option<&Decl> {
+        self.by_text.get(name).map(|i| &self.decls[*i])
+    }
     pub fn find(&self, name: &str) -> Option<&Decl> {
         self.decls.iter().find(|d| self.name(d.name) == name)
     }
@@ -295,7 +304,12 @@ impl Env {
     /// The names of the constants term `i` mentions (constants and the
     /// structures of projections), added to `out`; `seen` holds terms
     /// already walked.
-    pub fn constants(&self, i: u32, seen: &mut std::collections::HashSet<u32>, out: &mut std::collections::HashSet<u32>) {
+    pub fn constants(
+        &self,
+        i: u32,
+        seen: &mut std::collections::HashSet<u32>,
+        out: &mut std::collections::HashSet<u32>,
+    ) {
         let mut stack = vec![i];
         while let Some(i) = stack.pop() {
             if !seen.insert(i) {
@@ -453,5 +467,365 @@ impl Source for Env {
             rules,
             prim: prim_named(&self.name(d.name)),
         })
+    }
+}
+
+// ---- One declaration as its own text (the `lean-decl` format) ----
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn map_item(it: &Item, f: &dyn Fn(u32) -> u32) -> Item {
+    match it {
+        Item::None => Item::None,
+        Item::Name(p, c) => Item::Name(f(*p), c.clone()),
+        Item::Level(l) => Item::Level(match l {
+            RawLevel::Zero => RawLevel::Zero,
+            RawLevel::Succ(a) => RawLevel::Succ(f(*a)),
+            RawLevel::Max(a, b) => RawLevel::Max(f(*a), f(*b)),
+            RawLevel::IMax(a, b) => RawLevel::IMax(f(*a), f(*b)),
+            RawLevel::Param(n) => RawLevel::Param(f(*n)),
+        }),
+        Item::Expr(e) => Item::Expr(match e {
+            RawExpr::BVar(n) => RawExpr::BVar(*n),
+            RawExpr::Sort(l) => RawExpr::Sort(f(*l)),
+            RawExpr::Const(c, ls) => RawExpr::Const(f(*c), ls.iter().map(|l| f(*l)).collect()),
+            RawExpr::App(a, b) => RawExpr::App(f(*a), f(*b)),
+            RawExpr::Lam(a, b) => RawExpr::Lam(f(*a), f(*b)),
+            RawExpr::Pi(a, b) => RawExpr::Pi(f(*a), f(*b)),
+            RawExpr::Let(a, v, b) => RawExpr::Let(f(*a), f(*v), f(*b)),
+            RawExpr::Nat(n) => RawExpr::Nat(n.clone()),
+            RawExpr::Str(s) => RawExpr::Str(s.clone()),
+            RawExpr::Proj(s, k, x) => RawExpr::Proj(f(*s), *k, f(*x)),
+        }),
+    }
+}
+
+/// The nodes an item names, in the order its line prints them.
+fn children(it: &Item) -> Vec<u32> {
+    let v = std::cell::RefCell::new(vec![]);
+    map_item(it, &|n| {
+        v.borrow_mut().push(n);
+        n
+    });
+    v.into_inner()
+}
+
+fn map_kind(k: &Kind, f: &dyn Fn(u32) -> u32) -> Kind {
+    let all = |v: &[u32]| v.iter().map(|x| f(*x)).collect::<Vec<_>>();
+    match k {
+        Kind::Axiom => Kind::Axiom,
+        Kind::Def { value, hint } => Kind::Def { value: f(*value), hint: *hint },
+        Kind::Thm { value } => Kind::Thm { value: f(*value) },
+        Kind::Opaque { value } => Kind::Opaque { value: f(*value) },
+        Kind::Quot(q) => Kind::Quot(*q),
+        Kind::Induct { params, indices, rec, nested, all: a, ctors } => Kind::Induct {
+            params: *params,
+            indices: *indices,
+            rec: *rec,
+            nested: *nested,
+            all: all(a),
+            ctors: all(ctors),
+        },
+        Kind::Ctor { induct, cidx, params, fields } => {
+            Kind::Ctor { induct: f(*induct), cidx: *cidx, params: *params, fields: *fields }
+        }
+        Kind::Rec { params, indices, motives, minors, k, all: a, rules } => Kind::Rec {
+            params: *params,
+            indices: *indices,
+            motives: *motives,
+            minors: *minors,
+            k: *k,
+            all: all(a),
+            rules: rules.iter().map(|(c, n, r)| (f(*c), *n, f(*r))).collect(),
+        },
+    }
+}
+
+/// The nodes a declaration line names, in print order.
+fn decl_nodes(d: &Decl) -> Vec<u32> {
+    let mut v = vec![d.name, d.ty];
+    v.extend(&d.lparams);
+    match &d.kind {
+        Kind::Axiom | Kind::Quot(_) => {}
+        Kind::Def { value, .. } | Kind::Thm { value } | Kind::Opaque { value } => v.push(*value),
+        Kind::Induct { all, ctors, .. } => {
+            v.extend(all);
+            v.extend(ctors);
+        }
+        Kind::Ctor { induct, .. } => v.push(*induct),
+        Kind::Rec { all, rules, .. } => {
+            v.extend(all);
+            for (c, _, r) in rules {
+                v.extend([*c, *r]);
+            }
+        }
+    }
+    v
+}
+
+fn item_line(i: u32, it: &Item) -> String {
+    match it {
+        Item::None => String::new(),
+        Item::Name(p, Ok(s)) => format!("N {i} {p} s {}", hex(s.as_bytes())),
+        Item::Name(p, Err(k)) => format!("N {i} {p} n {k}"),
+        Item::Level(l) => match l {
+            RawLevel::Zero => format!("L {i} z"),
+            RawLevel::Succ(a) => format!("L {i} s {a}"),
+            RawLevel::Max(a, b) => format!("L {i} m {a} {b}"),
+            RawLevel::IMax(a, b) => format!("L {i} i {a} {b}"),
+            RawLevel::Param(n) => format!("L {i} p {n}"),
+        },
+        Item::Expr(e) => match e {
+            RawExpr::BVar(n) => format!("E {i} v {n}"),
+            RawExpr::Sort(l) => format!("E {i} s {l}"),
+            RawExpr::Const(c, ls) => {
+                let mut s = format!("E {i} c {c}");
+                for l in ls {
+                    s.push_str(&format!(" {l}"));
+                }
+                s
+            }
+            RawExpr::App(a, b) => format!("E {i} a {a} {b}"),
+            RawExpr::Lam(a, b) => format!("E {i} l {a} {b}"),
+            RawExpr::Pi(a, b) => format!("E {i} f {a} {b}"),
+            RawExpr::Let(a, v, b) => format!("E {i} z {a} {v} {b}"),
+            RawExpr::Nat(n) => format!("E {i} n {}", crate::nat::value(n)),
+            RawExpr::Str(s) => format!("E {i} t {}", hex(s)),
+            RawExpr::Proj(s, k, x) => format!("E {i} j {s} {k} {x}"),
+        },
+    }
+}
+
+fn decl_line(d: &Decl) -> String {
+    let mut s = format!("D {} {} {}", d.name, d.ty, d.lparams.len());
+    for l in &d.lparams {
+        s.push_str(&format!(" {l}"));
+    }
+    if d.unsafe_ {
+        s.push_str(" u");
+    }
+    s.push_str(" | ");
+    let list = |v: &[u32]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(" ");
+    let rest = match &d.kind {
+        Kind::Axiom => "axiom".to_string(),
+        Kind::Def { value, hint } => {
+            let h = match hint {
+                Hint::Opaque => "o".to_string(),
+                Hint::Abbrev => "a".to_string(),
+                Hint::Regular(h) => h.to_string(),
+            };
+            format!("def {value} {h}")
+        }
+        Kind::Thm { value } => format!("thm {value}"),
+        Kind::Opaque { value } => format!("opaque {value}"),
+        Kind::Quot(q) => format!(
+            "quot {}",
+            match q {
+                QuotKind::Type => "type",
+                QuotKind::Mk => "ctor",
+                QuotKind::Lift => "lift",
+                QuotKind::Ind => "ind",
+            }
+        ),
+        Kind::Induct { params, indices, rec, nested, all, ctors } => {
+            format!("induct {params} {indices} {} {nested} all {} ctors {}", *rec as u8, list(all), list(ctors))
+                .trim_end()
+                .to_string()
+        }
+        Kind::Ctor { induct, cidx, params, fields } => format!("ctor {induct} {cidx} {params} {fields}"),
+        Kind::Rec { params, indices, motives, minors, k, all, rules } => {
+            let flat: Vec<u32> = rules.iter().flat_map(|(c, n, r)| [*c, *n, *r]).collect();
+            format!("rec {params} {indices} {motives} {minors} {} all {} rules {}", *k as u8, list(all), list(&flat))
+                .trim_end()
+                .to_string()
+        }
+    };
+    s.push_str(&rest);
+    s
+}
+
+impl Env {
+    /// Declaration i as its own export: the name, level and term lines it
+    /// uses, numbered from 1 in the order a walk of its line first reaches
+    /// them (each after the nodes it names), then its line. The text
+    /// depends only on the declaration, not on the export it came from.
+    pub fn decl_text(&self, i: usize) -> String {
+        let d = &self.decls[i];
+        let mut num: HashMap<u32, u32> = HashMap::from([(0, 0)]);
+        let mut seen: HashMap<Item, u32> = HashMap::new();
+        let mut out = String::new();
+        // Post-order walk without recursion: terms can be deep.
+        let mut stack: Vec<(u32, bool)> = decl_nodes(d).into_iter().rev().map(|n| (n, false)).collect();
+        while let Some((n, done)) = stack.pop() {
+            if num.contains_key(&n) {
+                continue;
+            }
+            let it = &self.items[n as usize];
+            if done {
+                // Two nodes of an export can be the same item (the
+                // exporter tells terms apart by metadata it then drops):
+                // here they are one.
+                let local = map_item(it, &|c| num[&c]);
+                let next = seen.len() as u32 + 1;
+                let k = *seen.entry(local.clone()).or_insert(next);
+                num.insert(n, k);
+                if k == next {
+                    out.push_str(&item_line(k, &local));
+                    out.push('\n');
+                }
+                continue;
+            }
+            stack.push((n, true));
+            for c in children(it).into_iter().rev() {
+                if !num.contains_key(&c) {
+                    stack.push((c, false));
+                }
+            }
+        }
+        let f = |c: u32| num[&c];
+        let local = Decl {
+            name: f(d.name),
+            ty: f(d.ty),
+            lparams: d.lparams.iter().map(|x| f(*x)).collect(),
+            kind: map_kind(&d.kind, &f),
+            unsafe_: d.unsafe_,
+        };
+        out.push_str(&decl_line(&local));
+        out.push('\n');
+        out
+    }
+
+    /// Adds the one declaration of `text` (as [`Env::decl_text`] writes
+    /// it), sharing nodes with those already added. Returns its position.
+    /// Only for an environment built by `absorb` from empty.
+    pub fn absorb(&mut self, text: &str) -> Result<usize, String> {
+        let local = Env::parse(text)?;
+        if local.decls.len() != 1 {
+            return Err(format!("{} declarations, not one", local.decls.len()));
+        }
+        let mut map: Vec<u32> = vec![0; local.items.len().max(1)];
+        for (j, it) in local.items.iter().enumerate().skip(1) {
+            if matches!(it, Item::None) {
+                return Err(format!("node {j} is missing"));
+            }
+            let g = map_item(it, &|c| map[c as usize]);
+            let next = self.items.len().max(1) as u32;
+            let k = *self.intern.entry(g.clone()).or_insert(next);
+            if k == next {
+                if self.items.is_empty() {
+                    self.items.push(Item::None);
+                }
+                self.items.push(g);
+            }
+            map[j] = k;
+        }
+        let d = &local.decls[0];
+        let f = |c: u32| map[c as usize];
+        let g = Decl {
+            name: f(d.name),
+            ty: f(d.ty),
+            lparams: d.lparams.iter().map(|x| f(*x)).collect(),
+            kind: map_kind(&d.kind, &f),
+            unsafe_: d.unsafe_,
+        };
+        let key = self.key(g.name);
+        if self.by_key.contains_key(&key) {
+            return Err(format!("{} is declared twice", self.name(g.name)));
+        }
+        let i = self.decls.len();
+        self.by_name.insert(g.name, i);
+        self.by_key.insert(key, i);
+        self.by_text.insert(self.name(g.name), i);
+        self.decls.push(g);
+        Ok(i)
+    }
+}
+
+#[cfg(test)]
+mod decl_text_tests {
+    use super::*;
+
+    const TEXT: &str =
+        "N 1 0 s 4e6174\nE 2 s 3\nL 3 s 4\nL 4 z\nD 1 2 0 | axiom\nN 5 0 s 41\nE 6 c 1\nD 5 6 0 | def 6 o\n";
+
+    #[test]
+    fn a_declaration_round_trips_and_shares() {
+        // Level 3 refers forward to 4 in the whole export; per declaration
+        // the order is children first.
+        let env = Env::parse(TEXT).unwrap();
+        let a = env.decl_text(0);
+        let b = env.decl_text(1);
+        assert_eq!(a, "N 1 0 s 4e6174\nL 2 z\nL 3 s 2\nE 4 s 3\nD 1 4 0 | axiom\n");
+        let mut e = Env::default();
+        assert_eq!(e.absorb(&a).unwrap(), 0);
+        assert_eq!(e.absorb(&b).unwrap(), 1);
+        // Name "Nat" is shared: the constant in b's type finds decl 0.
+        assert_eq!(e.decl_text(0), a);
+        assert_eq!(e.decl_text(1), b);
+        assert_eq!(e.items.len(), 7);
+        assert!(e.absorb(&a).is_err());
+        assert_eq!(Env::parse(&a).unwrap().decl_text(0), a);
+    }
+}
+
+impl Env {
+    /// The position of the declaration with this name as Lean prints it.
+    pub fn index_of(&self, name: &str) -> Option<usize> {
+        self.by_text.get(name).copied()
+    }
+
+    /// The terms of declaration i: its type, its value, a recursor's rules.
+    fn roots(&self, i: usize) -> Vec<u32> {
+        let d = &self.decls[i];
+        let mut v = vec![d.ty];
+        v.extend(Env::value_of(d));
+        if let Kind::Rec { rules, .. } = &d.kind {
+            v.extend(rules.iter().map(|r| r.2));
+        }
+        v
+    }
+
+    /// The names of the other declarations that declaration i names: the
+    /// constants of its terms, and those of its kind (a block's types and
+    /// constructors, a constructor's type, the constructors of a
+    /// recursor's rules). In name order.
+    pub fn references(&self, i: usize) -> Vec<String> {
+        let d = &self.decls[i];
+        let mut out = std::collections::HashSet::new();
+        let mut seen = std::collections::HashSet::new();
+        for r in self.roots(i) {
+            self.constants(r, &mut seen, &mut out);
+        }
+        match &d.kind {
+            Kind::Induct { all, ctors, .. } => out.extend(all.iter().chain(ctors).copied()),
+            Kind::Ctor { induct, .. } => {
+                out.insert(*induct);
+            }
+            Kind::Rec { all, rules, .. } => out.extend(all.iter().copied().chain(rules.iter().map(|r| r.0))),
+            _ => {}
+        }
+        out.remove(&d.name);
+        let mut v: Vec<String> = out.into_iter().map(|n| self.name(n)).collect();
+        v.sort();
+        v
+    }
+
+    /// Whether a term of declaration i has a number or string literal.
+    pub fn has_literal(&self, i: usize) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack = self.roots(i);
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n) {
+                continue;
+            }
+            match self.items.get(n as usize) {
+                Some(Item::Expr(RawExpr::Nat(_) | RawExpr::Str(_))) => return true,
+                Some(it @ Item::Expr(_)) => stack.extend(children(it)),
+                _ => {}
+            }
+        }
+        false
     }
 }

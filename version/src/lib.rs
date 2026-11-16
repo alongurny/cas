@@ -19,6 +19,7 @@ pub mod gc;
 pub mod gitcommits;
 pub mod gitobj;
 pub mod index;
+pub mod lean;
 pub mod merge;
 pub mod proofs;
 pub mod releases;

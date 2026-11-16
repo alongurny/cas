@@ -16,6 +16,7 @@ pub mod import;
 pub mod level;
 pub mod nat;
 pub mod nested;
+pub mod unit;
 
 pub use check::Checker;
 pub use derivation::{DeclKind, DeclRow, Derivation, Goal};

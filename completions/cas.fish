@@ -9,7 +9,7 @@ function __cas_command
             continue
         end
         switch $w
-            case --store --token-file --ca --meta -j -H -n --author --notes --annotate --as --tag --change --changelog --from --cert --key --max-body --project
+            case --store --token-file --ca --meta -j -H -n --author --notes --annotate --as --tag --change --changelog --from --cert --key --max-body --project --root --env --budget --slowest
                 set skip 1
             case '-*'
             case '*'
@@ -62,6 +62,7 @@ complete -c cas -n __cas_no_command -a show -d 'print a blob'
 complete -c cas -n __cas_no_command -a annotated -d 'store or print a text with a note on each line'
 complete -c cas -n __cas_no_command -a serve -d 'serve the store over HTTPS'
 complete -c cas -n __cas_no_command -a access -d 'the access policy of a served store'
+complete -c cas -n __cas_no_command -a lean -d 'store Lean declarations, prove them and check the proofs'
 complete -c cas -n __cas_no_command -a signup -d 'make an account, sign in, or change the password'
 complete -c cas -n __cas_no_command -a login -d 'make an account, sign in, or change the password'
 complete -c cas -n __cas_no_command -a whoami -d 'make an account, sign in, or change the password'
@@ -100,8 +101,8 @@ complete -c cas -n 'contains -- (__cas_command) push pull publish import-git' -l
 complete -c cas -n 'contains -- (__cas_command) publish' -l tag -x -d 'the semantic version of the release, such as 1.4.0'
 complete -c cas -n 'contains -- (__cas_command) publish' -l change -x -a 'breaking feature patch security' -d 'what the release changes since the one before: breaking, feature, patch or security'
 complete -c cas -n 'contains -- (__cas_command) publish' -l changelog -r -F -d 'the text that says what the release changes'
-complete -c cas -n 'contains -- (__cas_command) prove verify' -l all -d 'every commit the commit reaches, not only the commit itself'
-complete -c cas -n 'contains -- (__cas_command) prove verify' -l quiet -d 'print the outcome only, not a line for each proof'
+complete -c cas -n 'contains -- (__cas_command) prove verify lean' -l all -d 'every commit the commit reaches, not only the commit itself'
+complete -c cas -n 'contains -- (__cas_command) prove verify lean' -l quiet -d 'print the outcome only, not a line for each proof'
 complete -c cas -n 'contains -- (__cas_command) verify' -l from -x -d 'fetch the proofs that are not here from this store'
 complete -c cas -n 'contains -- (__cas_command) gc' -l full -d 'walk the whole store, not only what came since the last full run'
 complete -c cas -n 'contains -- (__cas_command) serve' -l cert -r -F -d 'the PEM certificate chain to serve with'
@@ -111,6 +112,12 @@ complete -c cas -n 'contains -- (__cas_command) serve' -l prove -d 'prove each h
 complete -c cas -n 'contains -- (__cas_command) serve' -l max-body -x -d 'the largest request body accepted (default 64 MiB)'
 complete -c cas -l json -d 'print the forge\'s answer as JSON'
 complete -c cas -l project -x -d 'the project on the forge, when --store does not name it'
+complete -c cas -n 'contains -- (__cas_command) lean' -l root -r -F -d 'the Lake project whose Lean exports the modules'
+complete -c cas -n 'contains -- (__cas_command) lean' -l env -x -d 'the Lean environment to work in (default: default)'
+complete -c cas -n 'contains -- (__cas_command) lean' -l closure -d 'also everything the named declarations rest on'
+complete -c cas -n 'contains -- (__cas_command) lean' -l budget -x -d 'give up on a declaration after this many rows (default 2000000)'
+complete -c cas -n 'contains -- (__cas_command) lean' -l failed -d 'list the declarations that were not proved'
+complete -c cas -n 'contains -- (__cas_command) lean' -l slowest -x -d 'list the n declarations that took longest to prove'
 complete -c cas -n '__cas_using commit' -F
 complete -c cas -n '__cas_using status' -F
 complete -c cas -n '__cas_using reset' -F
@@ -127,6 +134,8 @@ complete -c cas -n '__cas_using annotated' -a 'make show'
 complete -c cas -n '__cas_using annotated' -F
 complete -c cas -n '__cas_using serve' -F
 complete -c cas -n '__cas_using access' -a 'show user grant revoke'
+complete -c cas -n '__cas_using lean' -a 'import prove check show axioms report'
+complete -c cas -n '__cas_using lean' -F
 complete -c cas -n '__cas_using account' -a 'edit'
 complete -c cas -n '__cas_using token' -a 'list make revoke'
 complete -c cas -n '__cas_using org' -a 'create member'
@@ -136,6 +145,6 @@ complete -c cas -n '__cas_using issue' -a 'list open show comment edit close reo
 complete -c cas -n '__cas_using release' -a 'list publish archive'
 complete -c cas -n '__cas_using mirror' -a 'add pull'
 complete -c cas -n '__cas_using completions' -a 'fish bash zsh'
-complete -c cas -n '__cas_using help' -a 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version'
+complete -c cas -n '__cas_using help' -a 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access lean signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version'
 complete -c cas -n '__cas_using merge' -a '(__cas_histories)'
 complete -c cas -n '__cas_using rebase' -a '(__cas_histories)'

@@ -188,6 +188,10 @@ static FORMATS: LazyLock<Vec<Format>> = LazyLock::new(|| {
             Kind::Leaf(crate::typed::check_manifest),
             &[include_str!("../../spec/formats/manifest-v1.md"), include_str!("../../spec/formats/manifest-v2.md")],
         ),
+        // Lean declarations and their proofs (spec/lean/cli.md).
+        format("lean-decl", include_str!("../../spec/formats/lean-decl.md"), Kind::Leaf(crate::lean::check_decl)),
+        format("lean-env", include_str!("../../spec/formats/lean-env.md"), Kind::Leaf(crate::lean::check_env)),
+        format("lean-proof", include_str!("../../spec/formats/lean-proof.md"), Kind::Leaf(crate::lean::check_proof)),
     ]
 });
 

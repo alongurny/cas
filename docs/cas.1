@@ -378,6 +378,46 @@ Mirror a git repository.
 The event log of a project.
 .IP
 \-\-follow waits for new events.
+.SH LEAN PROOFS
+.TP
+\fBcas\fR lean import <export\-file>
+.TQ
+\fBcas\fR lean import \-\-root <lake\-dir> <module>...
+.TQ
+\fBcas\fR lean prove <name>... [\-\-all] [\-\-closure] [\-\-budget <rows>]
+.TQ
+\fBcas\fR lean check <name>... [\-\-all] [\-\-closure] [\-\-quiet]
+.TQ
+\fBcas\fR lean show <name>
+.TQ
+\fBcas\fR lean axioms <name>...
+.TQ
+\fBcas\fR lean report [\-\-failed] [\-\-slowest <n>]
+Store Lean declarations, prove them and check the proofs.
+.IP
+import stores each declaration of a Lean export as its own blob, and an environment naming them all; with \-\-root it runs the exporter in a Lake project, with that project's Lean. Importing again after an edit writes only the declarations that changed.
+.IP
+prove writes, for each declaration, the steps of Lean's kernel that accept it, and stores them. A proof that is stored and was made against the declarations the environment has now is kept, so after an edit only what changed and what rests on it is proved again. An inductive type is proved with its whole block, constructors and recursors included.
+.IP
+check trusts nothing stored: it checks every step of a proof, that the proof is of this declaration, and that each constant the proof cites is the environment's declaration of that name. With \-\-closure (or \-\-all) it also checks everything the named declarations rest on. It fails when anything is refused, and says why.
+.IP
+A declaration can be named by its Lean name or by the key of its blob. show prints one declaration, axioms the axioms the named ones rest on, and report sums up the stored results.
+.IP
+\fB\-\-root\fR <lake\-dir>: the Lake project whose Lean exports the modules
+.IP
+\fB\-\-env\fR <name>: the Lean environment to work in (default: default)
+.IP
+\fB\-\-closure\fR : also everything the named declarations rest on
+.IP
+\fB\-\-budget\fR <rows>: give up on a declaration after this many rows (default 2000000)
+.IP
+\fB\-\-all\fR : every commit the commit reaches, not only the commit itself
+.IP
+\fB\-\-quiet\fR : print the outcome only, not a line for each proof
+.IP
+\fB\-\-failed\fR : list the declarations that were not proved
+.IP
+\fB\-\-slowest\fR <n>: list the n declarations that took longest to prove
 .SH THE TOOL
 .TP
 \fBcas\fR help [<command>]
