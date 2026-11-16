@@ -55,6 +55,9 @@ declaration key, status, rows, milliseconds.
 4. checks every declaration row of the derivation against the environment's declaration of that
    name: kind, level count, type, value where the proof unfolds it, and information (for a recursor,
    its rules). This is the citation check: the derivation checker takes cited rows as given;
+   The rows of a nested block's auxiliary block (the mutual block Lean's kernel makes of it) are
+   under keys derived for them, which no environment has: they are not cited declarations, and
+   the derivation checker ties them to the block's own rows, which are compared as above.
 5. checks that each row given as a primitive (`Nat.add` and the others) is the constant of that name.
 
 Terms are compared by a BLAKE3 digest of their structure, computed the same way from a

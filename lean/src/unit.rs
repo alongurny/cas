@@ -17,7 +17,7 @@ use crate::expr::{E, X, level_of};
 use crate::import::{Decl, Env, Kind};
 use crate::level::Level;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// What a derivation establishes.
@@ -413,7 +413,24 @@ pub fn check(env: &Env, i: usize, p: &Proof) -> Result<(), String> {
     .map_err(|e| format!("the checker refuses: {e}"))?;
     let rows = row_digests(t)?;
     goal_is_unit(env, i, p, &rows)?;
+    // A nested block's derivation also holds the auxiliary block Lean's
+    // kernel makes of it. Those rows are under keys derived for them, which
+    // no environment has and no other proof can cite; the checker has tied
+    // them to the block's own rows, which are compared below.
+    let mut aux: HashSet<Key> = HashSet::new();
+    if let UnitGoal::Nested(g) = &p.goal {
+        for x in g.aux.types.iter().chain(&g.aux.recursors) {
+            let r = t.decls.get(*x as usize).ok_or_else(|| format!("no declaration row {x}"))?;
+            aux.insert(r.key);
+            if let Info::Induct { ctors, .. } = &r.info {
+                aux.extend(ctors.iter().copied());
+            }
+        }
+    }
     for r in &t.decls {
+        if aux.contains(&r.key) && env.by_key(&r.key).is_none() {
+            continue;
+        }
         same_decl(env, &rows, r)?;
     }
     for (prim, d) in &t.prims {
