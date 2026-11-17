@@ -32,7 +32,7 @@
 //! (e ls r), linstl (l ls r), leq (l m); missing fields are 0. Children come
 //! before their parents, and premises before the facts that use them.
 
-use cas_lean::derivation::{CtxRow, DeclKind, Derivation, Fact, Goal, Key, LevelRow, ListRow, TermRow};
+use cas_lean::derivation::{CtxRow, DeclKind, Derivation, Fact, Goal, Info, Key, LevelRow, ListRow, TermRow};
 use cas_lean::derive::{Builder, Cited, Source};
 use cas_lean::import::{Env, Kind};
 use std::collections::HashMap;
@@ -89,7 +89,7 @@ fn kind_no(k: DeclKind) -> u8 {
     }
 }
 
-fn dump(t: &Derivation, goal: &Goal, own: &Key, order: &dyn Fn(&Key) -> i64) -> String {
+fn dump(t: &Derivation, goal: Option<&Goal>, own: &Key, order: &dyn Fn(&Key) -> i64) -> String {
     let mut out = String::new();
     let mut lv = Canon::new();
     for l in &t.levels {
@@ -184,6 +184,31 @@ fn dump(t: &Derivation, goal: &Goal, own: &Key, order: &dyn Fn(&Key) -> i64) -> 
         let (k0, k1) = key_words(&d.key);
         let ty = tm.map[d.ty as usize];
         writeln!(out, "D {c} {unfold} {} {v} {k0} {k1} {} {ty} {}", d.levels, kind_no(d.kind), order(&d.key)).unwrap();
+        // What the reduction rules read of a declaration: `I c ctor` with
+        // the inductive type's key, parameters and fields; `I c rec` with
+        // the arguments before the indices and the indices; one `R c` per
+        // recursor rule with the constructor's key, its fields and the
+        // right-hand side; `I c induct` and `I c quot`.
+        match &d.info {
+            Info::None => {}
+            Info::Induct { params, indices, ctors, recursive, .. } => {
+                let one = ctors.first().map_or((0, 0), key_words);
+                writeln!(out, "I {c} induct {params} {indices} {} {} {} {}", ctors.len(), *recursive as u8, one.0, one.1)
+                    .unwrap();
+            }
+            Info::Ctor { induct, params, fields } => {
+                let (i0, i1) = key_words(induct);
+                writeln!(out, "I {c} ctor {i0} {i1} {params} {fields}").unwrap();
+            }
+            Info::Rec { params, motives, minors, indices, rules } => {
+                writeln!(out, "I {c} rec {} {indices}", params + motives + minors).unwrap();
+                for r in rules {
+                    let (c0, c1) = key_words(&r.ctor);
+                    writeln!(out, "R {c} {c0} {c1} {} {}", r.fields, tm.map[r.rhs as usize]).unwrap();
+                }
+            }
+            Info::Quot(q) => writeln!(out, "I {c} quot {}", *q as u8).unwrap(),
+        }
     }
     let (t_, g_, l_, ls_) = (
         |i: u32| tm.map[i as usize],
@@ -204,6 +229,7 @@ fn dump(t: &Derivation, goal: &Goal, own: &Key, order: &dyn Fn(&Key) -> i64) -> 
         let p: Vec<String> = r.premises.iter().map(|p| p.to_string()).collect();
         writeln!(out, "F {i} {:?} {f} {} {} {} {} : {}", r.rule, x[0], x[1], x[2], x[3], p.join(" ")).unwrap();
     }
+    let Some(goal) = goal else { return out };
     let (k0, k1) = key_words(own);
     let o = |x: Option<u32>| x.map_or(-1, |v| v as i64);
     let value = goal.value.map_or(-1, |v| tm.map[v as usize] as i64);
@@ -471,6 +497,20 @@ fn main() {
         rest.clone()
     };
     let order = topo(&env, order_roots.as_ref().unwrap_or(&names));
+    // `--info FILE` after the names: one file of declaration rows only,
+    // every named constant cited with what its reduction rules read.
+    if let Some(at) = rest.iter().position(|a| a == "--info") {
+        let mut b = Builder::new();
+        b.source = Some(std::rc::Rc::new(Shared(env.clone())));
+        let mut keys: Vec<(i64, Key)> = order.iter().map(|(k, o)| (*o, *k)).collect();
+        keys.sort_unstable();
+        for (_, k) in &keys {
+            b.cite(k).unwrap_or_else(|e| panic!("a constant of the cone: {e}"));
+        }
+        let s = dump(&b.t, None, &[0; 32], &|k| order.get(k).copied().unwrap_or(-1));
+        std::fs::write(&rest[at + 1], s).unwrap();
+        return eprintln!("{} declarations, {} terms", b.t.decls.len(), b.t.terms.len());
+    }
     std::panic::set_hook(Box::new(|_| {}));
     for name in &names {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Option<(usize, usize, String)> {
@@ -492,7 +532,7 @@ fn main() {
             Some((
                 b.t.rows.len(),
                 b.t.terms.len(),
-                dump(&b.t, &goal, &env.key(d.name), &|k| order.get(k).copied().unwrap_or(-1)),
+                dump(&b.t, Some(&goal), &env.key(d.name), &|k| order.get(k).copied().unwrap_or(-1)),
             ))
         }));
         match r {
