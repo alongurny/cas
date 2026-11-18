@@ -506,6 +506,18 @@ impl<'a> Checker<'a> {
         }
     }
 
+    /// The level is not zero under every assignment: a successor or a
+    /// parameter, a maximum with such a side, an impredicative maximum with
+    /// such a second side. A level without this is zero under every assignment.
+    fn never_zero(&self, l: Ix) -> bool {
+        match self.t.levels[l as usize] {
+            LevelRow::Zero => false,
+            LevelRow::Succ(_) | LevelRow::Param(_) => true,
+            LevelRow::Max(a, b) => self.never_zero(a) || self.never_zero(b),
+            LevelRow::IMax(_, b) => self.never_zero(b),
+        }
+    }
+
     /// The declaration row cited with this key.
     fn decl_by_key(&self, key: &Key) -> Result<&DeclRow, String> {
         self.t.decls.iter().find(|d| &d.key == key).ok_or_else(|| "a constructor is not cited".into())
@@ -525,8 +537,12 @@ impl<'a> Checker<'a> {
         let (e3, se) = self.infer(i, 2, g)?;
         let (se2, sort) = self.eq(i, 3, g)?;
         need(self.same(x, x2) && self.same(e, e2) && self.same(e, e3) && self.same(se, se2), "premises")?;
-        // Lean's `is_prop`: the type's sort is `Sort 0` itself.
-        let is_prop = self.t.levels[self.sort_of(sort)? as usize] == LevelRow::Zero;
+        // Lean's `is_prop`: the type's sort is `Sort 0` itself. A sort that
+        // skips the proposition checks must not be zero in disguise (such as
+        // `max 0 0`): its level is never read as zero.
+        let lvl = self.sort_of(sort)?;
+        let is_prop = self.t.levels[lvl as usize] == LevelRow::Zero;
+        need(is_prop || self.never_zero(lvl), "the structure's sort is zero in disguise")?;
         let (head, ps) = self.spine(iapp)?;
         let TermRow::Const(d, ls) = *self.term(head)? else { return Err("the type is not an inductive type".into()) };
         let induct = &self.t.decls[d as usize];
