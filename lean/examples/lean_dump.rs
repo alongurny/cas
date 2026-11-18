@@ -529,6 +529,10 @@ fn main() {
             };
             let goal = b.check_decl(kind, d.lparams.len() as u32, ty, value).ok()?;
             cas_lean::Checker::check(&b.t, &goal).ok()?;
+            if std::env::var("LEAN_DUMP_NAT").is_ok() {
+                nat_census(&b.t);
+                return None;
+            }
             Some((
                 b.t.rows.len(),
                 b.t.terms.len(),
@@ -543,4 +547,64 @@ fn main() {
             _ => eprintln!("{name}: skipped"),
         }
     }
+    if let Ok(path) = std::env::var("LEAN_DUMP_NAT") {
+        nat_write(&path);
+    }
+}
+
+thread_local! {
+    static NAT_LITS: std::cell::RefCell<std::collections::BTreeSet<u64>> = const { std::cell::RefCell::new(std::collections::BTreeSet::new()) };
+}
+
+/// `LEAN_DUMP_NAT=FILE`: instead of rows, what a proof of the arithmetic
+/// rows needs beside them. The literals those rows read and give (rows
+/// name a literal by a hash of its bytes), and the keys of the constants
+/// Lean's kernel knows by name:
+///
+/// ```text
+/// P <number> <key0> <key1>     number: `Prim` in order, from 1
+/// N <value>                    a literal below 2^64
+/// ```
+fn nat_census(t: &Derivation) {
+    use cas_lean::derivation::Rule;
+    let note = |i: u32| {
+        if let TermRow::Lit(b) = &t.terms[i as usize] {
+            if let Ok(v) = u64::try_from(&cas_lean::nat::value(b)) {
+                NAT_LITS.with(|s| s.borrow_mut().insert(v));
+            }
+        }
+    };
+    for r in &t.rows {
+        let Fact::Eq { a, b, .. } = r.fact else { continue };
+        if !matches!(r.rule, Rule::NatZero | Rule::NatSucc | Rule::NatBin) {
+            continue;
+        }
+        note(b);
+        if let TermRow::App(f, y) = t.terms[a as usize] {
+            note(y);
+            if let TermRow::App(_, x) = t.terms[f as usize] {
+                note(x);
+            }
+        }
+    }
+}
+
+fn nat_write(path: &str) {
+    use cas_lean::derivation::{Prim, lean_key};
+    use Prim::*;
+    let prims = [
+        Nat, NatZero, NatSucc, NatAdd, NatSub, NatMul, NatPow, NatGcd, NatMod, NatDiv, NatBeq, NatBle, NatLand,
+        NatLor, NatXor, NatShiftLeft, NatShiftRight, BoolTrue, BoolFalse, String,
+    ];
+    let mut out = std::string::String::new();
+    for (i, p) in prims.into_iter().enumerate() {
+        let (k0, k1) = key_words(&lean_key(p.lean_name()));
+        writeln!(out, "P {} {k0} {k1}", i + 1).unwrap();
+    }
+    NAT_LITS.with(|s| {
+        for v in s.borrow().iter() {
+            writeln!(out, "N {v}").unwrap();
+        }
+    });
+    std::fs::write(path, out).unwrap();
 }
