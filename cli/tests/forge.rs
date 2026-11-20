@@ -98,6 +98,9 @@ fn everything_the_web_does_from_the_terminal() {
     let show = s.ok("alice", p, &["project", "show"]);
     assert!(show.contains("protected h/dev") && show.contains("bug"), "{show}");
     assert!(s.fails("alice", p, &["project", "delete"]).contains("--yes"));
+    // An option the command's forms do not name is refused, with its usage.
+    let bad = s.fails("alice", p, &["issue", "list", "--colour", "red"]);
+    assert!(bad.starts_with("issue takes no --colour\nusage: cas issue list"), "{bad}");
     // A private history, pushed over the wire, proposed and reviewed.
     let w = s.dir.path().join("w");
     write(&w, "f.txt", "one\ntwo\n");

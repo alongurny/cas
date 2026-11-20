@@ -40,16 +40,25 @@ const FLAGS: &[&str] = &["--public", "--resolved", "--undo", "--yes", "--follow"
 /// A command's own words: positionals, `--name value` options (several
 /// times for a list) and flags.
 struct Opts {
+    /// The command, for its usage in an error.
+    cmd: String,
     pos: Vec<String>,
     vals: BTreeMap<String, Vec<String>>,
     flags: BTreeSet<String>,
 }
 
 impl Opts {
+    /// `words` are the command and its words. An option its forms do not
+    /// name is refused.
     fn parse(words: &[String]) -> Res<Opts> {
-        let mut o = Opts { pos: Vec::new(), vals: BTreeMap::new(), flags: BTreeSet::new() };
-        let mut it = words.iter();
+        let cmd = words[0].clone();
+        let mut o = Opts { cmd: cmd.clone(), pos: Vec::new(), vals: BTreeMap::new(), flags: BTreeSet::new() };
+        let known = crate::help::form_options(&cmd);
+        let mut it = words[1..].iter();
         while let Some(w) = it.next() {
+            if w.starts_with("--") && w.len() > 2 && !known.contains(&w.as_str()) && w != "--json" && w != "--project" {
+                return Err(format!("{cmd} takes no {w}\n{}", crate::help::usage(&cmd)));
+            }
             if FLAGS.contains(&w.as_str()) {
                 o.flags.insert(w.clone());
             } else if w.starts_with("--") && w.len() > 2 {
@@ -69,7 +78,7 @@ impl Opts {
     }
     /// How the command is written, for an error.
     fn usage(&self) -> String {
-        crate::help::usage(self.pos.first().map_or("", String::as_str))
+        crate::help::usage(&self.cmd)
     }
     fn flag(&self, k: &str) -> bool {
         self.flags.contains(k)
@@ -299,7 +308,7 @@ fn write_secret(path: &str, text: &str) -> Res<()> {
 /// Run a forge command; `words` start with its name.
 pub fn run(a: &Args, words: &[String], ca: Option<&[u8]>) -> Res<()> {
     let cmd = words[0].as_str();
-    let o = Opts::parse(&words[1..])?;
+    let o = Opts::parse(words)?;
     let token = if cmd == "login" || cmd == "signup" { read_token(a).ok().flatten() } else { read_token(a)? };
     let api = Api::new(&a.store, o.get("--project"), token, ca)?;
     let json_out = o.flag("--json");

@@ -416,10 +416,13 @@ Show or edit an account.
 ```
 cas token list
 cas token make <label> [--scope all|read|project:<owner>/<project>] [--days <n>]
+cas token make <label> --out <file>
 cas token revoke <key>
 ```
 
 The tokens of the account.
+
+make prints the new token once; with --out it writes it to <file> instead, and takes --scope and --days too.
 
 ### org
 

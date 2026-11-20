@@ -466,10 +466,11 @@ pub const COMMANDS: &[Cmd] = &[
             &[
                 "token list",
                 "token make <label> [--scope all|read|project:<owner>/<project>] [--days <n>]",
+                "token make <label> --out <file>",
                 "token revoke <key>",
             ],
             "the tokens of the account",
-            "",
+            "make prints the new token once; with --out it writes it to <file> instead, and takes --scope and --days too.",
         )
     },
     Cmd {
@@ -729,6 +730,23 @@ pub fn check_words(flags: &[String], rest: &[String]) -> Res<()> {
         }
     }
     Ok(())
+}
+
+/// The options the forms of command `name` name, such as `--state`.
+pub fn form_options(name: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    for form in find(name).map_or(&[][..], |c| c.forms) {
+        let mut rest = *form;
+        while let Some(i) = rest.find("--") {
+            rest = &rest[i..];
+            let end = rest[2..].find(|ch: char| !(ch.is_ascii_lowercase() || ch == '-')).map_or(rest.len(), |j| j + 2);
+            if end > 2 && !found.contains(&&rest[..end]) {
+                found.push(&rest[..end]);
+            }
+            rest = &rest[end..];
+        }
+    }
+    found
 }
 
 fn option(flag: &str) -> &'static Opt {

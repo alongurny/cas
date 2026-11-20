@@ -275,8 +275,12 @@ Show or edit an account.
 .TQ
 \fBcas\fR token make <label> [\-\-scope all|read|project:<owner>/<project>] [\-\-days <n>]
 .TQ
+\fBcas\fR token make <label> \-\-out <file>
+.TQ
 \fBcas\fR token revoke <key>
 The tokens of the account.
+.IP
+make prints the new token once; with \-\-out it writes it to <file> instead, and takes \-\-scope and \-\-days too.
 .TP
 \fBcas\fR org create <name>
 .TQ
