@@ -250,7 +250,14 @@ impl Forge {
             {
                 continue;
             }
-            out.push((n, issue_json(n, &doc)));
+            let mut j = issue_json(n, &doc);
+            // The list leaves out the long fields (Thesis: 7.2 of 7.6 MB were bodies); one issue's
+            // page has them.
+            if let Some(o) = j.as_object_mut() {
+                o.remove("body");
+                o.remove("suggestion");
+            }
+            out.push((n, j));
         }
         out.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
         Ok(out.into_iter().map(|(_, j)| j).collect())

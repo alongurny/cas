@@ -262,6 +262,11 @@ fn people_projects_proposals_issues_releases() {
     let i = s.ok("GET", "projects/alice/demo/issues/3", Some(&bob), None);
     assert_eq!(i["labels"], json!(["P2", "difficulty:easy"]));
     assert_eq!(i["comments"][0]["text"], "still");
+    assert_eq!(i["body"], "how");
+    // The list leaves the body out.
+    let l = s.ok("GET", "projects/alice/demo/issues", Some(&bob), None);
+    assert_eq!(l[0]["title"], "it breaks");
+    assert!(l[0].get("body").is_none());
     assert_eq!(
         s.call("PATCH", "projects/alice/demo/issues/3", Some(&carol), Some(json!({ "add_labels": ["P1"] }))).0,
         404
