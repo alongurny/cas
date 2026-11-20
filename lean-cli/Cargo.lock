@@ -67,6 +67,7 @@ dependencies = [
  "flock-field",
  "flock-prover",
  "serde",
+ "zstd",
 ]
 
 [[package]]

@@ -2,8 +2,16 @@
 //!
 //! ```text
 //! cas-lean verify BUNDLE [KEY ...]
-//! cas-lean prove [--project DIR] [--work DIR] [--out DIR] MODULE THEOREM
+//! cas-lean prove [--long] [--assume A,B,...] [--export FILE] [--project DIR]
+//!                [--work DIR] [--out DIR] MODULE THEOREM
 //! ```
+//!
+//! A bundle (cas `spec/lean/bundle.md`) holds the theorem's declarations as
+//! Lean text, which is what it states, and one piece of evidence for every
+//! unit they rest on: a long proof (its derivation, checked here), a short
+//! one (covered by the succinct proof it carries), or assumed (listed).
+//! `prove` makes the succinct proof of the whole cone and long proofs for
+//! what it does not cover; with `--long`, long proofs only.
 //!
 //! `verify` reads a bundle and its verification keys (by default the
 //! `vk-<fingerprint>.vk` files beside it) and nothing else, and prints what
@@ -30,7 +38,36 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::{fs, time::Instant};
 
-use flock_prover::tower::lean_verify::{LeanBundle, LeanVk, verify_lean_bundle};
+use cas_lean::bundle::{Bundle, Evidence};
+use cas_lean::import::Env;
+use flock_field::F128;
+use flock_prover::tower::lean_verify::{LeanBundle, LeanVerified, LeanVk, verify_lean_bundle};
+use std::collections::{BTreeSet, HashSet};
+
+/// The header of a bundle (format 2): zstd of its bincode follows.
+const HEADER: &[u8; 16] = b"cas-lean-bundle2";
+
+fn write_bundle(path: &Path, b: &Bundle) -> Result<usize, String> {
+    let raw = cas_lean::unit::encode(b);
+    let mut bytes = HEADER.to_vec();
+    bytes.extend(zstd::encode_all(&raw[..], 19).map_err(|e| e.to_string())?);
+    fs::write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(bytes.len())
+}
+
+fn read_bundle(bytes: &[u8]) -> Result<Bundle, String> {
+    let body = bytes.strip_prefix(HEADER).ok_or("not a cas-lean bundle (format 2)")?;
+    let raw = zstd::decode_all(body).map_err(|e| format!("the bundle does not decompress: {e}"))?;
+    cas_lean::unit::decode(&raw)
+}
+
+/// How the succinct proof's statement names a declaration: the first 16
+/// bytes of its key as two words.
+fn key_words(name: &str) -> [F128; 2] {
+    let k = cas_lean::derivation::lean_key(name);
+    let w = |o: usize| u64::from_le_bytes(k[o..o + 8].try_into().unwrap());
+    [F128::new(w(0), 0), F128::new(w(8), 0)]
+}
 
 const EXPORT_LEAN: &str = include_str!("../../lean/measure/Export.lean");
 
@@ -44,7 +81,8 @@ const TOOLS: [(&str, fn()); 4] = [
 
 const USAGE: &str = "usage:
   cas-lean verify BUNDLE [KEY ...]
-  cas-lean prove [--project DIR] [--work DIR] [--out DIR] MODULE THEOREM";
+  cas-lean prove [--long] [--assume A,B,...] [--export FILE] [--project DIR]
+                 [--work DIR] [--out DIR] MODULE THEOREM";
 
 fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -81,14 +119,103 @@ fn main() -> ExitCode {
 fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
     let t = Instant::now();
     let bytes = fs::read(bundle).map_err(|e| format!("{bundle}: {e}"))?;
-    let b = match LeanBundle::from_bytes(&bytes) {
+    let dir = Path::new(bundle).parent().unwrap_or(Path::new("."));
+    if !bytes.starts_with(HEADER) {
+        // Format 1: a succinct proof alone.
+        return Ok(match succinct(&bytes, dir, keys)? {
+            Ok((b, v)) => {
+                println!("VERIFIED in {:.1} s: a succinct proof alone", t.elapsed().as_secs_f64());
+                say_succinct(&b, &v);
+                println!("bundle    blake3:{}", hex(blake3::hash(&bytes).as_bytes()));
+                println!("note: it names the declarations it checks by name only; a format 2 bundle says what they state");
+                true
+            }
+            Err(e) => {
+                println!("REFUSED: {e}");
+                false
+            }
+        });
+    }
+    let b = match read_bundle(&bytes) {
         Ok(b) => b,
         Err(e) => {
             println!("REFUSED: {e}");
             return Ok(false);
         }
     };
-    let dir = Path::new(bundle).parent().unwrap_or(Path::new("."));
+    let r = match b.verify() {
+        Ok(r) => r,
+        Err(e) => {
+            println!("REFUSED: {e}");
+            return Ok(false);
+        }
+    };
+    let mut short = None;
+    if !r.short.is_empty() || !b.short.is_empty() {
+        let (fb, v) = match succinct(&b.short, dir, keys)? {
+            Ok(x) => x,
+            Err(e) => {
+                println!("REFUSED: the succinct proof: {e}");
+                return Ok(false);
+            }
+        };
+        let have: HashSet<[F128; 2]> = fb.statement.keys.iter().copied().collect();
+        if let Some(n) = r.short.iter().find(|n| !have.contains(&key_words(n))) {
+            println!("REFUSED: the succinct proof does not check {n}");
+            return Ok(false);
+        }
+        short = Some((fb, v));
+    }
+    let rows: u64 = r.long.iter().map(|x| x.1).sum();
+    println!("VERIFIED in {:.1} s", t.elapsed().as_secs_f64());
+    for (n, ty) in &r.statements {
+        println!("theorem   {n} : {ty}");
+    }
+    println!("statement blake3:{} ({} declarations)", hex(&r.statement_digest), r.decls);
+    println!("bundle    blake3:{}", hex(blake3::hash(&bytes).as_bytes()));
+    println!("long      {} units, {rows} derivation rows, checked here", r.long.len());
+    match &short {
+        Some((fb, v)) => {
+            println!("short     {} units, by the succinct proof:", r.short.len());
+            say_succinct(fb, v);
+            println!("          (it names them by name; that it checked these declarations' text is not yet bound)");
+        }
+        None => println!("short     none"),
+    }
+    let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+    println!("assumed   {}", list(&r.assumed));
+    println!("axioms    {}", list(&r.axioms));
+    let extra: Vec<String> = r
+        .axioms
+        .iter()
+        .filter(|a| !cas_lean::bundle::STANDARD_AXIOMS.contains(&a.as_str()))
+        .cloned()
+        .collect();
+    if !extra.is_empty() {
+        println!("warning   axioms beyond Lean's three: {}", extra.join(", "));
+    }
+    if !r.builtins.is_empty() {
+        println!("builtins  {} (Lean's quotient, no proof)", r.builtins.join(", "));
+    }
+    Ok(true)
+}
+
+fn say_succinct(b: &LeanBundle, v: &LeanVerified) {
+    println!("          {} segment proofs over {} leaves", v.segments, v.leaves);
+    println!("          statement blake3:{} ({} declarations checked)", hex(&v.statement), b.statement.keys.len());
+    for (f, _) in &v.vks {
+        println!("          key blake3:{}", hex(f));
+    }
+}
+
+/// Verifies a succinct proof (a flock Lean bundle) against its keys: those
+/// given, or the `vk-<fingerprint>.vk` files in `dir`. The outer error is
+/// a key that cannot be read; the inner a refusal.
+fn succinct(bytes: &[u8], dir: &Path, keys: &[String]) -> Result<Result<(LeanBundle, LeanVerified), String>, String> {
+    let b = match LeanBundle::from_bytes(bytes) {
+        Ok(b) => b,
+        Err(e) => return Ok(Err(e)),
+    };
     let files: Vec<PathBuf> = if keys.is_empty() {
         b.vks.iter().map(|f| dir.join(format!("vk-{}.vk", hex(f)))).collect()
     } else {
@@ -99,36 +226,50 @@ fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
         let k = fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
         match LeanVk::from_bytes(&k) {
             Ok(vk) => vks.push(vk),
-            Err(e) => {
-                println!("REFUSED: {}: {e}", p.display());
-                return Ok(false);
-            }
+            Err(e) => return Ok(Err(format!("{}: {e}", p.display()))),
         }
     }
-    match verify_lean_bundle(&b, &vks) {
-        Ok(v) => {
-            println!(
-                "VERIFIED in {:.1} s: {} segment proofs over {} leaves",
-                t.elapsed().as_secs_f64(),
-                v.segments,
-                v.leaves
-            );
-            println!("bundle    blake3:{}", hex(blake3::hash(&bytes).as_bytes()));
-            println!(
-                "statement blake3:{} ({} declarations checked)",
-                hex(&v.statement),
-                b.statement.keys.len()
-            );
-            for (f, _) in &v.vks {
-                println!("key       blake3:{}", hex(f));
-            }
-            Ok(true)
+    Ok(verify_lean_bundle(&b, &vks).map(|v| (b, v)))
+}
+
+/// Proves every unit of the closure not in `short` or `assumed` long, and
+/// writes the bundle with the succinct proof `short_bytes`.
+fn long_bundle(
+    r: &Run,
+    export: &Path,
+    theorem: &str,
+    assumed: &BTreeSet<String>,
+    short: &BTreeSet<String>,
+    short_bytes: Vec<u8>,
+    out: &Path,
+) -> Result<PathBuf, String> {
+    r.say(&format!("reading {}", export.display()));
+    let text = fs::read_to_string(export).map_err(|e| format!("{}: {e}", export.display()))?;
+    let env = Env::parse(&text)?;
+    drop(text);
+    let cache = r.work.join("long");
+    fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    r.say(&format!("long proofs of what {theorem} rests on"));
+    let (b, done) = Bundle::prove(&env, &[theorem.to_string()], assumed, short, Some(&cache))?;
+    let rows: u64 = done.iter().filter_map(|p| p.outcome.as_ref().ok()).sum();
+    let cached = done.iter().filter(|p| p.cached).count();
+    r.say(&format!("{} units proved long ({cached} from the cache), {rows} rows", done.len()));
+    let Some(mut b) = b else {
+        for p in done.iter().filter(|p| p.outcome.is_err()) {
+            println!("not proved: {}", p.outcome.as_ref().unwrap_err());
         }
-        Err(e) => {
-            println!("REFUSED: {e}");
-            Ok(false)
-        }
-    }
+        return Err("some units were not proved: fix them, or name them with --assume".into());
+    };
+    b.short = short_bytes;
+    fs::create_dir_all(out).map_err(|e| e.to_string())?;
+    let path = out.join(format!("{theorem}.bundle"));
+    let n = write_bundle(&path, &b)?;
+    let (s, a) = (
+        b.units.iter().filter(|u| u.1 == Evidence::Short).count(),
+        b.units.iter().filter(|u| u.1 == Evidence::Assumed).count(),
+    );
+    r.say(&format!("wrote {} ({} KiB): {} declarations, {s} units short, {a} assumed", path.display(), n / 1024, b.decls.len()));
+    Ok(path)
 }
 
 /// The settings every proving step runs with: the cone's row bits, the
@@ -191,10 +332,25 @@ fn prove(args: &[String]) -> Result<bool, String> {
     let mut project = PathBuf::from(".");
     let mut work: Option<PathBuf> = None;
     let mut out = PathBuf::from(".");
+    let mut export: Option<PathBuf> = None;
+    let mut long = false;
+    let mut assumed: BTreeSet<String> = BTreeSet::new();
     let mut pos = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--long" => {
+                long = true;
+                i += 1;
+            }
+            "--assume" if i + 1 < args.len() => {
+                assumed.extend(args[i + 1].split(',').filter(|x| !x.is_empty()).map(String::from));
+                i += 2;
+            }
+            "--export" if i + 1 < args.len() => {
+                export = Some(fs::canonicalize(&args[i + 1]).map_err(|e| format!("{}: {e}", args[i + 1]))?);
+                i += 2;
+            }
             "--project" | "--work" | "--out" if i + 1 < args.len() => {
                 let v = PathBuf::from(&args[i + 1]);
                 match args[i].as_str() {
@@ -224,6 +380,14 @@ fn prove(args: &[String]) -> Result<bool, String> {
     let have = |p: &str| work.join(p).exists();
 
     // 1. The module's declarations, as text.
+    if let Some(x) = &export {
+        let _ = fs::remove_file(work.join("export.txt"));
+        std::os::unix::fs::symlink(x, work.join("export.txt")).map_err(|e| e.to_string())?;
+    }
+    if long {
+        let p = long_bundle(&r, &work.join("export.txt"), theorem, &assumed, &BTreeSet::new(), Vec::new(), &out)?;
+        return verify(&p.display().to_string(), &[]);
+    }
     if !have("export.txt") {
         r.say(&format!("exporting {module} from {}", project.display()));
         fs::write(work.join("Export.lean"), EXPORT_LEAN).map_err(|e| e.to_string())?;
@@ -379,19 +543,27 @@ fn prove(args: &[String]) -> Result<bool, String> {
         .ok_or("the join wrote no bundle")?;
     let bundle = cone.join(bundle);
     fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let name = format!("{theorem}.bundle");
-    fs::copy(&bundle, out.join(&name)).map_err(|e| e.to_string())?;
-    let b = LeanBundle::from_bytes(&fs::read(&bundle).map_err(|e| e.to_string())?)?;
+    let short_bytes = fs::read(&bundle).map_err(|e| e.to_string())?;
+    let b = LeanBundle::from_bytes(&short_bytes)?;
     for f in &b.vks {
         let k = format!("vk-{}.vk", hex(f));
         fs::copy(cone.join(&k), out.join(&k)).map_err(|e| e.to_string())?;
     }
-    r.say(&format!(
-        "PROVED: {} and {} verification keys in {}",
-        name,
-        b.vks.len(),
-        out.display()
-    ));
-    let o = out.join(&name).display().to_string();
-    verify(&o, &[])
+    // 9. The declarations, and long proofs of the units the succinct proof
+    // does not check.
+    let text = fs::read_to_string(work.join("export.txt")).map_err(|e| e.to_string())?;
+    let env = Env::parse(&text)?;
+    drop(text);
+    let have_keys: HashSet<[F128; 2]> = b.statement.keys.iter().copied().collect();
+    let idx = cas_lean::bundle::closure(&env, &[theorem.to_string()])?;
+    let short: BTreeSet<String> = idx
+        .iter()
+        .map(|&i| env.name(env.decls[i].name))
+        .filter(|n| !assumed.contains(n) && have_keys.contains(&key_words(n)))
+        .collect();
+    drop(env);
+    r.say(&format!("{} units are checked by the succinct proof", short.len()));
+    let p = long_bundle(&r, &work.join("export.txt"), theorem, &assumed, &short, short_bytes, &out)?;
+    r.say(&format!("PROVED: {} and {} verification keys", p.display(), b.vks.len()));
+    verify(&p.display().to_string(), &[])
 }

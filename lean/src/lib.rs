@@ -7,6 +7,7 @@
 //! rows are distinct. The same checks are meant to become a circuit.
 
 pub mod block;
+pub mod bundle;
 pub mod check;
 pub mod derivation;
 pub mod derive;
