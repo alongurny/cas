@@ -34,6 +34,7 @@ completions of all three shells.
   and how to build the prover.
 - [docs/developer.md](docs/developer.md): the layout of the code, how to add
   a format or a command, and the checks before a push.
+- [CHANGELOG.md](CHANGELOG.md): what changed, in prose.
 - [spec/](spec/): what the store, the wire, the formats and the forge are
   required to do.
 

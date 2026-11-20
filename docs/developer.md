@@ -147,3 +147,19 @@ and `proof`. The prover is `prove/`, a crate outside the workspace because
 it builds Flock; its circuits are generated from the same `Type` values.
 [proofs.md](proofs.md) says how to build it and what a proof does and does
 not say.
+
+## Dependencies
+
+A change to a lock file (`Cargo.lock`, `prove/Cargo.lock`,
+`lean-cli/Cargo.lock`, the forge's `package-lock.json`) goes in only after
+each changed package's published source has been read. The tool is in the
+agents repository:
+
+```sh
+security-check depdiff lock OLD/Cargo.lock NEW/Cargo.lock
+```
+
+It downloads both versions of every changed package without building them,
+writes their diff and flags build scripts, manifests and binaries. Read each
+diff; leave out a package that does not pass, or whose source cannot be
+read, and say so in the commit.
