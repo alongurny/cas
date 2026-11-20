@@ -193,8 +193,15 @@ pub fn dump(t: &Derivation, goal: Option<&Goal>, own: &Key, order: &dyn Fn(&Key)
             Info::None => {}
             Info::Induct { params, indices, ctors, recursive, .. } => {
                 let one = ctors.first().map_or((0, 0), key_words);
-                writeln!(out, "I {c} induct {params} {indices} {} {} {} {}", ctors.len(), *recursive as u8, one.0, one.1)
-                    .unwrap();
+                writeln!(
+                    out,
+                    "I {c} induct {params} {indices} {} {} {} {}",
+                    ctors.len(),
+                    *recursive as u8,
+                    one.0,
+                    one.1
+                )
+                .unwrap();
             }
             Info::Ctor { induct, params, fields } => {
                 let (i0, i1) = key_words(induct);
@@ -568,10 +575,10 @@ thread_local! {
 fn nat_census(t: &Derivation) {
     use cas_lean::derivation::Rule;
     let note = |i: u32| {
-        if let TermRow::Lit(b) = &t.terms[i as usize] {
-            if let Ok(v) = u64::try_from(&cas_lean::nat::value(b)) {
-                NAT_LITS.with(|s| s.borrow_mut().insert(v));
-            }
+        if let TermRow::Lit(b) = &t.terms[i as usize]
+            && let Ok(v) = u64::try_from(&cas_lean::nat::value(b))
+        {
+            NAT_LITS.with(|s| s.borrow_mut().insert(v));
         }
     };
     for r in &t.rows {
@@ -590,11 +597,29 @@ fn nat_census(t: &Derivation) {
 }
 
 fn nat_write(path: &str) {
-    use cas_lean::derivation::{Prim, lean_key};
     use Prim::*;
+    use cas_lean::derivation::{Prim, lean_key};
     let prims = [
-        Nat, NatZero, NatSucc, NatAdd, NatSub, NatMul, NatPow, NatGcd, NatMod, NatDiv, NatBeq, NatBle, NatLand,
-        NatLor, NatXor, NatShiftLeft, NatShiftRight, BoolTrue, BoolFalse, String,
+        Nat,
+        NatZero,
+        NatSucc,
+        NatAdd,
+        NatSub,
+        NatMul,
+        NatPow,
+        NatGcd,
+        NatMod,
+        NatDiv,
+        NatBeq,
+        NatBle,
+        NatLand,
+        NatLor,
+        NatXor,
+        NatShiftLeft,
+        NatShiftRight,
+        BoolTrue,
+        BoolFalse,
+        String,
     ];
     let mut out = std::string::String::new();
     for (i, p) in prims.into_iter().enumerate() {

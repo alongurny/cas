@@ -332,15 +332,13 @@ impl Bundle {
         let s2 = sub.clone();
         let results = par_map(jobs, move |(i, n, file)| {
             let t0 = std::time::Instant::now();
-            if let Some(f) = &file {
-                if let Ok(b) = std::fs::read(f) {
-                    if let Ok(p) = unit::decode::<Proof>(&b) {
-                        if unit::check(&s2, i, &p).is_ok() {
-                            let rows = p.derivation.rows.len() as u64;
-                            return Ok((n, b, rows, true, t0.elapsed().as_millis() as u64));
-                        }
-                    }
-                }
+            if let Some(f) = &file
+                && let Ok(b) = std::fs::read(f)
+                && let Ok(p) = unit::decode::<Proof>(&b)
+                && unit::check(&s2, i, &p).is_ok()
+            {
+                let rows = p.derivation.rows.len() as u64;
+                return Ok((n, b, rows, true, t0.elapsed().as_millis() as u64));
             }
             let p = unit::prove(&s2, i, 0).map_err(|f| format!("{n}: {} ({})", f.message, f.stage))?;
             let b = unit::encode(&p);

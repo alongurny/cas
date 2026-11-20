@@ -743,33 +743,6 @@ impl Env {
     }
 }
 
-#[cfg(test)]
-mod decl_text_tests {
-    use super::*;
-
-    const TEXT: &str =
-        "N 1 0 s 4e6174\nE 2 s 3\nL 3 s 4\nL 4 z\nD 1 2 0 | axiom\nN 5 0 s 41\nE 6 c 1\nD 5 6 0 | def 6 o\n";
-
-    #[test]
-    fn a_declaration_round_trips_and_shares() {
-        // Level 3 refers forward to 4 in the whole export; per declaration
-        // the order is children first.
-        let env = Env::parse(TEXT).unwrap();
-        let a = env.decl_text(0);
-        let b = env.decl_text(1);
-        assert_eq!(a, "N 1 0 s 4e6174\nL 2 z\nL 3 s 2\nE 4 s 3\nD 1 4 0 | axiom\n");
-        let mut e = Env::default();
-        assert_eq!(e.absorb(&a).unwrap(), 0);
-        assert_eq!(e.absorb(&b).unwrap(), 1);
-        // Name "Nat" is shared: the constant in b's type finds decl 0.
-        assert_eq!(e.decl_text(0), a);
-        assert_eq!(e.decl_text(1), b);
-        assert_eq!(e.items.len(), 7);
-        assert!(e.absorb(&a).is_err());
-        assert_eq!(Env::parse(&a).unwrap().decl_text(0), a);
-    }
-}
-
 impl Env {
     /// The position of the declaration with this name as Lean prints it.
     pub fn index_of(&self, name: &str) -> Option<usize> {
@@ -827,5 +800,32 @@ impl Env {
             }
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod decl_text_tests {
+    use super::*;
+
+    const TEXT: &str =
+        "N 1 0 s 4e6174\nE 2 s 3\nL 3 s 4\nL 4 z\nD 1 2 0 | axiom\nN 5 0 s 41\nE 6 c 1\nD 5 6 0 | def 6 o\n";
+
+    #[test]
+    fn a_declaration_round_trips_and_shares() {
+        // Level 3 refers forward to 4 in the whole export; per declaration
+        // the order is children first.
+        let env = Env::parse(TEXT).unwrap();
+        let a = env.decl_text(0);
+        let b = env.decl_text(1);
+        assert_eq!(a, "N 1 0 s 4e6174\nL 2 z\nL 3 s 2\nE 4 s 3\nD 1 4 0 | axiom\n");
+        let mut e = Env::default();
+        assert_eq!(e.absorb(&a).unwrap(), 0);
+        assert_eq!(e.absorb(&b).unwrap(), 1);
+        // Name "Nat" is shared: the constant in b's type finds decl 0.
+        assert_eq!(e.decl_text(0), a);
+        assert_eq!(e.decl_text(1), b);
+        assert_eq!(e.items.len(), 7);
+        assert!(e.absorb(&a).is_err());
+        assert_eq!(Env::parse(&a).unwrap().decl_text(0), a);
     }
 }

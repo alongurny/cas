@@ -58,10 +58,11 @@ pub fn main() {
     for &n in &done {
         let Some(d) = env.by_name(n) else { continue };
         decls += 1;
-        if let Kind::Induct { all, .. } = &d.kind {
-            if all[0] == n && !d.unsafe_ {
-                blocks.push(env.name(n));
-            }
+        if let Kind::Induct { all, .. } = &d.kind
+            && all[0] == n
+            && !d.unsafe_
+        {
+            blocks.push(env.name(n));
         }
         if matches!(d.kind, Kind::Axiom | Kind::Def { .. } | Kind::Thm { .. } | Kind::Opaque { .. }) {
             if !d.unsafe_ {
