@@ -614,11 +614,11 @@ pub fn merge(
 /// annotation where its line runs still fit the files, else its notes
 /// without the runs. Authors and times stay.
 pub fn rebase(store: &dyn Store, alg: &'static Algorithm, ours: &str, onto: &str) -> Result<Outcome> {
-    if reaches(store, onto, ours)? {
-        return Ok(Outcome::FastForward(onto.to_string()));
-    }
     if reaches(store, ours, onto)? {
         return Ok(Outcome::UpToDate);
+    }
+    if reaches(store, onto, ours)? {
+        return Ok(Outcome::FastForward(onto.to_string()));
     }
     let base = merge_base(store, ours, onto)?.ok_or_else(|| {
         Error::Diverged("the two histories share no commit, so there is nothing to merge from".to_string())

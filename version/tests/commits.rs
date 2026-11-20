@@ -219,6 +219,7 @@ fn a_rebase_replays_a_chain_and_a_merge_joins_two() {
     // The step's notes still fit, so the annotation is the same blob.
     assert_eq!(log[1].1.parents[&onto], step);
     assert_eq!(commits::rebase(&s, b3(), &tip, &onto).unwrap(), commits::Outcome::UpToDate);
+    assert_eq!(commits::rebase(&s, b3(), &tip, &tip).unwrap(), commits::Outcome::UpToDate);
     assert_eq!(commits::rebase(&s, b3(), &onto, &tip).unwrap(), commits::Outcome::FastForward(tip.clone()));
 
     // A merge of the two sides gives the same version, with both as parents.
