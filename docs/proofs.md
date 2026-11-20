@@ -100,14 +100,23 @@ Put `cas-prove` on the path, or in the directory `cas` is in.
 
 ## Cost
 
-Measured on a cloud machine, on the history of a thesis
-(4,550 commits, 88,620 blobs listed, 46.5 MB):
+Measured on a cloud machine with 4 cores, on the history of cas itself
+(168 commits, 1,478 blobs valid), 2026-11-20:
 
-- The first proof or check in a run takes about 8.4 seconds to set up.
-  `cas prove --all` and `cas verify --all` pay it once for every 256 commits.
-- After that a commit takes 0.2 to 0.3 seconds to prove and about 0.2 to
-  check.
-- A proof is 300 to 400 kilobytes.
+- The first proof or check in a run takes about 4.5 seconds to set up,
+  most of it building the BLAKE3 compression row. `cas prove --all` and
+  `cas verify --all` pay it once for every 256 commits.
+- After that a commit takes about 0.12 seconds to prove (0.15 at the 90th
+  percentile) and 0.02 to check. Of the 0.12, proving is 0.05; the rest is
+  reading the blobs, the witness and checking the proof made.
+- A proof is 320 to 380 kilobytes.
+- `cas prove --all` over the whole history: 27.5 s; `cas verify --all`:
+  10.4 s.
+
+The earlier figures, on the history of a thesis (4,550 commits, 88,620
+blobs listed, 46.5 MB), were 8.4 s to set up and 0.2 to 0.3 s per commit;
+most of a commit's time was the circuit's setup hashing the BLAKE3 table
+again, which a run now does once for each set of types.
 
 ## On a server
 
