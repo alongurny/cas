@@ -58,6 +58,16 @@ fn exit_codes() {
     assert_eq!((code, out.as_str()), (2, ""));
     assert!(err.contains("usage: cas [<option>...] <command>"));
     assert_eq!(cas(d, &["nope"]), (2, String::new(), "no command nope\n`cas help` lists the commands.\n".into()));
+    assert_eq!(cas(d, &["--nope", "log"]).0, 2);
+    // An option the command does not read, or a word past its last
+    // argument, is refused before anything runs.
+    for words in [&["log", "--nope"][..], &["log", "--author", "x"], &["ls", "a", "b"], &["checkout", "a", "b", "c"]] {
+        let (code, _, err) = cas(d, words);
+        assert_eq!(code, 2, "{words:?}");
+        assert!(err.starts_with(&format!("{} takes no ", words[0])) && err.contains("usage: "), "{err}");
+    }
+    let (code, _, err) = cas(d, &["commit", "nope"]);
+    assert_eq!((code, err.as_str()), (1, "nope is not a directory\n"));
     assert_eq!(cas(d, &["help", "nope"]).0, 2);
     assert_eq!(cas(d, &["completions", "tcsh"]).0, 1);
     let (code, _, err) = cas(d, &["commit"]);

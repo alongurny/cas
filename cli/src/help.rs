@@ -620,6 +620,89 @@ pub fn find(name: &str) -> Option<&'static Cmd> {
     Some(c)
 }
 
+/// The words of a form after its command, with a bracket group or a quoted
+/// argument as one word.
+fn form_words<'a>(form: &'a str, name: &str) -> Vec<&'a str> {
+    let (mut words, mut depth, mut quoted, mut start) = (Vec::new(), 0usize, false, 0);
+    for (i, ch) in form.char_indices() {
+        match ch {
+            '[' if !quoted => depth += 1,
+            ']' if !quoted => depth = depth.saturating_sub(1),
+            '\'' => quoted = !quoted,
+            ' ' if depth == 0 && !quoted => {
+                words.push(&form[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    words.push(&form[start..]);
+    words.retain(|w| !w.is_empty());
+    match words.iter().position(|w| *w == name) {
+        Some(i) => words.split_off(i + 1),
+        None => Vec::new(),
+    }
+}
+
+/// The most arguments any form of `c` takes; `None` when there is no bound.
+fn most_args(c: &Cmd) -> Option<usize> {
+    let mut most = 0;
+    for form in c.forms {
+        let mut n = 0;
+        let mut words = form_words(form, c.name).into_iter().peekable();
+        while let Some(w) = words.next() {
+            if w.starts_with("[--") {
+                continue;
+            }
+            if w.starts_with("--") {
+                words.next_if(|v| v.starts_with('<'));
+                continue;
+            }
+            if w.contains("...") {
+                return None;
+            }
+            n += 1;
+        }
+        most = most.max(n);
+    }
+    Some(most)
+}
+
+/// Refuses an option a command does not read and an argument past the last
+/// its forms take. `flags` are the options the general parser took, `rest`
+/// the command and its words. The forge and Lean commands read their own
+/// words and are not checked here.
+pub fn check_words(flags: &[String], rest: &[String]) -> Res<()> {
+    let Some(c) = rest.first().and_then(|n| find(n)) else { return Ok(()) };
+    if c.group == FORGE || c.group == LEAN {
+        return Ok(());
+    }
+    let name = &rest[0];
+    let refuse = |what: String| Err(format!("{what}\n{}", usage(name)));
+    let reads = |f: &str| c.opts.contains(&f) || OPTIONS.iter().any(|o| o.general && o.flag == f);
+    if let Some(f) = flags.iter().find(|f| !reads(f)) {
+        return refuse(format!("{name} takes no {f}"));
+    }
+    let mut args = 0;
+    let mut words = rest[1..].iter();
+    while let Some(w) = words.next() {
+        if w.starts_with("--") {
+            if !reads(w) {
+                return refuse(format!("{name} takes no {w}"));
+            }
+            if OPTIONS.iter().any(|o| o.flag == w && !o.value.is_empty()) {
+                words.next();
+            }
+            continue;
+        }
+        args += 1;
+        if most_args(c).is_some_and(|most| args > most) {
+            return refuse(format!("{name} takes no {w}"));
+        }
+    }
+    Ok(())
+}
+
 fn option(flag: &str) -> &'static Opt {
     OPTIONS.iter().find(|o| o.flag == flag).expect("a listed option")
 }

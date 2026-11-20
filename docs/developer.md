@@ -115,7 +115,9 @@ that stored blobs stay readable.
 1. Add it to `COMMANDS` in `cli/src/help.rs`: its forms, one line, the longer
    text, its options. New options go in `OPTIONS`, and their parsing in
    `parse` in `cli/src/main.rs`. Placeholders are lower case in angle
-   brackets.
+   brackets. The forms and `opts` are also what the command accepts:
+   `help::check_words` refuses an option it does not list and an argument
+   past the last one its forms take (`<path>...` takes any number).
 2. Run it from `cli/src/commits.rs` (and list it in `PORTED`, or `NO_HISTORY`
    when it needs no history).
 3. Test it end to end in `cli/tests/cli.rs`: the tests run the built program.

@@ -76,6 +76,11 @@ fn node_text(n: &Option<Node>) -> &'static str {
     }
 }
 
+/// `n` and the word for that many: `1 path`, `2 paths`.
+fn count(n: u64, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
 /// A time as `YYYY-MM-DD HH:MM` (UTC).
 fn date(t: u64) -> String {
     let (days, secs) = ((t / 86400) as i64, t % 86400);
@@ -103,6 +108,14 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
     let arg = |i: usize, what: &str| {
         a.rest.get(i).cloned().ok_or_else(|| format!("missing {what}\n{}", crate::help::usage(&a.rest[0])))
     };
+    // A directory to read from, which must be there.
+    let dir_arg = |i: usize| -> Res<String> {
+        let d = arg(i, "<dir>")?;
+        if !std::path::Path::new(&d).is_dir() {
+            return Err(format!("{d} is not a directory"));
+        }
+        Ok(d)
+    };
     let prefix = |i: usize| a.rest.get(i).map(|p| Path::new(p.as_str()).map_err(e)).transpose();
     if cas_version::head(s, name).map_err(e)?.is_some_and(|v| releases::is_release(&v)) {
         return run_release(a, s);
@@ -118,7 +131,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
     };
     match a.rest[0].as_str() {
         "commit" => {
-            let dir = arg(1, "<dir>")?;
+            let dir = dir_arg(1)?;
             let head = match &tip {
                 Some(t) => Some(commits::read(s, t).map_err(e)?.version()),
                 None => None,
@@ -182,7 +195,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             out!("{key}");
         }
         cmd @ ("status" | "reset" | "clean") => {
-            let dir = arg(1, "<dir>")?;
+            let dir = if cmd == "reset" { arg(1, "<dir>")? } else { dir_arg(1)? };
             if cmd == "status" && a.show_diff {
                 // Before the first commit, the diff from nothing.
                 let v = match &tip {
@@ -214,7 +227,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             // Kept as commits of their own in history stash/<history>:
             // each stash after the one before it.
             let pop = a.rest.get(1).is_some_and(|x| x == "pop");
-            let dir = arg(if pop { 2 } else { 1 }, "<dir>")?;
+            let dir = dir_arg(if pop { 2 } else { 1 })?;
             let stash = format!("stash/{name}");
             let kept = commits::tip(s, &stash).map_err(e)?;
             let base = at()?.1.version();
@@ -269,8 +282,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                     Node::File(_) => files += 1,
                 }
             }
-            let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-            out!("{}, {}", plural(dirs, "directory", "directories"), plural(files, "file", "files"));
+            out!("{}, {}", count(dirs, "directory", "directories"), count(files, "file", "files"));
         }
         "notes" => {
             let (_, c) = at()?;
@@ -364,7 +376,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             let dest = arg(1, "<dest>")?;
             let n = fs::checkout_indexed(s, &at()?.1.version(), prefix(2)?.as_ref(), dest.as_ref(), Some(&a.store))
                 .map_err(e)?;
-            out!("{n} paths written to {dest}");
+            out!("{} written to {dest}", count(n as u64, "path", "paths"));
         }
         "sparse" => {
             let dest = arg(1, "<dest>")?;
@@ -373,7 +385,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 return Err("sparse needs at least one <path>".into());
             }
             let n = fs::checkout_sparse(s, &at()?.1.version(), &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
-            out!("{n} paths written to {dest}");
+            out!("{} written to {dest}", count(n as u64, "path", "paths"));
         }
         cmd @ ("merge" | "rebase") => {
             let other = arg(1, if cmd == "merge" { "<other>" } else { "<onto>" })?;
@@ -548,7 +560,7 @@ fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
             let dest = arg(1, "<dest>")?;
             let prefix = a.rest.get(2).map(|p| Path::new(p.as_str()).map_err(e)).transpose()?;
             let n = fs::checkout_indexed(s, &version()?, prefix.as_ref(), dest.as_ref(), Some(&a.store)).map_err(e)?;
-            out!("{n} paths written to {dest}");
+            out!("{} written to {dest}", count(n as u64, "path", "paths"));
         }
         "sparse" => {
             let dest = arg(1, "<dest>")?;
@@ -557,7 +569,7 @@ fn run_release(a: &Args, s: &dyn Store) -> Res<()> {
                 return Err("sparse needs at least one <path>".into());
             }
             let n = fs::checkout_sparse(s, &version()?, &paths, dest.as_ref(), Some(&a.store)).map_err(e)?;
-            out!("{n} paths written to {dest}");
+            out!("{} written to {dest}", count(n as u64, "path", "paths"));
         }
         "manifest" => print_manifest(s, "release", &find(&a.node)?)?,
         cmd @ ("prove" | "verify") => {

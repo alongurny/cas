@@ -128,6 +128,9 @@ struct Args {
     ca: Option<String>,
     meta: String,
     rest: Vec<String>,
+    /// The options other than the general ones that `parse` took after the
+    /// command, so that it can refuse one it does not read.
+    flags: Vec<String>,
 }
 
 fn parse(mut argv: Vec<String>) -> Res<Args> {
@@ -154,9 +157,15 @@ fn parse(mut argv: Vec<String>) -> Res<Args> {
         ca: None,
         meta: ".cas-meta".into(),
         rest: Vec::new(),
+        flags: Vec::new(),
     };
     argv.reverse();
     while let Some(arg) = argv.pop() {
+        // Options before the command may be for any command, as a script
+        // that gives --author to all of them does; after it, only its own.
+        if !a.rest.is_empty() && help::OPTIONS.iter().any(|o| !o.general && o.flag == arg) && !a.flags.contains(&arg) {
+            a.flags.push(arg.clone());
+        }
         let mut value = |name: &str| argv.pop().ok_or(format!("{name} needs a value"));
         match arg.as_str() {
             "--store" => a.store = value("--store")?,
@@ -287,6 +296,7 @@ fn run(a: Args) -> Res<()> {
     if tool(&a)? {
         return Ok(());
     }
+    help::check_words(&a.flags, &a.rest)?;
     // A word that is no command is refused before a store is opened.
     let mut before = a.rest.iter().peekable();
     while before.next_if(|w| *w == "--json").is_some()
@@ -294,6 +304,9 @@ fn run(a: Args) -> Res<()> {
     {}
     let cmd = match before.next() {
         None => return Err(help::overview()),
+        Some(x) if x.starts_with('-') => {
+            return Err(format!("no option {x}\n`cas help` lists the options."));
+        }
         Some(x) if help::find(x).is_none() => {
             return Err(format!("no command {x}\n`cas help` lists the commands."));
         }
@@ -303,6 +316,9 @@ fn run(a: Args) -> Res<()> {
     // a store is made for nothing.
     if a.rest.len() < 2 && ["commit", "import-git", "pull", "serve", "access", "annotated"].contains(&cmd) {
         return Err(format!("missing {}\n{}", help::first_word(cmd), help::usage(cmd)));
+    }
+    if cmd == "commit" && !std::path::Path::new(&a.rest[1]).is_dir() {
+        return Err(format!("{} is not a directory", a.rest[1]));
     }
     // Only a command that writes makes a store directory.
     const MAKES: &[&str] = &["commit", "import-git", "pull", "serve", "access", "annotated"];
