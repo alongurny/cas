@@ -14,3 +14,5 @@ sources with cargo. Then:
 
 Built from cas `main` (lean-cli) and flock `cas`; the formats are in flock
 `docs/lean-bundle.md`.
+
+`BUILD` names the exact cas and flock commits and the rustc of this binary.
