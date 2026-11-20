@@ -882,7 +882,8 @@ pub fn man() -> String {
 
 /// Whether the option belongs after the command `c`.
 fn takes(c: &Cmd, o: &Opt) -> bool {
-    c.opts.contains(&o.flag)
+    // Every forge command reads --json and --project.
+    c.opts.contains(&o.flag) || (c.group == FORGE && ["--json", "--project"].contains(&o.flag))
 }
 
 /// The completion script for a shell.
@@ -905,6 +906,8 @@ pub fn completions(shell: &str) -> Res<String> {
                  echo $w\n                return 0\n        end\n    end\n    return 1\nend\n\
                  function __cas_no_command\n    not __cas_command >/dev/null\nend\n\
                  function __cas_using\n    test (__cas_command) = $argv[1] 2>/dev/null\nend\n\
+                 function __cas_second\n    set -l words (commandline -opc)\n    \
+                 test \"$words[-1]\" = (__cas_command)\nend\n\
                  function __cas_histories\n    command cas __histories 2>/dev/null\nend\n\
                  complete -c cas -f\n",
             );
@@ -949,7 +952,12 @@ pub fn completions(shell: &str) -> Res<String> {
             }
             for c in &listed {
                 if !c.subs.is_empty() {
-                    out.push_str(&format!("complete -c cas -n '__cas_using {}' -a '{}'\n", c.name, c.subs.join(" ")));
+                    // Its second word only right after the command.
+                    out.push_str(&format!(
+                        "complete -c cas -n '__cas_using {} && __cas_second' -a '{}'\n",
+                        c.name,
+                        c.subs.join(" ")
+                    ));
                 }
                 if c.words == Words::Path {
                     out.push_str(&format!("complete -c cas -n '__cas_using {}' -F\n", c.name));
@@ -964,14 +972,14 @@ pub fn completions(shell: &str) -> Res<String> {
         "bash" => {
             let mut out = String::from(
                 "# Completions of cas for bash, printed by `cas completions bash`.\n_cas() {\n    \
-                 local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]} cmd= i skip=0\n    \
+                 local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]} cmd= at=0 i skip=0\n    \
                  for ((i = 1; i < COMP_CWORD; i++)); do\n        if ((skip)); then skip=0; continue; fi\n        \
                  case ${COMP_WORDS[i]} in\n            ",
             );
             let valued: Vec<&str> = OPTIONS.iter().filter(|o| !o.value.is_empty()).map(|o| o.flag).collect();
             out.push_str(&valued.join("|"));
             out.push_str(
-                ") skip=1 ;;\n            -*) ;;\n            *) cmd=${COMP_WORDS[i]}; break ;;\n        esac\n    done\n    \
+                ") skip=1 ;;\n            -*) ;;\n            *) cmd=${COMP_WORDS[i]}; at=$i; break ;;\n        esac\n    done\n    \
                  case $prev in\n",
             );
             for o in OPTIONS.iter().filter(|o| !o.value.is_empty()) {
@@ -1006,7 +1014,8 @@ pub fn completions(shell: &str) -> Res<String> {
                 let subs = if c.subs.is_empty() {
                     String::new()
                 } else {
-                    format!("$(compgen -W '{}' -- \"$cur\") ", c.subs.join(" "))
+                    // Its second word only right after the command.
+                    format!("$( ((COMP_CWORD == at + 1)) && compgen -W '{}' -- \"$cur\") ", c.subs.join(" "))
                 };
                 let files = if c.words == Words::Path { "$(compgen -f -- \"$cur\")" } else { "" };
                 out.push_str(&format!("        {}) COMPREPLY=({subs}{files}) ;;\n", c.name));

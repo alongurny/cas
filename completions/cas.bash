@@ -1,12 +1,12 @@
 # Completions of cas for bash, printed by `cas completions bash`.
 _cas() {
-    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]} cmd= i skip=0
+    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]} cmd= at=0 i skip=0
     for ((i = 1; i < COMP_CWORD; i++)); do
         if ((skip)); then skip=0; continue; fi
         case ${COMP_WORDS[i]} in
             --store|--token-file|--ca|--meta|-j|-H|-n|--author|--notes|--annotate|--as|--tag|--change|--changelog|--from|--cert|--key|--max-body|--project|--root|--env|--budget|--slowest) skip=1 ;;
             -*) ;;
-            *) cmd=${COMP_WORDS[i]}; break ;;
+            *) cmd=${COMP_WORDS[i]}; at=$i; break ;;
         esac
     done
     case $prev in
@@ -63,26 +63,26 @@ _cas() {
         status) COMPREPLY=($(compgen -f -- "$cur")) ;;
         reset) COMPREPLY=($(compgen -f -- "$cur")) ;;
         clean) COMPREPLY=($(compgen -f -- "$cur")) ;;
-        stash) COMPREPLY=($(compgen -W 'pop' -- "$cur") $(compgen -f -- "$cur")) ;;
+        stash) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'pop' -- "$cur") $(compgen -f -- "$cur")) ;;
         watch) COMPREPLY=($(compgen -f -- "$cur")) ;;
         checkout) COMPREPLY=($(compgen -f -- "$cur")) ;;
         sparse) COMPREPLY=($(compgen -f -- "$cur")) ;;
         push) COMPREPLY=($(compgen -f -- "$cur")) ;;
         pull) COMPREPLY=($(compgen -f -- "$cur")) ;;
         import-git) COMPREPLY=($(compgen -f -- "$cur")) ;;
-        annotated) COMPREPLY=($(compgen -W 'make show' -- "$cur") $(compgen -f -- "$cur")) ;;
+        annotated) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'make show' -- "$cur") $(compgen -f -- "$cur")) ;;
         serve) COMPREPLY=($(compgen -f -- "$cur")) ;;
-        access) COMPREPLY=($(compgen -W 'show user grant revoke' -- "$cur") ) ;;
-        lean) COMPREPLY=($(compgen -W 'import prove check show axioms report' -- "$cur") $(compgen -f -- "$cur")) ;;
-        account) COMPREPLY=($(compgen -W 'edit' -- "$cur") ) ;;
-        token) COMPREPLY=($(compgen -W 'list make revoke' -- "$cur") ) ;;
-        org) COMPREPLY=($(compgen -W 'create member' -- "$cur") ) ;;
-        project) COMPREPLY=($(compgen -W 'create show delete fork edit member protect gate label webhook runner' -- "$cur") ) ;;
-        proposal) COMPREPLY=($(compgen -W 'list open show edit close reopen approve merge thread reply resolve promote' -- "$cur") ) ;;
-        issue) COMPREPLY=($(compgen -W 'list open show comment edit close reopen label' -- "$cur") ) ;;
-        release) COMPREPLY=($(compgen -W 'list publish archive' -- "$cur") ) ;;
-        mirror) COMPREPLY=($(compgen -W 'add pull' -- "$cur") ) ;;
-        completions) COMPREPLY=($(compgen -W 'fish bash zsh' -- "$cur") ) ;;
+        access) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'show user grant revoke' -- "$cur") ) ;;
+        lean) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'import prove check show axioms report' -- "$cur") $(compgen -f -- "$cur")) ;;
+        account) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'edit' -- "$cur") ) ;;
+        token) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'list make revoke' -- "$cur") ) ;;
+        org) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'create member' -- "$cur") ) ;;
+        project) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'create show delete fork edit member protect gate label webhook runner' -- "$cur") ) ;;
+        proposal) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'list open show edit close reopen approve merge thread reply resolve promote' -- "$cur") ) ;;
+        issue) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'list open show comment edit close reopen label' -- "$cur") ) ;;
+        release) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'list publish archive' -- "$cur") ) ;;
+        mirror) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'add pull' -- "$cur") ) ;;
+        completions) COMPREPLY=($( ((COMP_CWORD == at + 1)) && compgen -W 'fish bash zsh' -- "$cur") ) ;;
     esac
 }
 complete -o filenames -F _cas cas

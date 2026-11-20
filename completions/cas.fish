@@ -25,6 +25,10 @@ end
 function __cas_using
     test (__cas_command) = $argv[1] 2>/dev/null
 end
+function __cas_second
+    set -l words (commandline -opc)
+    test "$words[-1]" = (__cas_command)
+end
 function __cas_histories
     command cas __histories 2>/dev/null
 end
@@ -110,8 +114,8 @@ complete -c cas -n 'contains -- (__cas_command) serve' -l key -r -F -d 'the PEM 
 complete -c cas -n 'contains -- (__cas_command) serve' -l open -d 'serve to anyone, without an access policy'
 complete -c cas -n 'contains -- (__cas_command) serve' -l prove -d 'prove each history of commits as it moves (needs cas-prove)'
 complete -c cas -n 'contains -- (__cas_command) serve' -l max-body -x -d 'the largest request body accepted (default 64 MiB)'
-complete -c cas -l json -d 'print the forge\'s answer as JSON'
-complete -c cas -l project -x -d 'the project on the forge, when --store does not name it'
+complete -c cas -n 'contains -- (__cas_command) signup login whoami password account token org projects project histories blame checks proposal issue release mirror events' -l json -d 'print the forge\'s answer as JSON'
+complete -c cas -n 'contains -- (__cas_command) signup login whoami password account token org projects project histories blame checks proposal issue release mirror events' -l project -x -d 'the project on the forge, when --store does not name it'
 complete -c cas -n 'contains -- (__cas_command) lean' -l root -r -F -d 'the Lake project whose Lean exports the modules'
 complete -c cas -n 'contains -- (__cas_command) lean' -l env -x -d 'the Lean environment to work in (default: default)'
 complete -c cas -n 'contains -- (__cas_command) lean' -l closure -d 'also everything the named declarations rest on'
@@ -122,7 +126,7 @@ complete -c cas -n '__cas_using commit' -F
 complete -c cas -n '__cas_using status' -F
 complete -c cas -n '__cas_using reset' -F
 complete -c cas -n '__cas_using clean' -F
-complete -c cas -n '__cas_using stash' -a 'pop'
+complete -c cas -n '__cas_using stash && __cas_second' -a 'pop'
 complete -c cas -n '__cas_using stash' -F
 complete -c cas -n '__cas_using watch' -F
 complete -c cas -n '__cas_using checkout' -F
@@ -130,21 +134,21 @@ complete -c cas -n '__cas_using sparse' -F
 complete -c cas -n '__cas_using push' -F
 complete -c cas -n '__cas_using pull' -F
 complete -c cas -n '__cas_using import-git' -F
-complete -c cas -n '__cas_using annotated' -a 'make show'
+complete -c cas -n '__cas_using annotated && __cas_second' -a 'make show'
 complete -c cas -n '__cas_using annotated' -F
 complete -c cas -n '__cas_using serve' -F
-complete -c cas -n '__cas_using access' -a 'show user grant revoke'
-complete -c cas -n '__cas_using lean' -a 'import prove check show axioms report'
+complete -c cas -n '__cas_using access && __cas_second' -a 'show user grant revoke'
+complete -c cas -n '__cas_using lean && __cas_second' -a 'import prove check show axioms report'
 complete -c cas -n '__cas_using lean' -F
-complete -c cas -n '__cas_using account' -a 'edit'
-complete -c cas -n '__cas_using token' -a 'list make revoke'
-complete -c cas -n '__cas_using org' -a 'create member'
-complete -c cas -n '__cas_using project' -a 'create show delete fork edit member protect gate label webhook runner'
-complete -c cas -n '__cas_using proposal' -a 'list open show edit close reopen approve merge thread reply resolve promote'
-complete -c cas -n '__cas_using issue' -a 'list open show comment edit close reopen label'
-complete -c cas -n '__cas_using release' -a 'list publish archive'
-complete -c cas -n '__cas_using mirror' -a 'add pull'
-complete -c cas -n '__cas_using completions' -a 'fish bash zsh'
+complete -c cas -n '__cas_using account && __cas_second' -a 'edit'
+complete -c cas -n '__cas_using token && __cas_second' -a 'list make revoke'
+complete -c cas -n '__cas_using org && __cas_second' -a 'create member'
+complete -c cas -n '__cas_using project && __cas_second' -a 'create show delete fork edit member protect gate label webhook runner'
+complete -c cas -n '__cas_using proposal && __cas_second' -a 'list open show edit close reopen approve merge thread reply resolve promote'
+complete -c cas -n '__cas_using issue && __cas_second' -a 'list open show comment edit close reopen label'
+complete -c cas -n '__cas_using release && __cas_second' -a 'list publish archive'
+complete -c cas -n '__cas_using mirror && __cas_second' -a 'add pull'
+complete -c cas -n '__cas_using completions && __cas_second' -a 'fish bash zsh'
 complete -c cas -n '__cas_using help' -a 'commit status reset clean stash watch checkout sparse log ls diff notes manifest prove verify summary path-log last-modified merge-base merge rebase push pull publish compatible import-git gc fsck objects show annotated serve access lean signup login whoami password account token org projects project histories blame checks proposal issue release mirror events help completions version'
 complete -c cas -n '__cas_using merge' -a '(__cas_histories)'
 complete -c cas -n '__cas_using rebase' -a '(__cas_histories)'
