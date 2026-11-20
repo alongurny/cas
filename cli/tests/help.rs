@@ -66,6 +66,14 @@ fn exit_codes() {
         assert_eq!(code, 2, "{words:?}");
         assert!(err.starts_with(&format!("{} takes no ", words[0])) && err.contains("usage: "), "{err}");
     }
+    // A command that is only its second words needs one, before any store
+    // or forge is asked.
+    let (code, _, err) = cas(d, &["issue"]);
+    assert_eq!(code, 2);
+    assert!(err.starts_with("issue needs one of list, open, "), "{err}");
+    let (code, _, err) = cas(d, &["annotated", "nope", "x"]);
+    assert_eq!(code, 2);
+    assert!(err.starts_with("annotated has no nope: make, show\nusage: "), "{err}");
     let (code, _, err) = cas(d, &["commit", "nope"]);
     assert_eq!((code, err.as_str()), (1, "nope is not a directory\n"));
     assert_eq!(cas(d, &["help", "nope"]).0, 2);

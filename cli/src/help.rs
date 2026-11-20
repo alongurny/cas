@@ -674,11 +674,39 @@ fn most_args(c: &Cmd) -> Option<usize> {
 /// words and are not checked here.
 pub fn check_words(flags: &[String], rest: &[String]) -> Res<()> {
     let Some(c) = rest.first().and_then(|n| find(n)) else { return Ok(()) };
+    let name = &rest[0];
+    let refuse = |what: String| Err(format!("{what}\n{}", usage(name)));
+    // A command whose every form starts with one of its second words needs
+    // one of them.
+    let needs_sub = !c.subs.is_empty()
+        && c.name == name
+        && c.forms
+            .iter()
+            .all(|f| form_words(f, c.name).first().is_some_and(|w| w.split('|').all(|x| c.subs.contains(&x))));
+    if needs_sub {
+        let valued = |w: &str| OPTIONS.iter().any(|o| o.flag == w && !o.value.is_empty());
+        let mut words = rest[1..].iter();
+        let mut sub = None;
+        while let Some(w) = words.next() {
+            if w.starts_with("--") {
+                if valued(w) {
+                    words.next();
+                }
+                continue;
+            }
+            sub = Some(w);
+            break;
+        }
+        let list = c.subs.join(", ");
+        match sub {
+            None => return refuse(format!("{name} needs one of {list}")),
+            Some(w) if !c.subs.contains(&w.as_str()) => return refuse(format!("{name} has no {w}: {list}")),
+            _ => {}
+        }
+    }
     if c.group == FORGE || c.group == LEAN {
         return Ok(());
     }
-    let name = &rest[0];
-    let refuse = |what: String| Err(format!("{what}\n{}", usage(name)));
     let reads = |f: &str| c.opts.contains(&f) || OPTIONS.iter().any(|o| o.general && o.flag == f);
     if let Some(f) = flags.iter().find(|f| !reads(f)) {
         return refuse(format!("{name} takes no {f}"));
