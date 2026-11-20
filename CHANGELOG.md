@@ -56,7 +56,9 @@ push, pull, publish, compatible and import-git to join and share; gc, fsck,
 objects, show, annotated, serve and access for the store; and the forge's
 own commands (accounts, projects, proposals, issues, releases, mirrors).
 One command table prints the help, the manual page,
-docs/commands.md and completions for bash, fish and zsh. The Nix flake
+docs/commands.md and completions for bash, fish and zsh, and decides what
+each command accepts: an option or argument a command does not take is
+refused with its usage, not ignored. The Nix flake
 installs both programs, the manual page and the completions.
 
 ### The forge
