@@ -324,3 +324,27 @@ fn a_wrong_stored_form_is_refused() {
     assert!(err.contains("wrong bytes"), "{err}");
     assert!(head(&*dst, "main").unwrap().is_none());
 }
+
+/// A blob that is not valid in the format it is reached as is never
+/// written: the copy checks each blob (parse, then print gives its bytes)
+/// before it writes it, and the history does not move.
+#[test]
+fn a_blob_invalid_in_its_format_is_refused() {
+    for dst in [store(), remote()] {
+        let src = store();
+        let mut m = BTreeMap::new();
+        let ok = put(&*src, b3(), "raw", b"fine").unwrap();
+        m.insert(Path::new("a").unwrap(), Node::File(ok));
+        // A link target holding NUL, written past `put`'s check.
+        let bad_key = cas_version::write_blob(&*src, b3(), b"to\0where").unwrap();
+        let bad = View::new(formats::by_alias("symlink").unwrap().id(), bad_key.clone()).unwrap();
+        m.insert(Path::new("l").unwrap(), Node::File(bad));
+        let root = build(&*src, b3(), formats::by_alias("directory").unwrap(), &m).unwrap();
+        common::commit(&*src, "main", &root);
+        let err = sync::push(&*src, &*dst, "main", "main").unwrap_err();
+        assert!(matches!(err, Error::Malformed { ref key, .. } if *key == bad_key), "{err}");
+        assert!(head(&*dst, "main").unwrap().is_none());
+        assert!(!sync::has(&*dst, &bad_key).unwrap());
+        assert!(!sync::has(&*dst, root.key()).unwrap());
+    }
+}

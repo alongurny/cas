@@ -129,6 +129,17 @@ fn children_of_light(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<
     }
 }
 
+/// [`children_of_light`] of a blob that is first checked in its format:
+/// the copy writes only blobs that parse and print back to their bytes, so
+/// a store never receives a blob that is invalid in the format it is
+/// reached as. Unknown formats are opaque and not checked.
+fn checked_children(r: &View, bytes: &[u8], skip: &DigestSet) -> Result<Option<Vec<View>>> {
+    if let Some(f) = r.known_format() {
+        f.check(r.key(), bytes)?;
+    }
+    children_of_light(r, bytes, skip)
+}
+
 fn wrong_bytes(key: &str) -> Error {
     Error::Store(CoreError::Unavailable(format!("the source sent wrong bytes for {key}")))
 }
@@ -483,7 +494,7 @@ impl<'a> Copier<'a> {
                 if let Some(f) = form {
                     forms.insert(r.key().to_string(), f);
                 }
-                let kids = children_of_light(&r, &bytes, &self.done).map_err(|e| {
+                let kids = checked_children(&r, &bytes, &self.done).map_err(|e| {
                     // Unreadable as sent: report bytes that are not the key's.
                     match cas_core::key::classify(r.key()) {
                         Some(cas_core::key::Parsed::Blob { alg, .. })

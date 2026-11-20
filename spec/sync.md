@@ -28,6 +28,11 @@ source, so a clone costs round trips in proportion to the depth of its trees, no
 - **Stop at what is there.** Because of the invariant, the walk stops descending at the first blob
   the destination already has. Copying one new commit on top of a synced history costs the new blobs
   (one per changed directory, plus files and the commit), not the size of the repository.
+- **Every blob is checked before it is written.** A blob reached as a known format is written
+  only if it is valid in that format: parsing it succeeds and printing the result gives the same
+  bytes. Otherwise the copy stops with `malformed`, nothing above the blob is written and the
+  history does not move. A blob of an unknown format is opaque and copied as it is. The
+  destination checks each value against its key as it writes it.
 - **Formats travel too.** For each format seen, its format object and spec are copied as well, so
   the destination can describe what it holds.
 - **Interruptions are safe.** An interrupted copy leaves only complete subtrees behind (often
@@ -65,4 +70,6 @@ the result and creating its `derived/F/X` name with expect-absent.
 - that diverged and rewritten histories are refused and left unchanged, and can go under another
   name;
 - that interrupted copies leave walkable subtrees and complete when run again;
+- that a blob invalid in its format is not written, nor anything above it, and the history does
+  not move;
 - that `has` does not match prefixes.
