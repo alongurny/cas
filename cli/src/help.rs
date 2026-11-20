@@ -709,7 +709,13 @@ pub fn check_words(flags: &[String], rest: &[String]) -> Res<()> {
     if c.group == FORGE || c.group == LEAN {
         return Ok(());
     }
-    let reads = |f: &str| c.opts.contains(&f) || OPTIONS.iter().any(|o| o.general && o.flag == f);
+    // serve's --insecure-http is for benchmarks only and not listed; serve
+    // itself says so in a build without the feature bench-insecure.
+    let reads = |f: &str| {
+        c.opts.contains(&f)
+            || OPTIONS.iter().any(|o| o.general && o.flag == f)
+            || (c.name == "serve" && f == "--insecure-http")
+    };
     if let Some(f) = flags.iter().find(|f| !reads(f)) {
         return refuse(format!("{name} takes no {f}"));
     }
@@ -1134,6 +1140,15 @@ pub fn completions(shell: &str) -> Res<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// serve's benchmark-only --insecure-http is not refused as unknown,
+    /// so a bench-insecure build can serve plain HTTP.
+    #[test]
+    fn serve_takes_insecure_http() {
+        let words = |w: &[&str]| w.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert!(check_words(&[], &words(&["serve", "127.0.0.1:0", "--open", "--insecure-http"])).is_ok());
+        assert!(check_words(&[], &words(&["log", "--insecure-http"])).is_err());
+    }
 
     /// Every command the program runs is in the table, with options that exist.
     #[test]
