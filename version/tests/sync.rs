@@ -348,3 +348,42 @@ fn a_blob_invalid_in_its_format_is_refused() {
         assert!(!sync::has(&*dst, root.key()).unwrap());
     }
 }
+
+/// A store served with a [`sync::Checker`] refuses to move a history to a
+/// view that reaches a blob invalid in its format, even from a client that
+/// writes the blobs itself; good pushes go through.
+#[test]
+fn a_served_store_refuses_a_history_with_an_invalid_blob() {
+    let core = CoreStore::with_check(
+        MemBackend::new(),
+        Arc::new(AllowAll),
+        Policy::permissive(),
+        Arc::new(sync::Checker::new()),
+    );
+    let (tls, ca) = cas_core::server::self_signed();
+    let server =
+        Server::start(core, "127.0.0.1:0", 8, Arc::new(|_: &cas_core::server::Request| Who::anonymous()), tls).unwrap();
+    let dst: Arc<dyn Store> = Arc::new(HttpStore::new(server.url()).unwrap().trusting(&ca).unwrap());
+
+    let src = store();
+    let root = big(&*src);
+    common::commit(&*src, "main", &root);
+    assert_eq!(sync::push(&*src, &*dst, "main", "main").unwrap().0, Outcome::Created);
+    let next = edit(&*src, &root, "d1/f1", "changed");
+    common::commit(&*src, "main", &next);
+    assert_eq!(sync::push(&*src, &*dst, "main", "main").unwrap().0, Outcome::FastForward);
+
+    // A client that skips the copy's checks: every blob written by hand.
+    let mut m = BTreeMap::new();
+    let bad_key = cas_version::write_blob(&*src, b3(), b"to\0where").unwrap();
+    let bad = View::new(formats::by_alias("symlink").unwrap().id(), bad_key.clone()).unwrap();
+    m.insert(Path::new("l").unwrap(), Node::File(bad));
+    let tree = build(&*src, b3(), formats::by_alias("directory").unwrap(), &m).unwrap();
+    for k in [&bad_key, tree.key()] {
+        dst.write(k, &src.read(k).unwrap().unwrap(), &Expect::Absent).unwrap();
+    }
+    let err = dst.write("other", tree.to_string().as_bytes(), &Expect::Absent).unwrap_err();
+    assert!(matches!(err, cas_core::Error::Refused { ref reason, .. } if reason == "invalid-blob"), "{err:?}");
+    assert!(head(&*dst, "other").unwrap().is_none());
+    Box::leak(Box::new(server));
+}

@@ -382,7 +382,8 @@ pub const COMMANDS: &[Cmd] = &[
             &["serve <addr> --cert <file> --key <file> [--open] [--prove] [--max-body <bytes>]"],
             "serve the store over HTTPS",
             "HTTPS is the only protocol. Requests are decided by the access policy in --meta, \
-             unless --open serves to anyone. With --prove, each history of commits is proven as it \
+             unless --open serves to anyone. A history moves only to a commit whose \
+             blobs are all valid in their formats; any other is refused. With --prove, each history of commits is proven as it \
              moves, as `prove --all` does, so that those who fetch from it can `verify --from` it.",
         )
     },

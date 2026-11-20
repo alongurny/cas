@@ -175,10 +175,18 @@ enum Kind {
     Var,
 }
 
+/// What a store checks before a variable takes a new view, beyond its
+/// syntax: the core knows no formats, so a layer above it says whether the
+/// blobs the view reaches are valid. A refusal leaves the variable as it was.
+pub trait VarCheck: Send + Sync {
+    fn check(&self, backend: &dyn Backend, name: &str, view: &[u8]) -> Result<()>;
+}
+
 pub struct CoreStore {
     backend: Box<dyn Backend>,
     gate: Arc<dyn Gate>,
     policy: Policy,
+    check: Option<Arc<dyn VarCheck>>,
 }
 
 impl CoreStore {
@@ -187,7 +195,17 @@ impl CoreStore {
     }
 
     pub fn with_gate(backend: impl Backend + 'static, gate: Arc<dyn Gate>, policy: Policy) -> Arc<CoreStore> {
-        Arc::new(CoreStore { backend: Box::new(backend), gate, policy })
+        Arc::new(CoreStore { backend: Box::new(backend), gate, policy, check: None })
+    }
+
+    /// A store that runs `check` before each variable write it would make.
+    pub fn with_check(
+        backend: impl Backend + 'static,
+        gate: Arc<dyn Gate>,
+        policy: Policy,
+        check: Arc<dyn VarCheck>,
+    ) -> Arc<CoreStore> {
+        Arc::new(CoreStore { backend: Box::new(backend), gate, policy, check: Some(check) })
     }
 
     pub fn session(self: &Arc<Self>, who: Who) -> Session {
@@ -265,6 +283,9 @@ impl CoreStore {
             Kind::Var => {
                 if !is_view(value) {
                     return Err(Error::Invalid(Invalid::View));
+                }
+                if let Some(c) = &self.check {
+                    c.check(&*self.backend, key, value)?;
                 }
                 if self.backend.cas_var(key, expect, Some(value))? { Ok(()) } else { Err(Error::Conflict) }
             }

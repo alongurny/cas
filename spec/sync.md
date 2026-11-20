@@ -57,6 +57,13 @@ must keep it too, or a sync may skip a subtree it believes is present.
   merges) and pushes again, or pushes under another name; the copied blobs
   stay useful either way.
 
+A served store checks what a client sends the same way, since a client may skip the copy's
+checks: before a variable takes a new view, the server copies the view into the set of blobs it
+has already checked (`sync::Checker`), checking each blob it has not seen. A view that reaches a
+blob invalid in its format, or a missing one, is `refused` with reason `invalid-blob`, and the
+variable keeps its value. The set is kept in memory, so after a restart the first move of each
+history checks all of it, and later moves check only what they bring.
+
 Pulling is a push in the other direction. Derived results can be synced the same way, by copying
 the result and creating its `derived/F/X` name with expect-absent.
 

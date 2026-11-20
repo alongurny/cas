@@ -546,9 +546,11 @@ fn run(a: Args) -> Res<()> {
                 commits::prover()?;
             }
             let backend = DiskBackend::open(&a.store).map_err(e)?;
+            // A history moves only to a view whose blobs are all valid.
+            let checker = Arc::new(cas_version::sync::Checker::new());
             let server = if a.rest.iter().any(|x| x == "--open") {
                 eprintln!("serving without access control");
-                let core = CoreStore::new(backend, AllowAll, Policy::permissive());
+                let core = CoreStore::with_check(backend, Arc::new(AllowAll), Policy::permissive(), checker.clone());
                 Server::start_with_max_body(core, &addr, 8, Arc::new(|_: &Request| Who::anonymous()), tls, max_body)
             } else {
                 let meta = open(&a.meta, Remote { token: None, ..remote })?;
@@ -556,7 +558,8 @@ fn run(a: Args) -> Res<()> {
                     eprintln!("no policy in {}: every request is denied (see `cas access`)", a.meta);
                 }
                 let gate = Access::new(meta);
-                let core = CoreStore::new(backend, gate.clone(), Policy::permissive());
+                let core =
+                    CoreStore::with_check(backend, Arc::new(gate.clone()), Policy::permissive(), checker.clone());
                 Server::start_with_max_body(core, &addr, 8, gate.authenticate(), tls, max_body)
             }
             .map_err(e)?;

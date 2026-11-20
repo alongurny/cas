@@ -231,7 +231,7 @@ Store or print a text with a note on each line.
 \fBcas\fR serve <addr> \-\-cert <file> \-\-key <file> [\-\-open] [\-\-prove] [\-\-max\-body <bytes>]
 Serve the store over HTTPS.
 .IP
-HTTPS is the only protocol. Requests are decided by the access policy in \-\-meta, unless \-\-open serves to anyone. With \-\-prove, each history of commits is proven as it moves, as `prove \-\-all` does, so that those who fetch from it can `verify \-\-from` it.
+HTTPS is the only protocol. Requests are decided by the access policy in \-\-meta, unless \-\-open serves to anyone. A history moves only to a commit whose blobs are all valid in their formats; any other is refused. With \-\-prove, each history of commits is proven as it moves, as `prove \-\-all` does, so that those who fetch from it can `verify \-\-from` it.
 .IP
 \fB\-\-cert\fR <file>: the PEM certificate chain to serve with
 .IP

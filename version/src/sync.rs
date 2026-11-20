@@ -608,3 +608,84 @@ pub fn push(src: &dyn Store, dst: &dyn Store, from: &str, to: &str) -> Result<(O
         Err(e) => Err(e.into()),
     }
 }
+
+/// A [`cas_core::VarCheck`] for a served store: a variable takes a new view
+/// only when every blob the view reaches is valid in its format. It is a
+/// copy from the store into the set of blobs already checked, so each blob
+/// is checked once and a move checks only what it brings. The set lives in
+/// memory: the first move of each history after a start checks it whole.
+#[derive(Default)]
+pub struct Checker {
+    checked: std::sync::Mutex<BTreeSet<String>>,
+}
+
+impl Checker {
+    pub fn new() -> Checker {
+        Checker::default()
+    }
+}
+
+impl cas_core::VarCheck for Checker {
+    fn check(&self, backend: &dyn cas_core::Backend, _name: &str, view: &[u8]) -> cas_core::Result<()> {
+        let refuse = |m: String| CoreError::refused("invalid-blob", m);
+        let view = std::str::from_utf8(view).ok().and_then(|s| View::parse(s).ok());
+        let Some(view) = view else { return Ok(()) };
+        match copy(&Held(backend), &Checked(self), &view) {
+            Ok(_) => Ok(()),
+            Err(e @ (Error::Malformed { .. } | Error::Missing(_))) => Err(refuse(e.to_string())),
+            Err(Error::Store(e)) => Err(e),
+            Err(e) => Err(refuse(e.to_string())),
+        }
+    }
+}
+
+/// The blobs a backend holds, read as a store (the source of the check).
+struct Held<'a>(&'a dyn cas_core::Backend);
+
+impl Store for Held<'_> {
+    fn read(&self, key: &str) -> cas_core::Result<Option<Vec<u8>>> {
+        Ok(self.0.get(key)?)
+    }
+    fn write(&self, _: &str, _: &[u8], _: &Expect) -> cas_core::Result<()> {
+        Err(CoreError::Unavailable("read only".into()))
+    }
+    fn remove(&self, _: &str, _: &Expect) -> cas_core::Result<()> {
+        Err(CoreError::Unavailable("read only".into()))
+    }
+    fn list(&self, span: &Span) -> cas_core::Result<cas_core::ListPage> {
+        Ok(cas_core::ListPage { keys: self.0.list(span, 1000)?, rest: None })
+    }
+}
+
+/// The blobs checked so far, as a store a copy writes to (the destination
+/// of the check). A write records the key after checking it against its
+/// value; nothing is stored.
+struct Checked<'a>(&'a Checker);
+
+impl Store for Checked<'_> {
+    fn read(&self, _: &str) -> cas_core::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn write(&self, key: &str, value: &[u8], _: &Expect) -> cas_core::Result<()> {
+        if let Some(cas_core::key::Parsed::Blob { alg, .. }) = cas_core::key::classify(key)
+            && cas_core::algo::lookup(alg).is_some_and(|a| a.key(value) != key)
+        {
+            return Err(CoreError::Invalid(cas_core::Invalid::HashMismatch));
+        }
+        self.0.checked.lock().unwrap().insert(key.to_string());
+        Ok(())
+    }
+    fn remove(&self, _: &str, _: &Expect) -> cas_core::Result<()> {
+        Ok(())
+    }
+    fn list(&self, span: &Span) -> cas_core::Result<cas_core::ListPage> {
+        let set = self.0.checked.lock().unwrap();
+        let from = span.from.as_deref().map(|f| String::from_utf8_lossy(f).into_owned()).unwrap_or_default();
+        let keys = set.range(from..).take_while(|k| span.contains(k.as_bytes())).take(1000).cloned().collect();
+        Ok(cas_core::ListPage { keys, rest: None })
+    }
+    fn has_many(&self, keys: &[String]) -> cas_core::Result<Vec<bool>> {
+        let set = self.0.checked.lock().unwrap();
+        Ok(keys.iter().map(|k| set.contains(k)).collect())
+    }
+}
