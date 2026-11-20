@@ -89,6 +89,13 @@ impl Source for Shared {
     }
 }
 
+/// A builder that cites env's declarations.
+pub fn builder(env: &Arc<Env>) -> Builder {
+    let mut b = Builder::new();
+    b.source = Some(std::rc::Rc::new(Shared(env.clone())));
+    b
+}
+
 /// The names of an inductive block's recursors, in the order the builder
 /// takes them: one per type, then Lean's `rec_1`, `rec_2`, ... of a nested
 /// block.

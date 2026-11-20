@@ -89,7 +89,7 @@ fn kind_no(k: DeclKind) -> u8 {
     }
 }
 
-fn dump(t: &Derivation, goal: Option<&Goal>, own: &Key, order: &dyn Fn(&Key) -> i64) -> String {
+pub fn dump(t: &Derivation, goal: Option<&Goal>, own: &Key, order: &dyn Fn(&Key) -> i64) -> String {
     let mut out = String::new();
     let mut lv = Canon::new();
     for l in &t.levels {

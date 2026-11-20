@@ -53,9 +53,11 @@ The file is the 16 bytes `cas-lean-bundle2` followed by the zstd compression of 
 encoding of `Bundle` (variable-length integers, as `unit::encode`). Format 1 (`cas-lean-bundle1`)
 is the flock file of a succinct proof alone.
 
-## Known limit of short evidence
+## How short evidence is tied to the text
 
-The succinct proof's statement names the declarations it checks by their keys, which are hashes of
-their **names**. Until its circuit receives the declarations' terms from the verifier (in progress),
-a `Short` unit is checked to be the name of a declaration the circuit accepted, not that that
-declaration is the one in `decls`. The verifier says so for every short unit.
+The succinct proof names the declarations it checks by keys, hashes of their names. Its statement
+also carries facts (flock `docs/lean-bundle.md`, "What the declarations are"): every declaration
+the cone uses, with its type, value and recursor rules as terms. The verifier turns `decls` into
+derivation rows (`bundle::decl_rows`) and refuses unless every declaration of the facts is one of
+the bundle's, the same by structure. A succinct proof in the older format 1 has no facts; the
+verifier says that its short units are then bound by name only.

@@ -100,6 +100,8 @@ fn main() -> ExitCode {
     let r = match args.first().map(String::as_str) {
         Some("verify") if args.len() >= 2 => verify(&args[1], &args[2..]),
         Some("prove") => prove(&args[1..]),
+        Some("census") if args.len() == 2 => census(&args[1]),
+        Some("facts-selftest") if args.len() == 2 => facts_selftest(&args[1]),
         Some("--version") => {
             println!("cas-lean {}", env!("CARGO_PKG_VERSION"));
             Ok(true)
@@ -114,6 +116,41 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The bundle's declarations as the shared side of a cone: its facts must
+/// check against the declarations (a test of the comparison).
+fn facts_selftest(bundle: &str) -> Result<bool, String> {
+    let b = read_bundle(&fs::read(bundle).map_err(|e| e.to_string())?)?;
+    let mut env = Env::default();
+    for t in &b.decls {
+        env.absorb(t)?;
+    }
+    let t = cas_lean::bundle::decl_rows(&std::sync::Arc::new(env))?;
+    let text = lean_dump::dump(&t, None, &[0u8; 32], &|_| 0);
+    let mut cone = flock_prover::lean_rows::Cone::new();
+    let mut batch = flock_prover::lean_rows::Rows::default();
+    cone.add(flock_prover::lean_rows::Rows::parse(&text)?, &mut batch)?;
+    let g = cone.finish();
+    let (c, _) = flock_prover::lean_rows::LeanCircuit::build_side(
+        &g,
+        &flock_prover::lean_rows::Rows::default(),
+        flock_prover::lean_rows::Side::Shared,
+        flock_prover::lean_rows::SHARED_BASE,
+        &Default::default(),
+    )?;
+    let ok = bound_to_text(&b, &c.stmt_facts)?;
+    println!("{} facts; {ok:?}", c.stmt_facts.len());
+    Ok(true)
+}
+
+/// The size of a statement binding a cone's declarations to their text.
+fn census(cone: &str) -> Result<bool, String> {
+    let bytes = fs::read(cone).map_err(|e| format!("{cone}: {e}"))?;
+    let g: flock_prover::lean_rows::Rows = bincode::deserialize(&bytes).map_err(|e| e.to_string())?;
+    let (all, stmt, decls) = g.statement_census();
+    println!("{all} term rows, {stmt} reached from types, non-theorem values and rules; {decls} declarations");
+    Ok(true)
 }
 
 fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
@@ -164,7 +201,19 @@ fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
             println!("REFUSED: the succinct proof does not check {n}");
             return Ok(false);
         }
-        short = Some((fb, v));
+        // What the succinct proof's declarations are: the bundle's.
+        let bound = if fb.statement.facts.is_empty() {
+            None
+        } else {
+            match bound_to_text(&b, &fb.statement.facts) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    println!("REFUSED: the succinct proof's declarations are not the bundle's: {e}");
+                    return Ok(false);
+                }
+            }
+        };
+        short = Some((fb, v, bound));
     }
     let rows: u64 = r.long.iter().map(|x| x.1).sum();
     println!("VERIFIED in {:.1} s", t.elapsed().as_secs_f64());
@@ -175,10 +224,16 @@ fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
     println!("bundle    blake3:{}", hex(blake3::hash(&bytes).as_bytes()));
     println!("long      {} units, {rows} derivation rows, checked here", r.long.len());
     match &short {
-        Some((fb, v)) => {
+        Some((fb, v, bound)) => {
             println!("short     {} units, by the succinct proof:", r.short.len());
             say_succinct(fb, v);
-            println!("          (it names them by name; that it checked these declarations' text is not yet bound)");
+            match bound {
+                Some(c) => println!(
+                    "          its {} declarations are the bundle's ({} terms and {} recursor rules compared)",
+                    c.decls, c.terms, c.rules
+                ),
+                None => println!("          (an older proof: it names them by name; that it checked these declarations' text is not bound)"),
+            }
         }
         None => println!("short     none"),
     }
@@ -198,6 +253,22 @@ fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
         println!("builtins  {} (Lean's quotient, no proof)", r.builtins.join(", "));
     }
     Ok(true)
+}
+
+/// Compares the succinct proof's facts about its declarations with the
+/// bundle's declarations.
+fn bound_to_text(
+    b: &Bundle,
+    facts: &[flock_prover::lean_rows::Tuple],
+) -> Result<flock_prover::lean_rows::FactsChecked, String> {
+    let mut env = Env::default();
+    for t in &b.decls {
+        env.absorb(t)?;
+    }
+    let t = cas_lean::bundle::decl_rows(&std::sync::Arc::new(env))?;
+    let text = lean_dump::dump(&t, None, &[0u8; 32], &|_| 0);
+    let rows = flock_prover::lean_rows::Rows::parse(&text)?;
+    flock_prover::lean_rows::check_facts(facts, &rows)
 }
 
 fn say_succinct(b: &LeanBundle, v: &LeanVerified) {

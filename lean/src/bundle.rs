@@ -373,3 +373,22 @@ impl Bundle {
         Ok((b, report))
     }
 }
+
+/// Every declaration of `env` as derivation rows: its type, a definition's
+/// value, and what the reduction rules read of it (a recursor's rules).
+/// What a succinct proof's facts about its declarations are compared with.
+pub fn decl_rows(env: &Arc<Env>) -> Result<crate::Derivation, String> {
+    let e = env.clone();
+    let r = par_map(vec![()], move |_| {
+        let mut b = unit::builder(&e);
+        for i in 0..e.decls.len() {
+            let key = e.key(e.decls[i].name);
+            let d = b.cite(&key).map_err(|x| format!("{}: {x}", e.name(e.decls[i].name)))?;
+            if matches!(e.decls[i].kind, Kind::Def { .. }) {
+                b.value(d);
+            }
+        }
+        Ok(b.t)
+    });
+    r.into_iter().next().unwrap()
+}
