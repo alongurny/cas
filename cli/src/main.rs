@@ -429,7 +429,12 @@ fn run(a: Args) -> Res<()> {
                 sync::push(&*other, s, &remote, name)
             }
             .map_err(e)?;
-            out!("{outcome:?}: {} blobs copied, {} already present", n.blobs, n.present);
+            let what = match outcome {
+                sync::Outcome::UpToDate => "up to date",
+                sync::Outcome::Created => "created",
+                sync::Outcome::FastForward => "fast-forward",
+            };
+            out!("{what}: {} blobs copied, {} already present", n.blobs, n.present);
         }
         Some("gc") => {
             let r = gc::collect_with(s, b3(), a.full).map_err(e)?;

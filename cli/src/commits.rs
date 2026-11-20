@@ -269,7 +269,8 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                     Node::File(_) => files += 1,
                 }
             }
-            out!("{dirs} directories, {files} files");
+            let plural = |n: u64, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+            out!("{}, {}", plural(dirs, "directory", "directories"), plural(files, "file", "files"));
         }
         "notes" => {
             let (_, c) = at()?;
@@ -317,7 +318,8 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 }
                 let parents: Vec<String> = c.parents.keys().map(|p| short(p)).collect();
                 let line = commits::line(s, &c).map_err(e)?;
-                out!("{}  [{}]  {}  {}  {}", short(&k), parents.join(" "), date(c.time), authors[&c.author], line);
+                let head = format!("{}  [{}]  {}  {}", short(&k), parents.join(" "), date(c.time), authors[&c.author]);
+                if line.is_empty() { out!("{head}") } else { out!("{head}  {line}") }
             }
         }
         "ls" => {
@@ -341,7 +343,12 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
                 return Ok(());
             }
             if c.parents.is_empty() {
-                return Err("the commit has no parent".into());
+                // A first commit brings every path it has.
+                for item in walk(s, &after, None) {
+                    let (p, n) = item.map_err(e)?;
+                    out!("{:8} -> {:8} {p}", node_text(&None), node_text(&Some(n)));
+                }
+                return Ok(());
             }
             for p in c.parents.keys() {
                 if c.parents.len() > 1 {
@@ -380,10 +387,14 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             }
             .map_err(e)?;
             match outcome {
-                commits::Outcome::UpToDate => out!("UpToDate"),
-                commits::Outcome::FastForward(k) | commits::Outcome::Done(k) => {
+                commits::Outcome::UpToDate => out!("up to date"),
+                commits::Outcome::FastForward(k) => {
                     commits::advance(s, name, Some(&ours), &k).map_err(|x| format!("{name}: {x}"))?;
-                    out!("Done {}", short(&k));
+                    out!("fast-forward to {}", short(&k));
+                }
+                commits::Outcome::Done(k) => {
+                    commits::advance(s, name, Some(&ours), &k).map_err(|x| format!("{name}: {x}"))?;
+                    out!("{} {}", if cmd == "merge" { "merged" } else { "rebased" }, short(&k));
                 }
                 commits::Outcome::Conflicts(m) => {
                     for c in &m.conflicts {
@@ -414,7 +425,7 @@ pub fn run(a: &Args, s: &dyn Store) -> Res<()> {
             let Some(tip) = &tip else { return Ok(()) };
             for (k, c) in commits::path_log(s, tip, &p).map_err(e)? {
                 let line = commits::line(s, &c).map_err(e)?;
-                out!("{}  {line}", short(&k));
+                if line.is_empty() { out!("{}", short(&k)) } else { out!("{}  {line}", short(&k)) }
             }
         }
         "publish" => {

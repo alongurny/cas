@@ -47,8 +47,8 @@ fn commit_log_diff_checkout_and_sync() {
     assert!(!out.join("README").exists());
 
     // Sync to a second store directory, then over HTTPS to a third.
-    assert!(old(&store, &["push", other.to_str().unwrap()]).starts_with("Created"));
-    assert!(old(&store, &["push", other.to_str().unwrap()]).starts_with("UpToDate"));
+    assert!(old(&store, &["push", other.to_str().unwrap()]).starts_with("created"));
+    assert!(old(&store, &["push", other.to_str().unwrap()]).starts_with("up to date"));
     assert_eq!(old(&other, &["log"]), log);
 
     // Serve a third store under an access policy: anyone reads, alice writes.
@@ -108,7 +108,7 @@ fn commit_log_diff_checkout_and_sync() {
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    assert!(pushed.unwrap().starts_with("Created"));
+    assert!(pushed.unwrap().starts_with("created"));
     // Without the token the same push is denied.
     std::fs::write(work.join("README"), "changed\n").unwrap();
     old(&store, &["commit", w]);
@@ -208,8 +208,11 @@ fn a_history_of_commits() {
     let lines: Vec<&str> = log.lines().collect();
     assert_eq!(lines.len(), 2);
     assert!(lines[0].ends_with("  Dana  add b"), "{log}");
-    assert!(lines[1].ends_with("  Dana  "), "{log}");
+    assert!(lines[1].ends_with("  Dana"), "{log}");
     assert_eq!(cas(&store, &["diff"]), "raw      -> raw      src/lib.rs\n");
+    let first = lines[1].split_whitespace().next().unwrap();
+    let all = cas(&store, &["-n", first, "diff"]);
+    assert!(all.lines().all(|l| l.starts_with("-        -> ")) && all.contains("src/lib.rs"), "{all}");
     let shown = cas(&store, &["diff", "--annotated"]);
     assert!(shown.starts_with("# add b\n"), "{shown}");
     assert!(shown.contains("# b is new\n| +fn b() {}\n"), "{shown}");
@@ -258,7 +261,7 @@ fn commit_histories_stash_notes_summary_and_last_modified() {
     assert_eq!(cas(&store, &["last-modified"]), format!("{a}  README\n{b}  src\n"));
     assert_eq!(cas(&store, &["last-modified", "src"]), format!("{b}  src/lib.rs\n"));
     assert!(cas(&store, &["log"]).starts_with(&format!("{b}  [{a}]  ")));
-    assert_eq!(cas(&store, &["summary"]), "1 directories, 2 files\n");
+    assert_eq!(cas(&store, &["summary"]), "1 directory, 2 files\n");
 
     // Two stashes, put back newest first; the last pop removes stash/main.
     std::fs::remove_file(work.join("README")).unwrap();
@@ -291,15 +294,15 @@ fn commit_histories_push_pull_merge_and_rebase() {
     let (w, o) = (work.to_str().unwrap(), other.to_str().unwrap());
 
     cas(&store, &["--author", "Dana", "commit", w]);
-    assert!(cas(&store, &["push", o]).starts_with("Created"));
-    assert!(cas(&store, &["push", o]).starts_with("UpToDate"));
+    assert!(cas(&store, &["push", o]).starts_with("created"));
+    assert!(cas(&store, &["push", o]).starts_with("up to date"));
 
     // The other store moves on; this one pulls it.
     let work2 = tmp.path().join("work2");
     cas(&other, &["checkout", work2.to_str().unwrap()]);
     std::fs::write(work2.join("a"), "2\n").unwrap();
     cas(&other, &["--author", "Eli", "commit", work2.to_str().unwrap()]);
-    assert!(cas(&store, &["pull", o]).starts_with("FastForward"));
+    assert!(cas(&store, &["pull", o]).starts_with("fast-forward"));
     assert_eq!(cas(&store, &["log"]).lines().count(), 2);
     assert_eq!(cas(&store, &["path-log", "a"]).lines().count(), 2);
     assert_eq!(cas(&store, &["path-log", "b"]).lines().count(), 1);
@@ -313,16 +316,16 @@ fn commit_histories_push_pull_merge_and_rebase() {
     let refused =
         Command::new(env!("CARGO_BIN_EXE_cas")).arg("--store").arg(&store).args(["push", o]).output().unwrap();
     assert!(!refused.status.success());
-    assert!(cas(&store, &["-H", "theirs", "pull", o, "--as", "main"]).starts_with("Created"));
+    assert!(cas(&store, &["-H", "theirs", "pull", o, "--as", "main"]).starts_with("created"));
     let before = cas(&store, &["log"]);
-    assert!(cas(&store, &["--author", "Dana", "merge", "theirs"]).starts_with("Done"));
+    assert!(cas(&store, &["--author", "Dana", "merge", "theirs"]).starts_with("merged"));
     let merged = cas(&store, &["log"]);
     assert_eq!(merged.lines().count(), 5, "{merged}");
     cas(&store, &["reset", w]);
     assert_eq!(std::fs::read_to_string(work.join("a")).unwrap(), "4\n");
     assert_eq!(std::fs::read_to_string(work.join("b")).unwrap(), "3\n");
-    assert!(cas(&store, &["push", o]).starts_with("FastForward"));
-    assert!(cas(&store, &["--author", "Dana", "merge", "theirs"]).starts_with("UpToDate"));
+    assert!(cas(&store, &["push", o]).starts_with("fast-forward"));
+    assert!(cas(&store, &["--author", "Dana", "merge", "theirs"]).starts_with("up to date"));
     assert!(!cas(&store, &["merge-base", "latest", &before.lines().next().unwrap()[..12]]).is_empty());
 
     // A rebase replays a side history's commit on top, keeping its author.

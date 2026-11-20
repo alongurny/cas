@@ -212,7 +212,7 @@ pub const COMMANDS: &[Cmd] = &[
             READ,
             &["diff", "diff --annotated"],
             "what the commit changed",
-            "Prints each changed path with its format before and after, from each parent. With \
+            "Prints each changed path with its format before and after, from each parent; a first commit shows every path it has as new. With \
              --annotated, prints the line diff with the notes of the step.",
         )
     },

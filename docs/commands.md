@@ -141,7 +141,7 @@ cas diff --annotated
 
 What the commit changed.
 
-Prints each changed path with its format before and after, from each parent. With --annotated, prints the line diff with the notes of the step.
+Prints each changed path with its format before and after, from each parent; a first commit shows every path it has as new. With --annotated, prints the line diff with the notes of the step.
 
 - `--annotated`: print the line diff with the notes of the step
 
