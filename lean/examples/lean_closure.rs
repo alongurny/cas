@@ -7,7 +7,7 @@
 use cas_lean::import::{Env, Kind};
 use std::collections::{HashMap, HashSet};
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().collect();
     let env = Env::parse(&std::fs::read_to_string(&args[1]).unwrap()).unwrap();
     let out_file = args.iter().position(|a| a == "--out").map(|i| args[i + 1].clone());

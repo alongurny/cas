@@ -469,7 +469,7 @@ fn stats(env: &Arc<Env>, every: usize) {
     }
 }
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args[1] == "--stats" {
         let text = std::fs::read_to_string(&args[2]).expect("an export");
