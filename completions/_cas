@@ -3,10 +3,10 @@
 _cas_histories() {
     local -a names
     names=(${(f)"$(command cas __histories 2>/dev/null)"})
-    compadd -a names
+    compadd "$@" -a names
 }
 _cas_word_or_file() {
-    compadd -- "$@"
+    _wanted words expl word compadd -- "$@"
     _files
 }
 _cas() {
@@ -58,9 +58,9 @@ _cas() {
         'access:the access policy of a served store'
         'lean:store Lean declarations, prove them and check the proofs'
         'signup:make an account, sign in, or change the password'
-        'login:make an account, sign in, or change the password'
-        'whoami:make an account, sign in, or change the password'
-        'password:make an account, sign in, or change the password'
+        'login:sign in to the forge'
+        'whoami:the account you are signed in as'
+        'password:change the password of your account'
         'account:show or edit an account'
         'token:the tokens of the account'
         'org:organizations and their members'
@@ -88,7 +88,7 @@ _cas() {
                 status) _arguments $general '--diff[print the line diff, ready to add notes to]' '*: :_files' ;;
                 reset) _arguments $general '*: :_files' ;;
                 clean) _arguments $general '*: :_files' ;;
-                stash) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '1: :_cas_word_or_file pop' '*: :_files' ;;
+                stash) _arguments $general '--author[who makes the commit (default $CAS_AUTHOR, else $USER)]:<name>:' '1: :{_cas_word_or_file pop}' '*: :_files' ;;
                 watch) _arguments $general '*: :_files' ;;
                 checkout) _arguments $general '*: :_files' ;;
                 sparse) _arguments $general '*: :_files' ;;
@@ -102,10 +102,10 @@ _cas() {
                 publish) _arguments $general '--tag[the semantic version of the release, such as 1.4.0]:<version>:' '--change[what the release changes since the one before\: breaking, feature, patch or security]:<kind>:(breaking feature patch security)' '--changelog[the text that says what the release changes]:<file>:_files' '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' ;;
                 import-git) _arguments $general '--as[the name of the history on the other side, or of the release history]:<name>:_cas_histories' '*: :_files' ;;
                 gc) _arguments $general '--full[walk the whole store, not only what came since the last full run]' ;;
-                annotated) _arguments $general '1: :_cas_word_or_file make show' '*: :_files' ;;
+                annotated) _arguments $general '1: :{_cas_word_or_file make show}' '*: :_files' ;;
                 serve) _arguments $general '--cert[the PEM certificate chain to serve with]:<file>:_files' '--key[the PEM private key to serve with]:<file>:_files' '--open[serve to anyone, without an access policy]' '--max-body[the largest request body accepted (default 64 MiB)]:<bytes>:' '--prove[prove each history of commits as it moves (needs cas-prove)]' '*: :_files' ;;
                 access) _arguments $general '1: :(show user grant revoke)' ;;
-                lean) _arguments $general '--root[the Lake project whose Lean exports the modules]:<lake-dir>:_files' '--env[the Lean environment to work in (default\: default)]:<name>:' '--closure[also everything the named declarations rest on]' '--budget[give up on a declaration after this many rows (default 2000000)]:<rows>:' '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' '--failed[list the declarations that were not proved]' '--slowest[list the n declarations that took longest to prove]:<n>:' '1: :_cas_word_or_file import prove check show axioms report' '*: :_files' ;;
+                lean) _arguments $general '--root[the Lake project whose Lean exports the modules]:<lake-dir>:_files' '--env[the Lean environment to work in (default\: default)]:<name>:' '--closure[also everything the named declarations rest on]' '--budget[give up on a declaration after this many rows (default 2000000)]:<rows>:' '--all[every commit the commit reaches, not only the commit itself]' '--quiet[print the outcome only, not a line for each proof]' '--failed[list the declarations that were not proved]' '--slowest[list the n declarations that took longest to prove]:<n>:' '1: :{_cas_word_or_file import prove check show axioms report}' '*: :_files' ;;
                 account) _arguments $general '1: :(edit)' ;;
                 token) _arguments $general '1: :(list make revoke)' ;;
                 org) _arguments $general '1: :(create member)' ;;

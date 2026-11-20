@@ -446,9 +446,9 @@ pub const COMMANDS: &[Cmd] = &[
         "make an account, sign in, or change the password",
         "Passwords are read from standard input. login writes the token to --token-file, or prints it.",
     ),
-    cmd("login", FORGE, &[], "", ""),
-    cmd("whoami", FORGE, &[], "", ""),
-    cmd("password", FORGE, &[], "", ""),
+    cmd("login", FORGE, &[], "sign in to the forge", ""),
+    cmd("whoami", FORGE, &[], "the account you are signed in as", ""),
+    cmd("password", FORGE, &[], "change the password of your account", ""),
     Cmd {
         subs: &["edit"],
         ..cmd(
@@ -943,7 +943,8 @@ fn takes(c: &Cmd, o: &Opt) -> bool {
 pub fn completions(shell: &str) -> Res<String> {
     let listed: Vec<&Cmd> = COMMANDS.iter().collect();
     let names: Vec<&str> = listed.iter().map(|c| c.name).collect();
-    let about = |c: &Cmd| find(c.name).map_or("", |c| c.about);
+    // A command explained with the one before it may still say what it does itself.
+    let about = |c: &Cmd| if c.about.is_empty() { find(c.name).map_or("", |c| c.about) } else { c.about };
     match shell {
         "fish" => {
             let mut out = String::from(
@@ -1081,7 +1082,7 @@ pub fn completions(shell: &str) -> Res<String> {
             let mut out = String::from(
                 "#compdef cas\n# Completions of cas for zsh, printed by `cas completions zsh`.\n\
                  _cas_histories() {\n    local -a names\n    names=(${(f)\"$(command cas __histories 2>/dev/null)\"})\n    \
-                 compadd -a names\n}\n_cas_word_or_file() {\n    compadd -- \"$@\"\n    _files\n}\n_cas() {\n    local -a general commands\n    general=(\n",
+                 compadd \"$@\" -a names\n}\n_cas_word_or_file() {\n    _wanted words expl word compadd -- \"$@\"\n    _files\n}\n_cas() {\n    local -a general commands\n    general=(\n",
             );
             let spec = |o: &Opt| {
                 let arg = if o.value.is_empty() {
@@ -1112,7 +1113,7 @@ pub fn completions(shell: &str) -> Res<String> {
             for c in &listed {
                 let mut parts: Vec<String> = c.opts.iter().map(|f| spec(option(f))).collect();
                 if !c.subs.is_empty() && c.words == Words::Path {
-                    parts.push(format!("'1: :_cas_word_or_file {}'", c.subs.join(" ")));
+                    parts.push(format!("'1: :{{_cas_word_or_file {}}}'", c.subs.join(" ")));
                 } else if !c.subs.is_empty() {
                     parts.push(format!("'1: :({})'", c.subs.join(" ")));
                 }
