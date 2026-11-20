@@ -281,6 +281,93 @@ The claim of a declaration is that its own check passes given the rows of
 the declarations it cites, and its axioms are the union of the cited
 declarations' axioms, plus itself when it is an axiom.
 
+## Soundness
+
+What acceptance means, rule by rule, against two known references: Lean's
+kernel (`src/kernel/type_checker.cpp` and `level.cpp` at Lean v4.25.0) and
+the typing judgement of Lean4Lean (`Lean4Lean/Theory/Typing/Basic.lean`,
+commit 67f63b0, `VEnv.IsDefEq`), which formalizes Lean's type theory.
+
+**Reading.** `Infer(G, e, T)` stands for `G ⊢ e : T` and `Eq(G, a, b)` for
+`G ⊢ a ≡ b : A` for some `A` (Lean4Lean's `IsDefEqU`). Lean4Lean's
+judgement is typed; `Eq` here is not, like the kernel's `is_def_eq`, which
+also compares two terms without a type. So the claim is the kernel's own:
+every rule is a step the kernel takes, and an accepted derivation is a run
+of those steps with the search left out. What the kernel needs to be sound
+(that `is_def_eq` on two well-typed terms only relates terms equal in the
+theory, which rests on unique typing and subject reduction), this checker
+needs too, and no more. Lean4Lean proves unique typing up to one `sorry`
+(`Theory/Typing/UniqueTyping.lean`) and does not yet prove the kernel's
+`is_def_eq` sound, so neither this checker nor Lean's kernel has a finished
+proof; both rest on the same open step.
+
+**Typing rules**, each the kernel function it follows and the Lean4Lean
+rule it gives:
+
+| rule | kernel | Lean4Lean |
+|---|---|---|
+| sort | `infer_type_core`, Sort case (l. 289), with `check_level` (l. 76) | `sortDF` |
+| fvar | `infer_fvar` (l. 84) | `bvar` (locally nameless: an fvar is a context entry) |
+| const | `infer_constant` (l. 92): level count, `check_level`, `instantiate_type_lparams` | `constDF` |
+| app | `infer_app` (l. 163): function type made a pi, argument type checked | `appDF` with `defeqDF` |
+| lam | `infer_lambda` (l. 116) | `lamDF` |
+| pi | `infer_pi` (l. 134), universe `mk_imax` (`level.cpp` l. 112) | `forallEDF` (the `mk_imax` form is `≈` to `imax u v`) |
+| let | `infer_let` (l. 198) | none: translated away |
+| lit | `infer_type_core`, Lit case (`lit_type`) | none: translated away (see below) |
+| proj | `infer_proj` (l. 221), including its proposition checks | none: translated away |
+
+**Equality rules**:
+
+| rule | kernel | Lean4Lean |
+|---|---|---|
+| refl, symm, trans | `is_def_eq_core` (l. 1047) is an equivalence | `symm`, `trans`, typing as refl |
+| beta, zeta | `whnf_core` (l. 401), App and Let cases | `beta` |
+| delta | `lazy_delta_reduction_step` (l. 875) | `extra` (a definition's unfolding is an environment defeq) |
+| congruence | `is_def_eq_app` (l. 806), `is_def_eq_binding` (l. 681), `lazy_delta_proj_reduction` (l. 999), `is_def_eq` on levels (l. 710) | `appDF`, `lamDF`, `forallEDF`, `constDF`, `sortDF` |
+| iota, quot | `reduce_recursor` (l. 333): `quot_reduce_rec`, `inductive_reduce_rec` | `extra` |
+| proj-ctor | `reduce_proj` (l. 377) | `extra` (iota), after translation |
+| eta | `try_eta_expansion_core` (l. 769) | `eta` |
+| eta-struct | `try_eta_struct_core` (l. 784) | `extra` |
+| proof irrelevance | `is_def_eq_proof_irrel` (l. 827) | `proofIrrel` |
+| unit-like | `is_def_eq_unit_like` (l. 1035) | `extra` |
+| nat literals | `reduce_nat` (l. 600), `nat_lit_to_constructor` (`inductive.cpp` l. 1191) | `extra` (iota), after translation |
+| string literals | `string_lit_to_constructor` (`inductive.cpp` l. 1200) | after translation |
+
+Lean4Lean's terms (`VExpr`) have no `let`, literals or projections: a
+`let` is its body with the value put in, a literal is the constructor
+application it stands for, and a projection is the structure's recursor
+applied to it; Lean4Lean's `extra` is the environment's list of
+definitional equalities, among them each recursor's rules and the
+quotient's. The rules for these three kinds of term are the kernel's, and
+that they agree with the translated terms is the translation's part.
+
+**Where this checker accepts more than the kernel.** Two places, both
+sound in the theory:
+
+- Level equivalence is decided by value (equal under every assignment of
+  the parameters), which is Lean4Lean's `≈` (`VLevel.Equiv`). The kernel's
+  `is_equivalent` (`level.cpp` l. 503) normalizes and can miss an
+  equivalence, so the kernel accepts less.
+- A derivation's steps need not be the ones the kernel's search would take,
+  and may pass through terms the kernel never builds. Each step is still
+  one of the rules above.
+
+**Level parameters in range.** The kernel checks them in `check_level`
+(sort and constant levels); the native checker does too
+(`params_in_range`, `lean/src/check.rs`). The circuit does not, and need
+not: the declarations themselves are read from their text, which refuses
+an undeclared parameter (`Env::level`), so the statement's types and
+values have every parameter in range. A parameter out of range can then
+occur only inside the derivation, and Lean4Lean's `IsDefEq.instL`
+(`Theory/Typing/Lemmas.lean`, proved) turns a derivation into one at any
+levels in range by replacing each such parameter by `zero`, which leaves
+the statement's terms unchanged.
+
+**What the circuit adds.** The circuit checks the same rules as the native
+checker (the rule census of `lean_tower rules` lists none assumed on the
+shuffle paper's cone). That the two agree rule by rule rests on the code
+and on refusal tests (`flock-prover/tests-data`), not on a proof.
+
 ## Not covered
 
 `native_decide` rests on `Lean.ofReduceBool`, an axiom saying compiled code

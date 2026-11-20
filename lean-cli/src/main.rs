@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! cas-lean verify BUNDLE [KEY ...]
+//! cas-lean keygen KEY ...
 //! cas-lean prove [--long] [--assume A,B,...] [--export FILE] [--project DIR]
 //!                [--work DIR] [--out DIR] MODULE THEOREM
 //! ```
@@ -81,6 +82,7 @@ const TOOLS: [(&str, fn()); 4] = [
 
 const USAGE: &str = "usage:
   cas-lean verify BUNDLE [KEY ...]
+  cas-lean keygen KEY ...
   cas-lean prove [--long] [--assume A,B,...] [--export FILE] [--project DIR]
                  [--work DIR] [--out DIR] MODULE THEOREM";
 
@@ -100,6 +102,7 @@ fn main() -> ExitCode {
     let r = match args.first().map(String::as_str) {
         Some("verify") if args.len() >= 2 => verify(&args[1], &args[2..]),
         Some("prove") => prove(&args[1..]),
+        Some("keygen") if args.len() >= 2 => keygen(&args[1..]),
         Some("census") if args.len() == 2 => census(&args[1]),
         Some("facts-selftest") if args.len() == 2 => facts_selftest(&args[1]),
         Some("--version") => {
@@ -151,6 +154,16 @@ fn census(cone: &str) -> Result<bool, String> {
     let (all, stmt, decls) = g.statement_census();
     println!("{all} term rows, {stmt} reached from types, non-theorem values and rules; {decls} declarations");
     Ok(true)
+}
+
+/// Makes each key again from this program and the key's parameters (a
+/// short proof of empty leaves, minutes), and says whether it is the same.
+fn keygen(keys: &[String]) -> Result<bool, String> {
+    let vks = keys
+        .iter()
+        .map(|p| LeanVk::from_bytes(&fs::read(p).map_err(|e| format!("{p}: {e}"))?).map_err(|e| format!("{p}: {e}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(lean_tower::keygen_main(&vks))
 }
 
 fn verify(bundle: &str, keys: &[String]) -> Result<bool, String> {
@@ -277,6 +290,7 @@ fn say_succinct(b: &LeanBundle, v: &LeanVerified) {
     for (f, _) in &v.vks {
         println!("          key blake3:{}", hex(f));
     }
+    println!("          (keys are trusted by fingerprint; `cas-lean keygen KEY` makes one again from this program)");
 }
 
 /// Verifies a succinct proof (a flock Lean bundle) against its keys: those
@@ -483,12 +497,21 @@ fn prove(args: &[String]) -> Result<bool, String> {
     if !have("info.rows") {
         r.say("derivations as rows");
         fs::create_dir_all(work.join("rows")).map_err(|e| e.to_string())?;
+        // Two runs: with `--info` the dump writes only the declarations'
+        // info and no derivations.
+        r.tool(
+            "cas-lean-dump",
+            &work,
+            &[&w("export.txt"), &w("rows"), "--order", &w("cone.txt"), "--names", &w("cone.txt")],
+            &[],
+            "dump.log",
+        )?;
         r.tool(
             "cas-lean-dump",
             &work,
             &[&w("export.txt"), &w("rows"), "--order", &w("cone.txt"), "--names", &w("cone.txt"), "--info", &w("info.rows.part")],
             &[],
-            "dump.log",
+            "info.log",
         )?;
         fs::rename(work.join("info.rows.part"), work.join("info.rows")).map_err(|e| e.to_string())?;
     }
